@@ -1,0 +1,230 @@
+# 项目配置：当前目标代码库为 mall-swarm
+repo:
+  path: "D:/Development/工作区Workspace/工作区-人工智能/代码知识工程/被测试的项目/mall-swarm"
+  version: 1.0.0
+  language: java
+  modules:
+    - id: mall-admin
+      business_domains: [后台管理域]
+    - id: mall-portal
+      business_domains: [移动端商城域]
+    - id: mall-search
+      business_domains: [搜索域]
+    - id: mall-auth
+      business_domains: [认证域]
+    - id: mall-gateway
+      business_domains: [网关域]
+    - id: mall-common
+      business_domains: []
+    - id: mall-mbg
+      business_domains: []
+    - id: mall-monitor
+      business_domains: []
+    - id: mall-demo
+      business_domains: []
+    - id: config
+      business_domains: []
+
+domain:
+  business_domains:
+    - id: 后台管理域
+      name: 后台管理域
+      capability_ids: [商品管理, 订单管理, 会员管理, 促销管理]
+    - id: 移动端商城域
+      name: 移动端商城域
+      capability_ids: [首页, 商品展示, 购物车, 订单流程]
+    - id: 搜索域
+      name: 搜索域
+      capability_ids: [商品搜索, ES索引]
+    - id: 认证域
+      name: 认证域
+      capability_ids: [登录, 鉴权, Token]
+    - id: 网关域
+      name: 网关域
+      capability_ids: [路由, 限流, 鉴权转发]
+  capabilities:
+    - id: 商品管理
+      name: 商品管理
+      path_pattern: "/product/**"
+    - id: 订单管理
+      name: 订单管理
+      path_pattern: "/order/**"
+    - id: 会员管理
+      name: 会员管理
+      path_pattern: "/member/**"
+    - id: 促销管理
+      name: 促销管理
+      path_pattern: "/promotion/**"
+    - id: 商品搜索
+      name: 商品搜索
+      path_pattern: "/search/**"
+    - id: 首页
+      name: 首页
+      path_pattern: "/home/**"
+    - id: 商品展示
+      name: 商品展示
+      path_pattern: "/product/list/**"
+    - id: 购物车
+      name: 购物车
+      path_pattern: "/cart/**"
+    - id: 订单流程
+      name: 订单流程
+      path_pattern: "/order/process/**"
+    - id: ES索引
+      name: ES索引
+      path_pattern: "/es/**"
+    - id: 登录
+      name: 登录
+      path_pattern: "/login/**"
+    - id: 鉴权
+      name: 鉴权
+      path_pattern: "/auth/**"
+    - id: Token
+      name: Token
+      path_pattern: "/token/**"
+    - id: 路由
+      name: 路由
+      path_pattern: "/route/**"
+    - id: 限流
+      name: 限流
+      path_pattern: "/rate/**"
+    - id: 鉴权转发
+      name: 鉴权转发
+      path_pattern: "/gateway/auth/**"
+  terms:
+    - id: 商品
+      name: 商品
+      synonyms: [product, Product, Pms]
+    - id: 订单
+      name: 订单
+      synonyms: [order, Order, Oms]
+    - id: 用户
+      name: 用户
+      synonyms: [user, User, member, Ums]
+  service_domain_mappings:
+    - service_or_module_id: mall-admin
+      business_domain_ids: [后台管理域]
+      weight: 1.0
+    - service_or_module_id: mall-portal
+      business_domain_ids: [移动端商城域]
+      weight: 1.0
+    - service_or_module_id: mall-search
+      business_domain_ids: [搜索域]
+      weight: 1.0
+    - service_or_module_id: mall-auth
+      business_domain_ids: [认证域]
+      weight: 1.0
+    - service_or_module_id: mall-gateway
+      business_domain_ids: [网关域]
+      weight: 1.0
+    # 额外模块兜底映射：用于让 Ring2 在 Step6 中更“丰富/不稀疏”
+    - service_or_module_id: mall-common
+      business_domain_ids: [后台管理域, 移动端商城域]
+      weight: 0.5
+    - service_or_module_id: mall-mbg
+      business_domain_ids: [后台管理域]
+      weight: 0.5
+    - service_or_module_id: mall-monitor
+      business_domain_ids: [网关域, 后台管理域]
+      weight: 0.5
+    - service_or_module_id: mall-demo
+      business_domain_ids: [后台管理域]
+      weight: 0.5
+    - service_or_module_id: config
+      business_domain_ids: [网关域, 后台管理域]
+      weight: 0.5
+
+structure:
+  extract_cross_service: true
+  java_source_extensions: [".java"]
+
+# 表结构 + 方法-表访问（方法查表 / 表查方法）
+schema:
+  ddl_path: "document/sql/mall.sql"   # 相对 repo.path
+  mapper_glob: "**/mapper/*Mapper.xml"  # 相对 repo.path，MyBatis Mapper XML
+
+knowledge:
+  # 侧栏勾选默认值：方法技术解读 / 业务解读（均需 YAML 中对应能力启用；均为增量续跑、不清空 Weaviate 库）
+  pipeline:
+    include_method_interpretation_build: false
+    include_business_interpretation_build: false
+  # 语义向量：统一通过本地 Ollama embedding 模型（如 bge-m3）生成
+  semantic_embedding:
+    backend: ollama
+    ollama_base_url: "http://127.0.0.1:11434"
+    ollama_model: "bge-m3"
+  graph:
+    backend: neo4j   # 设为 neo4j 时，流水线构建后会将图同步到 Neo4j
+    neo4j_uri: "bolt://localhost:7687"
+    neo4j_user: "neo4j"
+    neo4j_password: "12345678"
+    neo4j_database: "neo4j"
+  vectordb-code:
+    enabled: true
+    backend: weaviate   # 源代码向量库：存放方法代码片段，entity_id 与图谱方法节点一致
+    dimension: 1024
+    weaviate_url: "http://localhost:8080"
+    weaviate_grpc_port: 50051
+    weaviate_api_key: "user-a-key"   # 若 Weaviate 开启 API Key 认证，需与 AUTHENTICATION_APIKEY_ALLOWED_KEYS 中的值一致
+    collection_name: "CodeEntity"
+    # allow_fallback_to_memory: false  # 默认 false：Weaviate 失败时不静默改内存库
+  vectordb-interpret:
+    enabled: true
+    backend: weaviate
+    dimension: 1024
+    weaviate_url: "http://localhost:8080"
+    weaviate_grpc_port: 50051
+    weaviate_api_key: "user-a-key"
+    collection_name: "MethodInterpretation"
+  vectordb-business:
+    enabled: true
+    backend: weaviate
+    dimension: 1024
+    weaviate_url: "http://localhost:8080"
+    weaviate_grpc_port: 50051
+    weaviate_api_key: "user-a-key"
+    collection_name: "BusinessInterpretation"
+  method_interpretation:
+    enabled: true
+    language: zh          # zh | en
+    # LLM：ollama | openai | anthropic（后两者需 pip install -e ".[llm-openai]" 或 llm-anthropic）
+    llm_backend: ollama
+    ollama_base_url: "http://127.0.0.1:11434"
+    ollama_model: "qwen2.5:32b"
+    timeout_seconds: 120
+    max_methods: 2000       # 0 表示全部方法；调试可改为 20
+    # llm_allow_fallback_to_ollama: false  # 默认 false：openai/anthropic 缺依赖时直接报错，不设 true 则不回退 Ollama
+    # openai 示例（可与 ollama 字段并存，仅 llm_backend 切换生效）：
+    # llm_backend: openai
+    # openai_api_key: ""     # 或使用环境变量 OPENAI_API_KEY
+    # openai_base_url: ""    # 留空=官方 API；可填 Azure/转发网关等兼容地址
+    # openai_model: "gpt-4o-mini"
+    # openai_max_tokens: 4096
+    # anthropic 示例：
+    # llm_backend: anthropic
+    # anthropic_api_key: ""  # 或 ANTHROPIC_API_KEY
+    # anthropic_model: "claude-3-5-sonnet-20241022"
+    # anthropic_max_tokens: 8192
+  business_interpretation:
+    enabled: true
+    language: zh
+    llm_backend: ollama
+    ollama_base_url: "http://127.0.0.1:11434"
+    ollama_model: "qwen2.5:32b"
+    timeout_seconds: 180
+    max_classes: 80
+    max_apis: 120
+    max_modules: 10
+  snapshot:
+    save_after_build: false
+  # OWL 本体与推理（可选）
+  ontology:
+    enabled: true
+    export_owl: true
+    export_after_build: true
+    reasoner: builtin   # builtin：传递闭包推理；hermit：需 Java + HermiT
+    write_inferred_to_graph: true
+
+service:
+  host: "0.0.0.0"
+  port: 8000

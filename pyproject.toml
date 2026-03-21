@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knowledge-engineering"
+version = "0.1.0"
+description = "代码解读知识工程 — 基于整体架构设计的 Python 实现"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "pyyaml>=6.0",
+    "javalang>=0.13.0",
+    "networkx>=3.0",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.22.0",
+    "httpx>=0.24.0",
+    "streamlit>=1.28.0",
+    "streamlit-autorefresh>=0.0.6",
+]
+
+[project.optional-dependencies]
+neo4j = ["neo4j>=5.0"]
+vector = ["chromadb>=0.4.0", "sentence-transformers>=2.2.0"]
+owl = ["rdflib>=7.0.0"]
+# 云端 / 第三方 LLM（技术解读、业务解读的 llm_backend）
+llm-openai = ["openai>=1.40.0"]
+llm-anthropic = ["anthropic>=0.34.0"]
+llm = ["openai>=1.40.0", "anthropic>=0.34.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.1.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Streamlit 文案：随 ``app`` 包安装
+[tool.setuptools.package-data]
+"app" = ["resources/*.yaml"]

@@ -1,0 +1,88 @@
+# 界面文案（中文）。后续可并列 strings.en_US.yaml + 语言切换。
+# 流水线工序等运营常改内容建议只改此文件。
+
+app:
+  page_title: "代码知识工程"
+  page_icon: "📚"
+  browser_caption: "数据与触发 → 结构 → 语义 → 知识层 → 检索/影响分析/图谱"
+  main_title: "📚 代码知识工程"
+
+pipeline:
+  interpret_skip_steps:
+    - "① 结构层：解析 AST …（已跳过）"
+    - "② 结构层完成（已跳过）"
+    - "③ 语义层：术语与向量文本 …（已跳过）"
+    - "④ 语义层完成（已跳过）"
+    - "⑤ 清理 Neo4j 与 Weaviate 代码库…（已跳过）"
+    - "⑥ 知识层：构建内存图、写入代码向量、同步 Neo4j …（已跳过）"
+    - "⑦ 知识层与代码向量库已完成（已跳过）"
+
+pipeline_progress:
+  default_progress_label: "进度"
+  tech_phase_title: "技术解读进度"
+  biz_phase_title: "业务解读进度"
+  tech_checklist_heading: "**技术解读清单**"
+  biz_checklist_heading: "**业务解读清单**"
+  steps_heading: "**工序步骤**"
+  refresh_button: "🔄 刷新进度"
+  phase_done_label: "已完成（{total}/{total}）"
+  phase_running_label: "{title}：{done}/{total}"
+  progress_source_prefix: "进度来源"
+  llm_backend_prefix: "LLM 后端："
+  auto_refresh_caption: "💡 进度每 {seconds} 秒自动刷新"
+
+main_content:
+  interpret_error_title: "解读过程发生异常，请查看下方堆栈"
+  status_interpret_running: "解读运行中…"
+  empty_graph_hint: "👆 请先在侧边栏选择配置文件并点击「运行流水线」构建知识图谱；或配置 Neo4j（knowledge.graph.backend: neo4j）后刷新页面，将使用 Neo4j 数据。"
+  neo4j_only_hint: "当前使用 Neo4j 数据（内存图未加载）。如需使用最新构建结果，可在侧边栏重新运行流水线。"
+  step1_title: "① 接入代码 & 构建图谱"
+  step1_config_heading: "当前配置"
+  step1_state_heading: "图谱状态"
+  step2_title: "② 图谱统计 / 系统结构"
+  step4_title: "④ 智能推理：补全间接依赖"
+  step5_title: "⑤ 模式识别：设计模式与架构模式"
+  step6_title: "⑥ 业务总览 / 模块视图"
+
+sidebar:
+  last_pipeline_caption: "上次流水线（进度与工序已保留）"
+  header_config: "配置与构建"
+  config_path_label: "配置文件路径"
+  config_path_help: "相对于项目根的 YAML 路径，如 config/project.yaml"
+  checkbox_interpretation_label: "本次构建包含方法技术解读（增量续跑）"
+  checkbox_interpretation_help: "需启用 method_interpretation + vectordb-interpret。勾选后只对 Weaviate 中尚无记录的方法调 LLM；可配合 max_methods 分批多次跑完。"
+  checkbox_business_label: "本次构建包含业务解读（类 / API / 模块，增量续跑）"
+  checkbox_business_help: "需启用 business_interpretation + vectordb-business。勾选后只对 BusinessInterpretation 中尚无 (实体,level) 的记录调 LLM；可配合 max_classes/max_apis/max_modules 分批续跑。"
+  pipeline_options_caption: "两项勾选相互独立；均不勾选时本轮只更新图谱与代码向量。默认勾选状态来自 `knowledge.pipeline.include_*_build`。"
+  run_pipeline_button: "🔄 运行流水线"
+  interpret_expander_title: "代码未变：仅运行解读（不重建图谱）"
+  interpret_expander_caption: "不清理 Neo4j、不重建内存图、不写代码向量；只根据**已缓存的结构事实**调用 LLM，做方法技术解读与/或业务解读（与完整流水线一样支持增量续跑）。缓存文件：`{cache_hint}`（完整流水线在**结构层完成后**即写入，跑完全程会再覆盖一次；若从未跑过流水线或只用「到结构层为止」，需先至少跑到语义/知识层或自行指定 JSON）。"
+  structure_facts_input_label: "结构事实 JSON 路径（可改）"
+  structure_facts_input_help: "默认与完整流水线写入位置一致；也可指向自行导出的 structure_facts.json"
+  interpret_tech_checkbox: "执行方法技术解读"
+  interpret_biz_checkbox: "执行业务解读"
+  interpret_diag_checkbox: "显示诊断信息（进度回退排查）"
+  interpret_only_button: "⚡ 仅运行解读"
+  status_default_done: "完成"
+  status_pipeline_running: "流水线构建中…"
+  status_interpret_running: "解读运行中…"
+  progress_label_start: "开始"
+  key_count_not_queried: "运行中未查询"
+  tech_progress_sidebar: "技术解读进度：**{done}/{total}**"
+  biz_progress_sidebar: "业务解读进度：**{done}/{total}**"
+  checklist_tech_pending_title: "**技术解读清单（待解读）**"
+  checklist_biz_pending_title: "**业务解读清单（待解读）**"
+  diag_tech_title: "技术解读： 已完成/总数"
+  diag_biz_title: "业务解读： 已完成/总数"
+  diag_line_memory: "内存态:      {value}"
+  diag_line_weaviate: "Weaviate态:  {value}"
+  diag_line_keys: "Weaviate续跑key数: {value}"
+
+step_navigator:
+  steps:
+    - ["step1", "①", "接入代码 & 构建图谱"]
+    - ["step2", "②", "图谱统计 / 系统结构"]
+    - ["step3", "③", "理解代码 & 评估影响"]
+    - ["step4", "④", "智能推理：补全间接依赖"]
+    - ["step5", "⑤", "模式识别：设计模式与架构模式"]
+    - ["step6", "⑥", "业务总览 / 模块视图"]
