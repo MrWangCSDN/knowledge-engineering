@@ -29,12 +29,14 @@ class OntologyBrowser:
         *,
         show_use_for_impact_button: bool = False,
         on_use_for_impact: Optional[Callable[[str], None]] = None,
+        wrap_interpretation_in_expander: bool = True,
     ):
         self._neo4j = neo4j_backend
         self._key_prefix = key_prefix
         self._weaviate_svc = weaviate_svc
         self._show_use_for_impact = show_use_for_impact_button
         self._on_use_for_impact = on_use_for_impact
+        self._wrap_interpretation_in_expander = wrap_interpretation_in_expander
 
     def render(self) -> Optional[str]:
         """
@@ -225,7 +227,11 @@ class OntologyBrowser:
             etype = ((node_detail or {}).get("entity_type") or selected_type or "").lower()
             if etype in INTERP_PANEL_ENTITY_TYPES:
                 InterpretationPanel.render(
-                    nid, etype, node_detail, self._weaviate_svc
+                    nid,
+                    etype,
+                    node_detail,
+                    self._weaviate_svc,
+                    wrap_in_expander=self._wrap_interpretation_in_expander,
                 )
             st.markdown("**出边（该节点 → 其他）**")
             if rels["outgoing"]:

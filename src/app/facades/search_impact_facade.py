@@ -63,6 +63,7 @@ class SearchImpactFacade:
                             self._get_weaviate_svc(),
                             show_use_for_impact_button=True,
                             on_use_for_impact=_on_use_for_impact,
+                            wrap_interpretation_in_expander=False,
                         )
                         browser.render()
                     finally:
