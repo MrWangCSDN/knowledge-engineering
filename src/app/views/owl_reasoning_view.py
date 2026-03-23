@@ -342,11 +342,13 @@ class OwlReasoningView:
                                 st.session_state[SessionKeys.OWL_COMPARE_PREFILL] = b["eid"]
                                 st.session_state[SessionKeys.OWL_DO_COMPARE] = True
                                 st.rerun()
-                        with st.expander(f"因补全新增的可达节点（共 {b['新增']} 个）"):
-                            for nid in b["extra_ids"][:40]:
-                                node = self._graph.get_node(nid)
-                                name = (node or {}).get("name") or nid
-                                st.caption(f"{nid}  |  {name}")
-                            if len(b["extra_ids"]) > 40:
-                                st.caption(f"… 共 {len(b['extra_ids'])} 个，仅展示前 40 个。")
+                        # 注意：当前 benefit overview 外层通常已在 expander 内渲染。
+                        # Streamlit 不允许 expander 嵌套，因此这里改为直接展示（不再套 expander）。
+                        st.caption(f"因补全新增的可达节点（共 {b['新增']} 个，展示前 40 个）")
+                        for nid in b["extra_ids"][:40]:
+                            node = self._graph.get_node(nid)
+                            name = (node or {}).get("name") or nid
+                            st.caption(f"{nid}  |  {name}")
+                        if len(b["extra_ids"]) > 40:
+                            st.caption(f"… 共 {len(b['extra_ids'])} 个，仅展示前 40 个。")
                 st.caption("以上为下游影响范围扩大较多的实体，数据来自当前图谱。")
