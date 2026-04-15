@@ -1,0 +1,28 @@
+加载 structure_facts...
+  实体: 7500, 关系: 14705
+LLM: multi(qwen,minimax)
+/Users/wangshanhe/Desktop/myproject/knowledge-engineering/venv/lib/python3.12/site-packages/weaviate/warnings.py:133: DeprecationWarning: Dep005: You are using weaviate-client version 4.6.7. The latest version is 4.20.5.
+            Consider upgrading to the latest version. See https://weaviate.io/developers/weaviate/client-libraries/python for details.
+  warnings.warn(
+[12:43:15] 拓扑解读：构建调用图...
+[12:43:15] 拓扑解读：有效业务方法 2574 个
+[12:43:15] 拓扑解读：已加载 904 条 DAO SQL
+[12:43:15] 拓扑解读：计算拓扑层级...
+[12:43:15] 拓扑解读：5 层金字塔
+[12:43:15]   L0: 1883 个方法
+[12:43:15]   L1: 458 个方法
+[12:43:15]   L2: 216 个方法
+[12:43:15]   L3: 15 个方法
+[12:43:15]   L4: 2 个方法
+[12:43:18] 拓扑解读：已有解读 2574 条（断点续跑）
+[12:43:18] 拓扑解读：Gate=100%, 最大重试轮次=5
+[12:43:18] ✅ L0: 完成 完成率=100.0%, 永久失败=0, 已解读=1883/1883
+[12:43:18] ✅ L1: 完成 完成率=100.0%, 永久失败=0, 已解读=458/458
+[12:43:18] ✅ L2: 完成 完成率=100.0%, 永久失败=0, 已解读=216/216
+[12:43:18] ✅ L3: 完成 完成率=100.0%, 永久失败=0, 已解读=15/15
+[12:43:18] ✅ L4: 完成 完成率=100.0%, 永久失败=0, 已解读=2/2
+[12:43:18] 拓扑解读完成: {'total_methods': 2574, 'levels': 5, 'already_done': 2574, 'ok': 0, 'fail': 0, 'permanent_failed': {'L0': 0, 'L1': 0, 'L2': 0, 'L3': 0, 'L4': 0}, 'elapsed_minutes': 0.0}
+
+============================================================
+  结果: {'total_methods': 2574, 'levels': 5, 'already_done': 2574, 'ok': 0, 'fail': 0, 'permanent_failed': {'L0': 0, 'L1': 0, 'L2': 0, 'L3': 0, 'L4': 0}, 'elapsed_minutes': 0.0}
+============================================================

@@ -72,12 +72,17 @@ def _ollama_embedding(text: str) -> list[float]:
     """
     通过本地 Ollama /api/embeddings 获取向量。
     返回原始 embedding 列表；调用方负责截断/补零到目标维度。
+
+    Ollama API 格式:
+      请求: {"model": "bge-m3", "prompt": "文本"}
+      响应: {"embedding": [1024个float]}
     """
     cfg = _load_ollama_cfg()
     base = (cfg.get("base_url") or "http://127.0.0.1:11434").rstrip("/")
     model = cfg.get("model") or "bge-m3"
     url = base + "/api/embeddings"
-    payload = {"model": model, "input": text}
+    # Ollama /api/embeddings 使用 "prompt" 参数（非 "input"）
+    payload = {"model": model, "prompt": text}
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -93,10 +98,13 @@ def _ollama_embedding(text: str) -> list[float]:
         return []
     vec = None
     try:
-        # Ollama embeddings 一般返回 {"data": [{"embedding": [...]}], ...}
-        items = js.get("data") or []
-        if items:
-            vec = items[0].get("embedding")
+        # Ollama 返回格式: {"embedding": [float, ...]}
+        vec = js.get("embedding")
+        # 兼容 OpenAI 格式: {"data": [{"embedding": [...]}]}
+        if not vec:
+            items = js.get("data") or []
+            if items and isinstance(items, list):
+                vec = items[0].get("embedding")
     except Exception:
         vec = None
     if not isinstance(vec, list) or not vec:

@@ -27,3 +27,7 @@ env/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# JavaParser Bridge build
+javaparser-bridge/target/
+javaparser-bridge/.idea/

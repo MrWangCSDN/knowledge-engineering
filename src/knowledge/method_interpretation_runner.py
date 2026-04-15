@@ -88,11 +88,11 @@ def _build_method_context(
 
 def _build_prompt(language: str, context_summary: str, signature: str, code_snippet: str) -> str:
     if (language or "zh").lower().startswith("en"):
-        return f"""You are a senior Java engineer. Based on the following CLASS/CALL-CHAIN CONTEXT and METHOD CODE, write a technical interpretation.
+        return f"""You are a senior Java engineer. Based on the following CLASS/CALL-CHAIN CONTEXT and METHOD CODE, produce a two-part interpretation.
 
 Requirements:
-- Use clear English, bullet points where helpful.
-- Cover: responsibility, key logic, and how it fits the call graph. Do not dump the raw code again.
+- Part 1 [Summary]: Keyword-dense, max 50 characters, space-separated key phrases. Include: business actions, involved objects, key technical approaches. No full sentences.
+- Part 2 [Detail]: Full technical interpretation covering responsibility, key logic, and call-graph relationships. Do not dump the raw code again.
 
 ### Context
 {context_summary}
@@ -105,14 +105,18 @@ Requirements:
 {code_snippet[:10000]}
 ```
 
-### Output
-Technical interpretation:"""
+### Output (strict format)
+[Summary] <keyword1 keyword2 keyword3 ...>
+
+[Detail]
+<full technical interpretation>"""
 
     return f"""你是一名资深 Java 工程师。请根据下面的「类与调用链上下文」以及「方法代码」，输出该方法的技术解读。
 
 要求：
-- 使用简体中文，可分条说明。
-- 说明：方法职责、关键逻辑、与上下游调用的关系；不要大段重复粘贴源码。
+- 使用简体中文，分两部分输出。
+- 第一部分 [摘要]：关键词密集，不超过50个中文字符，用空格分隔关键词/短语，不要完整句子。包含：业务动作、涉及对象、关键技术手段。
+- 第二部分 [详情]：完整技术解读，说明方法职责、关键逻辑、与上下游调用的关系；不要大段重复粘贴源码。
 
 ### 上下文
 {context_summary}
@@ -125,8 +129,11 @@ Technical interpretation:"""
 {code_snippet[:10000]}
 ```
 
-### 请输出
-技术解读："""
+### 请输出（严格按以下格式）
+[摘要] <关键词1 关键词2 关键词3 ...>
+
+[详情]
+<完整技术解读>"""
 
 
 def _is_trivial_accessor(method: StructureEntity) -> bool:
@@ -221,8 +228,22 @@ def run_method_interpretations(
         )
         store = MethodInterpretationStoreAdapter(weaviate_store)
 
-        # 已有解读的方法 ID，用于断点续跑时跳过
+        # ── 一致性同步：以 structure_facts 为真相源，清理 Weaviate 中的孤儿 ──
+        valid_method_ids = {e.id for e in all_methods}
         existing_ids = store.list_existing_keys()
+        orphan_ids = existing_ids - valid_method_ids
+        if orphan_ids:
+            runner.step(f"一致性同步：发现 {len(orphan_ids)} 条孤儿解读（方法已不存在），正在清理…")
+            for oid in orphan_ids:
+                try:
+                    uid = weaviate_store._to_uuid(oid + "|interpret")
+                    weaviate_store._get_collection().data.delete_by_id(uid)
+                except Exception:
+                    pass  # 删除失败不影响主流程
+            existing_ids -= orphan_ids
+            runner.step(f"一致性同步：已清理 {len(orphan_ids)} 条孤儿")
+
+        # 已有解读的方法 ID，用于断点续跑时跳过
         total_candidates = len(all_methods)
         already_done = sum(1 for m in all_methods if m.id in existing_ids)
 

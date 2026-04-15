@@ -1,0 +1,52 @@
+加载 structure_facts...
+  实体: 7500, 关系: 14705
+LLM: multi(qwen,minimax)
+/Users/wangshanhe/Desktop/myproject/knowledge-engineering/venv/lib/python3.12/site-packages/weaviate/warnings.py:133: DeprecationWarning: Dep005: You are using weaviate-client version 4.6.7. The latest version is 4.20.5.
+            Consider upgrading to the latest version. See https://weaviate.io/developers/weaviate/client-libraries/python for details.
+  warnings.warn(
+[09:49:28] 拓扑解读：构建调用图...
+[09:49:28] 拓扑解读：有效业务方法 2574 个
+[09:49:28] 拓扑解读：已加载 904 条 DAO SQL
+[09:49:28] 拓扑解读：计算拓扑层级...
+[09:49:28] 拓扑解读：5 层金字塔
+[09:49:28]   L0: 1883 个方法
+[09:49:28]   L1: 458 个方法
+[09:49:28]   L2: 216 个方法
+[09:49:28]   L3: 15 个方法
+[09:49:28]   L4: 2 个方法
+[09:49:30] 拓扑解读：已有解读 2367 条（断点续跑）
+[09:49:30]   L0: 全部已有解读，跳过
+[09:49:30]   L1: 开始解读 116 个方法 (并发 2)
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+  [50/207] L1 50/116
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+  [100/207] L1 100/116
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+  [116/207] L1 116/116
+[10:56:43]   L1: 完成 ok=116 fail=0
+[10:56:43]   L2: 开始解读 81 个方法 (并发 2)
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+  [166/207] L2 50/81
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+  [197/207] L2 81/81
+[12:11:03]   L2: 完成 ok=81 fail=0
+[12:11:03]   L3: 开始解读 9 个方法 (并发 2)
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+MultiProvider: qwen 调用失败 (429=False)，尝试下一个: Request timed out.
+  [206/207] L3 9/9
+[12:33:53]   L3: 完成 ok=9 fail=0
+[12:33:53]   L4: 开始解读 1 个方法 (并发 2)
+  [207/207] L4 1/1
+[12:37:59]   L4: 完成 ok=1 fail=0
+[12:37:59] 拓扑解读完成: {'total_methods': 2574, 'levels': 5, 'already_done': 2367, 'ok': 207, 'fail': 0, 'elapsed_minutes': 168.5}
+
+============================================================
+  结果: {'total_methods': 2574, 'levels': 5, 'already_done': 2367, 'ok': 207, 'fail': 0, 'elapsed_minutes': 168.5}
+============================================================

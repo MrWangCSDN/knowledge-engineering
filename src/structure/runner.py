@@ -1,10 +1,15 @@
-"""结构层入口：从 CodeInputSource 产出 StructureFacts。"""
+"""结构层入口：从 CodeInputSource 产出 StructureFacts。
+
+使用 JavaParser Bridge (Java 1-25+) 解析 Java 源码。
+"""
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from src.models import CodeInputSource, StructureFacts
-from .java_parser import JavaStructureExtractor
+
+_LOG = logging.getLogger(__name__)
 
 
 def run_structure_layer(
@@ -14,22 +19,24 @@ def run_structure_layer(
 ) -> StructureFacts:
     """
     对 source 中的文件做 AST 解析与结构抽取，输出与语言无关的结构事实。
-    当前实现：仅 Java（javalang）；跨服务抽取为可选。
+    使用 JavaParser Bridge（支持 Java 1-25+）。
     """
     language = (source.language or "java").lower()
     if language != "java":
-        # 占位：其他语言可在此扩展
         return StructureFacts(meta={"language": language, "message": "仅支持 java，其余返回空"})
 
-    extractor = JavaStructureExtractor(
-        repo_path=source.repo_path,
+    from .javaparser_bridge import run_javaparser_bridge
+
+    if progress_callback:
+        progress_callback(0, 1, "正在解析代码结构（JavaParser, Java 1-25+）…")
+
+    facts = run_javaparser_bridge(
+        source=source,
         extract_cross_service=extract_cross_service,
+        progress_callback=progress_callback,
     )
-    # JavaStructureExtractor 目前未显式暴露细粒度进度，这里先把「开始结构解析」告知上层，
-    # 后续可在 extractor 内部进一步细化（如按文件数）。
+
     if progress_callback:
-        progress_callback(0, 1, "正在解析代码结构（AST）…")
-    facts = extractor.extract(source)
-    if progress_callback:
-        progress_callback(1, 1, "代码结构解析完成。")
+        progress_callback(1, 1, f"代码结构解析完成（{len(facts.entities)} 实体, {len(facts.relations)} 关系）")
+
     return facts

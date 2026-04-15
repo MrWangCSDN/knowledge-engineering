@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
 
   weaviate:
-    image: cr.weaviate.io/semitechnologies/weaviate:1.28.4
+    image: cr.weaviate.io/semitechnologies/weaviate:1.24.0
     container_name: ke-weaviate
     ports:
       - "8080:8080"   # HTTP

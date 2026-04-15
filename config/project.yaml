@@ -169,7 +169,7 @@ knowledge:
     collection_name: "CodeEntity"
   vectordb-interpret:
     enabled: true
-    backend: memory
+    backend: weaviate
     dimension: 1024
     weaviate_url: "http://localhost:8080"
     weaviate_grpc_port: 50051
@@ -177,7 +177,7 @@ knowledge:
     collection_name: "MethodInterpretation"
   vectordb-business:
     enabled: true
-    backend: memory
+    backend: weaviate
     dimension: 1024
     weaviate_url: "http://localhost:8080"
     weaviate_grpc_port: 50051
@@ -188,7 +188,7 @@ knowledge:
     language: zh
     llm_backend: multi                # 双LLM负载均衡：Qwen + MiniMax 轮询
     timeout_seconds: 90
-    max_methods: 2000
+    max_methods: 0                    # 0 = 全部方法
     max_workers: 8                    # 8路并发，两个平台各分一半
     multi_providers:
       - name: qwen
@@ -227,11 +227,12 @@ knowledge:
         timeout_seconds: 120
   snapshot:
     save_after_build: false
-  # OWL 本体与推理（可选）
+  # OWL 本体与推理（已关闭 — 传递闭包通过 BFS 实时计算，无需预存）
+  # 关闭理由：模式B实时链路解读 + 影响面BFS已覆盖所有场景，OWL推理仅增加2分钟Pipeline耗时和百万级冗余边
   ontology:
-    enabled: true
-    export_owl: true
-    export_after_build: true
+    enabled: false
+    export_owl: false
+    export_after_build: false
     reasoner: builtin   # builtin：传递闭包推理；hermit：需 Java + HermiT
     write_inferred_to_graph: true
 
