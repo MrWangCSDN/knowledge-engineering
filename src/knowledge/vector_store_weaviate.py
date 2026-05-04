@@ -71,11 +71,18 @@ class WeaviateVectorStore(BaseWeaviateStore):
             }
             coll.data.insert(
                 properties=props,
-                vector=vec,
+                # Weaviate 1.24+ named vectors：必须用 dict 形式 {"default": [...]}
+                # 老的 list 形式会被 server 静默忽略（vector 字段不存）
+                vector={"default": vec},
                 uuid=self._to_uuid(entity_id),
             )
         except Exception:
-            pass
+            import logging
+            logging.getLogger(__name__).warning(
+                "Weaviate vectordb-code 单条写入失败 (entity=%s)",
+                entity_id[:50] if entity_id else "?",
+                exc_info=True,
+            )
 
     def add_many(self, items: list[tuple[str, list[float]]]) -> None:
         try:
@@ -91,11 +98,16 @@ class WeaviateVectorStore(BaseWeaviateStore):
                             "entity_type": "",
                             "code_snippet": "",
                         },
-                        vector=vec[: self._dim],
+                        # Weaviate 1.24+ named vectors：dict 形式
+                        vector={"default": vec[: self._dim]},
                         uuid=self._to_uuid(eid + str(i)),
                     )
         except Exception:
-            pass
+            import logging
+            logging.getLogger(__name__).warning(
+                "Weaviate vectordb-code 批量写入失败 (count=%d)", len(items),
+                exc_info=True,
+            )
 
     def size(self) -> int:
         try:

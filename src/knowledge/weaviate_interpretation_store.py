@@ -113,12 +113,13 @@ class WeaviateMethodInterpretStore(BaseWeaviateStore):
         }
         vec = vector[: self._dim]
         try:
-            coll.data.insert(properties=props, vector=vec, uuid=uid)
+            # Weaviate 1.24+ named vectors：dict 形式 {"default": [...]}
+            coll.data.insert(properties=props, vector={"default": vec}, uuid=uid)
             return True, True
         except Exception as e:
             if "already exists" in str(e).lower() or "422" in str(e):
                 try:
-                    coll.data.replace(uuid=uid, properties=props, vector=vec)
+                    coll.data.replace(uuid=uid, properties=props, vector={"default": vec})
                     return True, False
                 except Exception as e2:
                     logging.getLogger(__name__).warning(
