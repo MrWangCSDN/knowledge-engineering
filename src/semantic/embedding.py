@@ -26,6 +26,20 @@ import threading
 # 导入 Path：定位项目根 + 读 config/project.yaml
 from pathlib import Path
 
+# 自动加载项目根的 .env，让 DASHSCOPE_API_KEY 等 secret 不必每次 source
+# 这样 ``python -m src.pipeline.cli`` 直接跑也能拿到 .env 中的 key
+# 失败（包未装 / .env 不存在）静默忽略，行为与原"读 os.environ"一致
+try:
+    # 延迟 import：python-dotenv 在 [auth] extras 中已装，但其它环境可能没有
+    from dotenv import load_dotenv  # type: ignore
+    _project_root = Path(__file__).resolve().parents[2]
+    _env_file = _project_root / ".env"
+    if _env_file.exists():
+        # override=False：已有的环境变量优先（systemd EnvironmentFile / shell export 不被覆盖）
+        load_dotenv(_env_file, override=False)
+except Exception:
+    pass
+
 # 导入 Optional：类型注解
 from typing import Optional
 
