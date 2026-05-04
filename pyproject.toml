@@ -31,6 +31,9 @@ llm = ["openai>=1.40.0", "anthropic>=0.34.0"]
 auth = [
   "python-jose[cryptography]>=3.3,<4",
   "passlib[bcrypt]>=1.7,<2",
+  # passlib 1.7.4 内部用 216-byte 探针检测 bcrypt wrap-bug，bcrypt 5.x 强制 72 byte 上限会抛 ValueError
+  # 锁 bcrypt < 5 直到 passlib 升级或我们换成直接用 bcrypt
+  "bcrypt>=4.0,<5",
   "python-multipart>=0.0.9",
   "sqlalchemy[asyncio]>=2.0,<3",
   "asyncmy>=0.2.10",
