@@ -33,6 +33,10 @@ env/
 .DS_Store
 Thumbs.db
 
+# SQLite dev databases (alembic testing, local experiments)
+*.db
+_alembic_dev.db
+
 # JavaParser Bridge build
 javaparser-bridge/target/
 javaparser-bridge/.idea/
