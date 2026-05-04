@@ -18,6 +18,11 @@ dist/
 venv/
 env/
 
+# 本地 .env（含密钥，永远不进 git）
+.env
+.env.local
+.env.*.local
+
 # IDE
 .idea/
 .vscode/
