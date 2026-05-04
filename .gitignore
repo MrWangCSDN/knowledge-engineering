@@ -28,6 +28,11 @@ env/
 .DS_Store
 Thumbs.db
 
+# 环境变量与 secrets（仅 .env.example 进 git；真实 .env 含 API key 严禁提交）
+.env
+.env.local
+.env.*.local
+
 # JavaParser Bridge build
 javaparser-bridge/target/
 javaparser-bridge/.idea/
