@@ -101,6 +101,8 @@ def cookie_settings(remember_me: bool) -> dict:
         "secure": os.getenv("KE_COOKIE_SECURE", "true").lower() == "true",
         "samesite": os.getenv("KE_COOKIE_SAMESITE", "strict").lower(),
         "domain": os.getenv("KE_COOKIE_DOMAIN") or None,
-        "path": "/api/auth",
+        # cookie path 跟 router 挂载路径绑定：直接 :8000/auth → "/auth"，
+        # 经 nginx /api/* 反代时 → "/api/auth"
+        "path": os.getenv("KE_COOKIE_PATH", "/api/auth"),
         "max_age": refresh_ttl_seconds(remember_me),
     }

@@ -117,9 +117,11 @@ async def me(user: User = Depends(get_current_user)) -> MeResponse:
 @router.post("/logout", response_model=LogoutResponse)
 async def logout(response: Response) -> LogoutResponse:
     """清 refresh cookie；前端同时清内存 access_token。"""
+    # path 必须与 cookie_settings() 中保持一致
+    cookie_path = sec.cookie_settings(remember_me=False)["path"]
     response.delete_cookie(
         key="refresh_token",
-        path="/api/auth",
+        path=cookie_path,
         samesite="strict",
     )
     return LogoutResponse(ok=True)
