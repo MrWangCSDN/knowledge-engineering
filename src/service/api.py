@@ -12,6 +12,20 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.context import AppContext, get_app_context
 from src.knowledge import KnowledgeGraph
+from src.service.auth_dependencies import get_current_user
+from src.service.auth_models import User
+from src.service.auth_router import router as auth_router
+
+# load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
+try:
+    from pathlib import Path
+    from dotenv import load_dotenv
+    # 优先读 .env.local（开发覆盖），再读 .env
+    _root = Path(__file__).resolve().parents[2]
+    load_dotenv(_root / ".env.local", override=False)
+    load_dotenv(_root / ".env", override=False)
+except ImportError:
+    pass
 
 
 def set_global_graph(g: KnowledgeGraph) -> None:
@@ -51,6 +65,7 @@ app = FastAPI(
     version="0.1.0",
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.include_router(auth_router)
 
 
 @app.get("/health")
@@ -61,6 +76,7 @@ def health(ctx: AppContext = Depends(get_app_context)) -> dict:
 @app.get("/search")
 def search(
     ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
     q: str = Query(..., description="名称或关键词"),
     entity_type: Optional[str] = Query(None, description="筛选实体类型: class, method, Service, BusinessDomain 等"),
     mode: str = Query("name", description="name=按名称模糊检索, semantic=按语义相似检索（需启用向量库）"),
@@ -79,6 +95,7 @@ def search(
 @app.get("/impact")
 def impact(
     ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
     entity_id: str = Query(..., description="实体 ID，如 class://xxx 或 method://xxx"),
     direction: str = Query("down", description="down=被谁调用/依赖, up=依赖了谁"),
     max_depth: int = Query(50, ge=1, le=200),
@@ -93,14 +110,21 @@ def impact(
 
 
 @app.get("/subgraph/service/{service_id}")
-def subgraph_service(service_id: str, ctx: AppContext = Depends(get_app_context)) -> dict[str, Any]:
+def subgraph_service(
+    service_id: str,
+    ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     """按服务/模块获取子图（用于前端图谱可视化）。"""
     g = _graph_http(ctx)
     return g.subgraph_for_service(service_id)
 
 
 @app.get("/stats")
-def stats(ctx: AppContext = Depends(get_app_context)) -> dict[str, Any]:
+def stats(
+    ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     """图谱统计。"""
     g = _graph_http(ctx)
     out = {"nodes": g.node_count(), "edges": g.edge_count()}
@@ -182,6 +206,7 @@ def get_neo4j_backend_optional():
 @app.get("/calls/callees")
 def get_callees(
     ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
     class_name: str = Query(..., description="类名"),
     method_name: str = Query(..., description="方法名"),
 ) -> dict[str, Any]:
@@ -197,6 +222,7 @@ def get_callees(
 @app.get("/calls/callers")
 def get_callers(
     ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
     class_name: str = Query(..., description="类名"),
     method_name: str = Query(..., description="方法名"),
 ) -> dict[str, Any]:
@@ -212,6 +238,7 @@ def get_callers(
 @app.post("/knowledge/ontology/run")
 def run_ontology(
     ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
     export_owl: bool = Query(True, description="是否导出 OWL"),
     reasoner: str = Query("builtin", description="builtin=传递闭包, hermit=需 Java+HermiT"),
     write_inferred_to_graph: bool = Query(True, description="是否将推理边写回图"),
@@ -241,6 +268,7 @@ def run_ontology(
 @app.post("/knowledge/load_snapshot")
 def load_snapshot(
     ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
     snapshot_dir: str = Query(..., description="快照目录路径"),
 ) -> dict[str, Any]:
     """从磁盘加载知识图谱快照，替换当前图。"""
@@ -259,6 +287,7 @@ def load_snapshot(
 @app.get("/qa")
 def qa(
     ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
     q: str = Query(..., description="自然语言问题"),
     top_k: int = Query(10, ge=1, le=50, description="返回检索条数"),
 ) -> dict[str, Any]:
@@ -309,7 +338,11 @@ def _doc_service_body(g: KnowledgeGraph, service_id: str) -> dict[str, Any]:
 
 
 @app.get("/doc/service/{service_id}")
-def doc_service(service_id: str, ctx: AppContext = Depends(get_app_context)) -> dict[str, Any]:
+def doc_service(
+    service_id: str,
+    ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     """生成单个服务/模块的说明文档（名称、包含的类/方法数、关联业务域）。"""
     return _doc_service_body(_graph_http(ctx), service_id)
 
@@ -337,7 +370,11 @@ def _doc_domain_body(g: KnowledgeGraph, domain_id: str) -> dict[str, Any]:
 
 
 @app.get("/doc/domain/{domain_id}")
-def doc_domain(domain_id: str, ctx: AppContext = Depends(get_app_context)) -> dict[str, Any]:
+def doc_domain(
+    domain_id: str,
+    ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     """生成单个业务域的说明文档（名称、关联能力与术语、涉及的服务）。"""
     return _doc_domain_body(_graph_http(ctx), domain_id)
 
@@ -345,6 +382,7 @@ def doc_domain(domain_id: str, ctx: AppContext = Depends(get_app_context)) -> di
 @app.get("/doc/generate")
 def doc_generate(
     ctx: AppContext = Depends(get_app_context),
+    _user: User = Depends(get_current_user),
     scope: str = Query("all", description="all | service | domain"),
 ) -> dict[str, Any]:
     """生成模块/服务/业务域级别的文档列表（用于批量导出）。"""
