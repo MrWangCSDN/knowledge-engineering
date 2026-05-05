@@ -18,6 +18,11 @@ dist/
 venv/
 env/
 
+# 本地 .env（含密钥，永远不进 git）
+.env
+.env.local
+.env.*.local
+
 # IDE
 .idea/
 .vscode/
@@ -28,10 +33,9 @@ env/
 .DS_Store
 Thumbs.db
 
-# 环境变量与 secrets（仅 .env.example 进 git；真实 .env 含 API key 严禁提交）
-.env
-.env.local
-.env.*.local
+# SQLite dev databases (alembic testing, local experiments)
+*.db
+_alembic_dev.db
 
 # JavaParser Bridge build
 javaparser-bridge/target/
