@@ -31,3 +31,9 @@ Thumbs.db
 # JavaParser Bridge build
 javaparser-bridge/target/
 javaparser-bridge/.idea/
+
+# Claude Code
+.claude/
+run_capability_analysis.py
+src/ir/
+test_pipeline_smoke.py
