@@ -10,5 +10,11 @@
 """
 
 from src.service.qa_engine.retriever import QARetriever, RetrievedContext
+from src.service.qa_engine.synthesizer import QASynthesizer, SynthesizedAnswer
 
-__all__ = ["QARetriever", "RetrievedContext"]
+__all__ = [
+    "QARetriever",
+    "RetrievedContext",
+    "QASynthesizer",
+    "SynthesizedAnswer",
+]
