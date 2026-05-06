@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.service.db import Base               # noqa: E402
 from src.service import auth_models            # noqa: F401, E402  让 Base.metadata 看到 User
+from src.service import db_models_homepage    # noqa: F401, E402  让 Base.metadata 看到首页 5 张表
 
 config = context.config
 if config.config_file_name is not None:
