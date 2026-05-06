@@ -15,6 +15,7 @@ from src.knowledge import KnowledgeGraph
 from src.service.auth_dependencies import get_current_user
 from src.service.auth_models import User
 from src.service.auth_router import router as auth_router
+from src.service.project_router import router as project_router
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
 try:
@@ -66,6 +67,7 @@ app = FastAPI(
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(auth_router)
+app.include_router(project_router)
 
 
 @app.get("/health")
