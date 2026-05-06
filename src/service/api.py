@@ -16,6 +16,7 @@ from src.service.auth_dependencies import get_current_user
 from src.service.auth_models import User
 from src.service.auth_router import router as auth_router
 from src.service.project_router import router as project_router
+from src.service.qa_router import router as qa_router
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
 try:
@@ -68,6 +69,37 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(auth_router)
 app.include_router(project_router)
+app.include_router(qa_router)
+
+
+@app.on_event("startup")
+async def init_qa_engine() -> None:
+    """启动时初始化 QA 引擎（注入到 app.state）。
+
+    跨仓依赖：retriever 需要 BusinessInterpretationStore + KnowledgeGraph，
+    synthesizer 需要 LLM provider — 都来自 knowledge-engineering 主仓。
+
+    v1 暂时延迟初始化：如果导入主仓代码失败（开发期/单测），先把 state 留空。
+    qa_router 在 explain 路由里检查 None → 503，不影响其他路由。
+    """
+    if hasattr(app.state, "qa_retriever") and app.state.qa_retriever is not None:
+        return  # 测试已经手动注入
+    try:
+        from src.service.qa_engine import QARetriever, QASynthesizer
+        # TODO(W4 末): 接通主仓 BusinessInterpretationStore + KnowledgeGraph + LLMProviderFactory
+        # 当前先 None，等真实组件接入
+        app.state.qa_retriever = None
+        app.state.qa_synthesizer = None
+        # 占位提示：未来 enable 时改为
+        #   business_store = BusinessInterpretationStore(...)
+        #   graph = get_app_context().get_graph()
+        #   llm = LLMProviderFactory.get_default()
+        #   app.state.qa_retriever = QARetriever(business_store=business_store, graph=graph)
+        #   app.state.qa_synthesizer = QASynthesizer(llm_provider=llm)
+        _ = QARetriever, QASynthesizer  # 抑制 unused import 警告
+    except Exception:
+        app.state.qa_retriever = None
+        app.state.qa_synthesizer = None
 
 
 @app.get("/health")
