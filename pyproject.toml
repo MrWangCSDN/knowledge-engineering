@@ -45,6 +45,12 @@ dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.1.0"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# 默认跳过 e2e 标记的测试（需要真实 LLM + Weaviate + 数据）；
+# 显式跑：pytest -m e2e
+addopts = "-m 'not e2e'"
+markers = [
+    "e2e: 端到端测试 — 需要真实 LLM provider + Weaviate + 真实 project 数据",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
