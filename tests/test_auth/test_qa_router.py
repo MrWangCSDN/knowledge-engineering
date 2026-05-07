@@ -1,4 +1,4 @@
-"""验证 /api/projects/{pid}/qa/explain SSE 路由。
+"""验证 /projects/{pid}/qa/explain SSE 路由。
 
 mock 掉 retriever / synthesizer，关注路由层逻辑：
   - 工程不存在 → 404
@@ -119,7 +119,7 @@ async def seed_indexing_project(session_maker):
 def test_explain_404_project_not_found(client):
     token = _login(client)
     r = client.post(
-        "/api/projects/nonexistent/qa/explain",
+        "/projects/nonexistent/qa/explain",
         headers=_auth(token),
         json={"question": "x"},
     )
@@ -129,7 +129,7 @@ def test_explain_404_project_not_found(client):
 def test_explain_409_project_indexing(client, seed_indexing_project):
     token = _login(client)
     r = client.post(
-        f"/api/projects/{seed_indexing_project}/qa/explain",
+        f"/projects/{seed_indexing_project}/qa/explain",
         headers=_auth(token),
         json={"question": "x"},
     )
@@ -138,7 +138,7 @@ def test_explain_409_project_indexing(client, seed_indexing_project):
 
 def test_explain_requires_auth(client, seed_ready_project):
     r = client.post(
-        f"/api/projects/{seed_ready_project}/qa/explain",
+        f"/projects/{seed_ready_project}/qa/explain",
         json={"question": "x"},
     )
     assert r.status_code == 401
@@ -147,7 +147,7 @@ def test_explain_requires_auth(client, seed_ready_project):
 def test_explain_validates_question_not_empty(client, seed_ready_project):
     token = _login(client)
     r = client.post(
-        f"/api/projects/{seed_ready_project}/qa/explain",
+        f"/projects/{seed_ready_project}/qa/explain",
         headers=_auth(token),
         json={"question": ""},
     )
@@ -159,7 +159,7 @@ def test_explain_validates_question_not_empty(client, seed_ready_project):
 def test_explain_returns_sse_content_type(client, seed_ready_project):
     token = _login(client)
     r = client.post(
-        f"/api/projects/{seed_ready_project}/qa/explain",
+        f"/projects/{seed_ready_project}/qa/explain",
         headers=_auth(token),
         json={"question": "存款开户"},
     )
@@ -171,7 +171,7 @@ def test_explain_sse_events_in_order(client, seed_ready_project):
     token = _login(client)
     with client.stream(
         "POST",
-        f"/api/projects/{seed_ready_project}/qa/explain",
+        f"/projects/{seed_ready_project}/qa/explain",
         headers=_auth(token),
         json={"question": "存款开户"},
     ) as r:
@@ -196,7 +196,7 @@ async def test_explain_persists_user_and_assistant_messages(session_maker, seed_
 
     with client.stream(
         "POST",
-        f"/api/projects/{seed_ready_project}/qa/explain",
+        f"/projects/{seed_ready_project}/qa/explain",
         headers=_auth(token),
         json={"question": "存款开户的设计逻辑"},
     ) as r:

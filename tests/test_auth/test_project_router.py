@@ -1,4 +1,4 @@
-"""端到端测试 /api/projects 路由（FastAPI TestClient + 内存 SQLite）。
+"""端到端测试 /projects 路由（FastAPI TestClient + 内存 SQLite）。
 
 跟 test_router.py 同款 pattern：每个测试用临时 in-memory DB，
 seed 一个 admin 用户用来做带授权的请求。
@@ -84,19 +84,19 @@ async def seed_project(session_maker):
     return "deposit-system"
 
 
-# ───────── GET /api/projects ─────────
+# ───────── GET /projects ─────────
 
 def test_list_projects_empty(client):
     """无工程 → projects: []。"""
     token = _login_as(client, "admin")
-    r = client.get("/api/projects", headers=_auth(token))
+    r = client.get("/projects", headers=_auth(token))
     assert r.status_code == 200
     assert r.json() == {"projects": []}
 
 
 def test_list_projects_returns_data(client, seed_project):
     token = _login_as(client, "admin")
-    r = client.get("/api/projects", headers=_auth(token))
+    r = client.get("/projects", headers=_auth(token))
     assert r.status_code == 200
     body = r.json()
     assert len(body["projects"]) == 1
@@ -110,30 +110,30 @@ def test_list_projects_returns_data(client, seed_project):
 
 def test_list_projects_requires_auth(client):
     """无 token → 401。"""
-    r = client.get("/api/projects")
+    r = client.get("/projects")
     assert r.status_code == 401
 
 
-# ───────── GET /api/projects/{id} ─────────
+# ───────── GET /projects/{id} ─────────
 
 def test_get_project_existing(client, seed_project):
     token = _login_as(client, "admin")
-    r = client.get(f"/api/projects/{seed_project}", headers=_auth(token))
+    r = client.get(f"/projects/{seed_project}", headers=_auth(token))
     assert r.status_code == 200
     assert r.json()["id"] == seed_project
 
 
 def test_get_project_404(client):
     token = _login_as(client, "admin")
-    r = client.get("/api/projects/no-such", headers=_auth(token))
+    r = client.get("/projects/no-such", headers=_auth(token))
     assert r.status_code == 404
 
 
-# ───────── POST /api/projects ─────────
+# ───────── POST /projects ─────────
 
 def test_create_project_admin_success(client):
     token = _login_as(client, "admin")
-    r = client.post("/api/projects", headers=_auth(token), json={
+    r = client.post("/projects", headers=_auth(token), json={
         "id": "loan-system",
         "name": "贷款系统",
         "repo_url": "git@github.com:org/loan.git",
@@ -147,7 +147,7 @@ def test_create_project_admin_success(client):
 def test_create_project_non_admin_forbidden(client):
     """普通用户不能创建。"""
     token = _login_as(client, "bob")
-    r = client.post("/api/projects", headers=_auth(token), json={
+    r = client.post("/projects", headers=_auth(token), json={
         "id": "loan-system",
         "name": "贷款系统",
     })
@@ -157,7 +157,7 @@ def test_create_project_non_admin_forbidden(client):
 def test_create_project_duplicate_id(client, seed_project):
     """重名 → 409。"""
     token = _login_as(client, "admin")
-    r = client.post("/api/projects", headers=_auth(token), json={
+    r = client.post("/projects", headers=_auth(token), json={
         "id": seed_project,  # 已存在
         "name": "x",
     })
@@ -167,7 +167,7 @@ def test_create_project_duplicate_id(client, seed_project):
 def test_create_project_invalid_id_pattern(client):
     """非法 id (含大写) → 422 (Pydantic 校验)。"""
     token = _login_as(client, "admin")
-    r = client.post("/api/projects", headers=_auth(token), json={
+    r = client.post("/projects", headers=_auth(token), json={
         "id": "DepositSystem",  # 大写不允许
         "name": "x",
     })
@@ -175,5 +175,5 @@ def test_create_project_invalid_id_pattern(client):
 
 
 def test_create_project_requires_auth(client):
-    r = client.post("/api/projects", json={"id": "x", "name": "x"})
+    r = client.post("/projects", json={"id": "x", "name": "x"})
     assert r.status_code == 401

@@ -36,7 +36,7 @@ from src.service.db_models_homepage import (
 from src.service.qa_engine.sse_emitter import stream_qa_answer
 
 
-router = APIRouter(prefix="/api/projects/{project_id}/qa", tags=["qa"])
+router = APIRouter(prefix="/projects/{project_id}/qa", tags=["qa"])
 
 
 # ─── 请求体 ─────────────────────────────────────────────────────────────────

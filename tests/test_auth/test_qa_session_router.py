@@ -1,4 +1,4 @@
-"""验证 /api/projects/{pid}/qa/sessions 系列路由。
+"""验证 /projects/{pid}/qa/sessions 系列路由。
 
   GET    /sessions                 列出当前用户在该工程下的会话（按 updated_at 倒序）
   GET    /sessions/{sid}           会话详情 + 全部消息
@@ -110,14 +110,14 @@ async def seeded_session(session_maker):
 
 def test_list_sessions_empty(client):
     token, _ = _login(client)
-    r = client.get("/api/projects/deposit/qa/sessions", headers=_auth(token))
+    r = client.get("/projects/deposit/qa/sessions", headers=_auth(token))
     assert r.status_code == 200
     assert r.json() == {"sessions": []}
 
 
 def test_list_sessions_with_data(client, seeded_session):
     token, _ = _login(client)
-    r = client.get("/api/projects/deposit/qa/sessions", headers=_auth(token))
+    r = client.get("/projects/deposit/qa/sessions", headers=_auth(token))
     assert r.status_code == 200
     body = r.json()
     assert len(body["sessions"]) == 1
@@ -129,13 +129,13 @@ def test_list_sessions_with_data(client, seeded_session):
 def test_list_sessions_filters_by_user(client, seeded_session):
     """bob 看不到 alice 的会话。"""
     token, _ = _login(client, username="bob")
-    r = client.get("/api/projects/deposit/qa/sessions", headers=_auth(token))
+    r = client.get("/projects/deposit/qa/sessions", headers=_auth(token))
     assert r.status_code == 200
     assert r.json()["sessions"] == []
 
 
 def test_list_sessions_requires_auth(client):
-    r = client.get("/api/projects/deposit/qa/sessions")
+    r = client.get("/projects/deposit/qa/sessions")
     assert r.status_code == 401
 
 
@@ -144,7 +144,7 @@ def test_list_sessions_requires_auth(client):
 def test_get_session_with_messages(client, seeded_session):
     token, _ = _login(client)
     r = client.get(
-        f"/api/projects/deposit/qa/sessions/{seeded_session}",
+        f"/projects/deposit/qa/sessions/{seeded_session}",
         headers=_auth(token),
     )
     assert r.status_code == 200
@@ -159,7 +159,7 @@ def test_get_session_with_messages(client, seeded_session):
 
 def test_get_session_404(client):
     token, _ = _login(client)
-    r = client.get("/api/projects/deposit/qa/sessions/no-such", headers=_auth(token))
+    r = client.get("/projects/deposit/qa/sessions/no-such", headers=_auth(token))
     assert r.status_code == 404
 
 
@@ -167,7 +167,7 @@ def test_get_session_other_user_forbidden(client, seeded_session):
     """bob 拿不到 alice 的会话。"""
     token, _ = _login(client, username="bob")
     r = client.get(
-        f"/api/projects/deposit/qa/sessions/{seeded_session}",
+        f"/projects/deposit/qa/sessions/{seeded_session}",
         headers=_auth(token),
     )
     # 设计上是 404（不暴露存在性），不是 403
@@ -180,7 +180,7 @@ def test_delete_session_cascades_messages(client, seeded_session, session_maker)
     """删 session 应该级联删 message + feedback。"""
     token, _ = _login(client)
     r = client.delete(
-        f"/api/projects/deposit/qa/sessions/{seeded_session}",
+        f"/projects/deposit/qa/sessions/{seeded_session}",
         headers=_auth(token),
     )
     assert r.status_code == 204
@@ -198,7 +198,7 @@ def test_delete_session_cascades_messages(client, seeded_session, session_maker)
 
 def test_delete_session_404(client):
     token, _ = _login(client)
-    r = client.delete("/api/projects/deposit/qa/sessions/no-such", headers=_auth(token))
+    r = client.delete("/projects/deposit/qa/sessions/no-such", headers=_auth(token))
     assert r.status_code == 404
 
 
@@ -206,7 +206,7 @@ def test_delete_other_user_forbidden(client, seeded_session):
     """bob 不能删 alice 的会话。"""
     token, _ = _login(client, username="bob")
     r = client.delete(
-        f"/api/projects/deposit/qa/sessions/{seeded_session}",
+        f"/projects/deposit/qa/sessions/{seeded_session}",
         headers=_auth(token),
     )
     assert r.status_code == 404
@@ -217,7 +217,7 @@ def test_delete_other_user_forbidden(client, seeded_session):
 def test_post_feedback_success(client, seeded_session, session_maker):
     token, _ = _login(client)
     r = client.post(
-        f"/api/projects/deposit/qa/sessions/{seeded_session}/messages/msg_a_1/feedback",
+        f"/projects/deposit/qa/sessions/{seeded_session}/messages/msg_a_1/feedback",
         headers=_auth(token),
         json={"vote": "up", "comment": "答得不错"},
     )
@@ -236,7 +236,7 @@ def test_post_feedback_success(client, seeded_session, session_maker):
 def test_post_feedback_overwrites_existing(client, seeded_session, session_maker):
     """对同一 message 二次 feedback 应该覆盖（不是创建第二条）。"""
     token, _ = _login(client)
-    url = f"/api/projects/deposit/qa/sessions/{seeded_session}/messages/msg_a_1/feedback"
+    url = f"/projects/deposit/qa/sessions/{seeded_session}/messages/msg_a_1/feedback"
     client.post(url, headers=_auth(token), json={"vote": "up"})
     r2 = client.post(url, headers=_auth(token), json={"vote": "down", "comment": "反悔了"})
     assert r2.status_code == 204
@@ -254,7 +254,7 @@ def test_post_feedback_overwrites_existing(client, seeded_session, session_maker
 def test_post_feedback_404_on_unknown_message(client, seeded_session):
     token, _ = _login(client)
     r = client.post(
-        f"/api/projects/deposit/qa/sessions/{seeded_session}/messages/unknown/feedback",
+        f"/projects/deposit/qa/sessions/{seeded_session}/messages/unknown/feedback",
         headers=_auth(token),
         json={"vote": "up"},
     )
@@ -265,7 +265,7 @@ def test_post_feedback_validates_vote(client, seeded_session):
     """vote 只能是 up / down。"""
     token, _ = _login(client)
     r = client.post(
-        f"/api/projects/deposit/qa/sessions/{seeded_session}/messages/msg_a_1/feedback",
+        f"/projects/deposit/qa/sessions/{seeded_session}/messages/msg_a_1/feedback",
         headers=_auth(token),
         json={"vote": "maybe"},  # 非法
     )

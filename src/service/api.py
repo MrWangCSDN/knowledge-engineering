@@ -76,28 +76,26 @@ app.include_router(qa_router)
 async def init_qa_engine() -> None:
     """启动时初始化 QA 引擎（注入到 app.state）。
 
-    跨仓依赖：retriever 需要 BusinessInterpretationStore + KnowledgeGraph，
-    synthesizer 需要 LLM provider — 都来自 knowledge-engineering 主仓。
+    MVP 阶段（W6 第 1 步）：
+      - retriever  使用 StubRetriever（不查 Weaviate / Graph，返回空 context）
+      - synthesizer 使用 DashScopeProvider（通义千问 OpenAI 兼容接口）
 
-    v1 暂时延迟初始化：如果导入主仓代码失败（开发期/单测），先把 state 留空。
-    qa_router 在 explain 路由里检查 None → 503，不影响其他路由。
+    W6 第 2 步会替换 StubRetriever → 真实 QARetriever（接主仓 Weaviate + Graph）。
     """
     if hasattr(app.state, "qa_retriever") and app.state.qa_retriever is not None:
         return  # 测试已经手动注入
+
+    from src.service.qa_engine import QASynthesizer
+    from src.service.qa_engine.stub_retriever import StubRetriever
+    from src.service.qa_engine.llm_dashscope import DashScopeProvider
+
     try:
-        from src.service.qa_engine import QARetriever, QASynthesizer
-        # TODO(W4 末): 接通主仓 BusinessInterpretationStore + KnowledgeGraph + LLMProviderFactory
-        # 当前先 None，等真实组件接入
-        app.state.qa_retriever = None
-        app.state.qa_synthesizer = None
-        # 占位提示：未来 enable 时改为
-        #   business_store = BusinessInterpretationStore(...)
-        #   graph = get_app_context().get_graph()
-        #   llm = LLMProviderFactory.get_default()
-        #   app.state.qa_retriever = QARetriever(business_store=business_store, graph=graph)
-        #   app.state.qa_synthesizer = QASynthesizer(llm_provider=llm)
-        _ = QARetriever, QASynthesizer  # 抑制 unused import 警告
-    except Exception:
+        llm = DashScopeProvider()
+        app.state.qa_retriever = StubRetriever()
+        app.state.qa_synthesizer = QASynthesizer(llm_provider=llm)
+        print(f"[startup] qa_engine ready (model={llm.model})")
+    except Exception as e:
+        print(f"[startup] qa_engine init failed: {e}")
         app.state.qa_retriever = None
         app.state.qa_synthesizer = None
 

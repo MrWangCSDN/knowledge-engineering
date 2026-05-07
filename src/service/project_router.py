@@ -32,7 +32,7 @@ from src.service.project_models import (
 )
 
 
-router = APIRouter(prefix="/api/projects", tags=["projects"])
+router = APIRouter(prefix="/projects", tags=["projects"])
 
 
 # ─── 工具：ORM → Pydantic 转换 ──────────────────────────────────────────────
