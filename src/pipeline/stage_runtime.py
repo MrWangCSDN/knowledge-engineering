@@ -417,6 +417,8 @@ class InterpretationStage:
                 item_completed_callback=ctx.item_completed_callback,
                 item_started_callback=ctx.item_started_callback,
                 interpretation_stats_callback=ctx.interpretation_stats_callback,
+                # v2.0：透传 project_id，写入 Weaviate tenant
+                project_id=ctx.project_id,
             )
         elif ctx.want_interpret and not (ctx.mi_on and ctx.vinterp_on):
             ctx.step_callback("⑦′ 技术解读：已请求执行，但配置未同时启用 method_interpretation 与 vectordb-interpret，已跳过。")

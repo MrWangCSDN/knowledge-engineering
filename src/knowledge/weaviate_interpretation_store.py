@@ -14,6 +14,9 @@ from src.knowledge.base_weaviate_store import BaseWeaviateStore
 from src.knowledge.method_entity_id_normalize import method_entity_id_variants
 
 
+_log = logging.getLogger(__name__)
+
+
 class WeaviateMethodInterpretStore(BaseWeaviateStore):
     """collection：MethodInterpretation 等；method_entity_id ↔ 图谱方法节点。"""
 
@@ -32,6 +35,22 @@ class WeaviateMethodInterpretStore(BaseWeaviateStore):
             dimension=dimension,
             api_key=api_key,
         )
+
+    def _resolve_collection(self, tenant: Optional[str] = None):
+        """
+        v2.0：按 tenant 参数决定使用 Multi-Tenant 视图还是 legacy 全局视图。
+
+        - tenant 非空：调用 .with_tenant(tenant) 返回 tenant-scoped 视图（Multi-Tenancy 路径）。
+        - tenant 为 None：发出 deprecation 警告后返回普通 collection（兼容 v1 旧调用方）。
+        """
+        coll = self._get_collection()
+        if tenant:
+            return coll.with_tenant(tenant)
+        _log.warning(
+            "WeaviateMethodInterpretStore 被调用时未传 tenant 参数；"
+            "v2.0 多租户已启用，无 tenant 的写入属于 deprecated 行为，未来版本将变为必填。"
+        )
+        return coll
 
     def _schema_properties(self) -> list[Any]:
         from weaviate.classes.config import Configure, Property, DataType
@@ -54,6 +73,7 @@ class WeaviateMethodInterpretStore(BaseWeaviateStore):
         method_entity_id: str,
         interpretation_text: str,
         *,
+        tenant: Optional[str] = None,
         class_entity_id: str = "",
         class_name: str = "",
         method_name: str = "",
@@ -62,11 +82,16 @@ class WeaviateMethodInterpretStore(BaseWeaviateStore):
         language: str = "zh",
         related_entity_ids_json: str = "{}",
     ) -> bool:
-        """写入一条解读，成功返回 True，失败返回 False。已存在则 upsert 覆盖。"""
+        """写入一条解读，成功返回 True，失败返回 False。已存在则 upsert 覆盖。
+
+        v2.0：tenant 必填以启用 Multi-Tenancy。
+        None 表示走 legacy 路径（不带 tenant，向后兼容）。新工程必传。
+        """
         ok, _created = self.add_with_created(
             vector=vector,
             method_entity_id=method_entity_id,
             interpretation_text=interpretation_text,
+            tenant=tenant,
             class_entity_id=class_entity_id,
             class_name=class_name,
             method_name=method_name,
@@ -83,6 +108,7 @@ class WeaviateMethodInterpretStore(BaseWeaviateStore):
         method_entity_id: str,
         interpretation_text: str,
         *,
+        tenant: Optional[str] = None,
         class_entity_id: str = "",
         class_name: str = "",
         method_name: str = "",
@@ -95,10 +121,14 @@ class WeaviateMethodInterpretStore(BaseWeaviateStore):
         写入一条解读并返回 (成功, 是否新建)。
         - 成功：insert 或 replace 没报错
         - 是否新建：仅当首次 insert 创建新对象时为 True；若已存在则 replace 为 False
+
+        v2.0：tenant 必填以启用 Multi-Tenancy。
+        None 表示走 legacy 路径（不带 tenant，向后兼容）。新工程必传。
         """
         if not vector or len(vector) < self._dim:
             return False, False
-        coll = self._get_collection()
+        # v2.0：通过 _resolve_collection 选择 tenant-scoped 视图或 legacy 全局视图
+        coll = self._resolve_collection(tenant)
         uid = self._to_uuid(method_entity_id + "|interpret")
         props = {
             "method_entity_id": method_entity_id,
@@ -121,15 +151,17 @@ class WeaviateMethodInterpretStore(BaseWeaviateStore):
                     coll.data.replace(uuid=uid, properties=props, vector=vec)
                     return True, False
                 except Exception as e2:
-                    logging.getLogger(__name__).warning(
-                        "Weaviate 技术解读 replace 失败 (method=%s): %s",
+                    _log.warning(
+                        "Weaviate 技术解读 replace 失败 (method=%s, tenant=%s): %s",
                         method_entity_id[:50] if method_entity_id else "?",
+                        tenant,
                         e2,
                     )
                     return False, False
-            logging.getLogger(__name__).warning(
-                "Weaviate 技术解读写入失败 (method=%s): %s",
+            _log.warning(
+                "Weaviate 技术解读写入失败 (method=%s, tenant=%s): %s",
                 method_entity_id[:50] if method_entity_id else "?",
+                tenant,
                 e,
             )
             return False, False

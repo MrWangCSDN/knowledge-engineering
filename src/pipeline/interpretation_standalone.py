@@ -142,6 +142,7 @@ def run_interpretations_only(
     interpretation_stats_callback: Optional[Callable[[int, int, InterpretPhase], None]] = None,
     structure_facts_repo: StructureFactsRepository | None = None,
     app_context: AppContext | None = None,
+    project_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     不重建图谱、不清 Neo4j、不写代码向量：仅基于已缓存的结构事实跑技术解读与/或业务解读。
@@ -196,6 +197,8 @@ def run_interpretations_only(
             item_completed_callback=_done_tech,
             item_started_callback=_start_tech,
             interpretation_stats_callback=interpretation_stats_callback,
+            # v2.0：透传 project_id，写入 Weaviate tenant
+            project_id=project_id,
         )
     else:
         out["interpretation"] = {"skipped": True, "reason": "未勾选或未启用 method_interpretation/vectordb-interpret"}
@@ -213,6 +216,8 @@ def run_interpretations_only(
             item_completed_callback=_done_biz,
             item_started_callback=_start_biz,
             interpretation_stats_callback=interpretation_stats_callback,
+            # v2.0：透传 project_id，写入 Weaviate tenant
+            project_id=project_id,
         )
     else:
         out["business_interpretation"] = {"skipped": True, "reason": "未勾选或未启用 business_interpretation/vectordb-business"}

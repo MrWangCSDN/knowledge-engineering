@@ -170,6 +170,7 @@ def run_method_interpretations(
     item_completed_callback: Optional[Callable[[str, bool], None]] = None,
     item_started_callback: Optional[Callable[[str, InterpretPhase], None]] = None,
     interpretation_stats_callback: Optional[Callable[[int, int, InterpretPhase], None]] = None,
+    project_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     对每个含 code_snippet 的方法调用 LLM，写入 Weaviate。
@@ -332,6 +333,8 @@ def run_method_interpretations(
                         vec,
                         method_entity_id=m.id,
                         interpretation_text=text,
+                        # v2.0：透传 tenant=project_id，启用 Multi-Tenancy 写入路径
+                        tenant=project_id,
                         class_entity_id=cid,
                         class_name=(m.attributes or {}).get("class_name") or "",
                         method_name=m.name or "",

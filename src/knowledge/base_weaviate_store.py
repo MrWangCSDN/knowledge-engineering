@@ -90,6 +90,12 @@ class BaseWeaviateStore(ABC):
                     vec_index = Configure.VectorIndex.hnsw(distance_metric=VectorDistances.COSINE)
                 except Exception:
                     vec_index = Configure.VectorIndex.hnsw(distance_metric="cosine")  # type: ignore[arg-type]
+                # v2.0：所有 collection 默认启用 Multi-Tenancy（MT），并允许自动创建/激活 tenant
+                mt_config = Configure.multi_tenancy(
+                    enabled=True,
+                    auto_tenant_creation=True,
+                    auto_tenant_activation=True,
+                )
                 try:
                     # v4.10+: Configure.Vectors; v4.4-4.9: vectorizer_config=None + vector_index_config
                     if hasattr(Configure, "Vectors"):
@@ -97,6 +103,7 @@ class BaseWeaviateStore(ABC):
                             name=self._collection_name,
                             vector_config=Configure.Vectors.self_provided(vector_index_config=vec_index),
                             properties=props,
+                            multi_tenancy_config=mt_config,
                         )
                     else:
                         client.collections.create(
@@ -104,6 +111,7 @@ class BaseWeaviateStore(ABC):
                             vectorizer_config=Configure.Vectorizer.none(),
                             vector_index_config=vec_index,
                             properties=props,
+                            multi_tenancy_config=mt_config,
                         )
                 except TypeError:
                     params = inspect.signature(Configure.VectorIndex.hnsw).parameters
@@ -128,6 +136,7 @@ class BaseWeaviateStore(ABC):
                         vectorizer_config=Configure.Vectorizer.none(),
                         vector_index_config=vec_index_cfg,
                         properties=props,
+                        multi_tenancy_config=mt_config,
                     )
             self._client = client
         except Exception:
