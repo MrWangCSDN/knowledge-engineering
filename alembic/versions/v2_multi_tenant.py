@@ -119,8 +119,13 @@ def upgrade() -> None:
     with op.batch_alter_table('projects') as batch:
         # batch.add_column() 给现有表新增一列
         batch.add_column(sa.Column('group_id', sa.String(64), nullable=True))  # 可为空：已有工程不属于任何组
-        # batch.create_foreign_key(约束名, 引用表, 本表列列表, 引用列列表)
-        batch.create_foreign_key('fk_projects_group', 'groups', ['group_id'], ['id'])
+        # batch.create_foreign_key(约束名, 引用表, 本表列列表, 引用列列表, ondelete=策略)
+        # v2.0：删 group 时把 project 的 group_id 置 NULL（不阻塞 group 删除）
+        # 跟 ORM (db_models_groups.py 里 Project.group_id 的 ondelete) 保持一致
+        batch.create_foreign_key(
+            'fk_projects_group', 'groups', ['group_id'], ['id'],
+            ondelete='SET NULL',
+        )
 
     # ─── 5. git_credentials 表新增 owner_user_id 列 ───────────────────────
     # 先加 nullable=True，待后续 Task 把存量凭证关联到用户后，再改为 NOT NULL
