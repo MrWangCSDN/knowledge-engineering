@@ -19,6 +19,7 @@ from src.service.auth_router import router as auth_router
 from src.service.credentials_router import router as credentials_router  # v2.0 user-scoped 凭证路由
 from src.service.group_router import router as group_router              # v2.0 Groups CRUD 路由
 from src.service.project_member_router import router as project_member_router  # v2.0 Project Members CRUD 路由
+from src.service.user_router import router as user_router                      # v2.0 User Management CRUD 路由
 from src.service.project_router import router as project_router
 from src.service.qa_router import router as qa_router
 
@@ -78,6 +79,7 @@ app.include_router(admin_router)
 app.include_router(credentials_router)  # v2.0：用户级凭证 CRUD（/credentials/*）
 app.include_router(group_router)        # v2.0：Groups CRUD（/groups/*）
 app.include_router(project_member_router)  # v2.0：Project Members CRUD（/projects/{pid}/members/*）
+app.include_router(user_router)            # v2.0：User Management CRUD（/admin/users/*）
 
 
 @app.on_event("startup")
