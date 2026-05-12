@@ -77,6 +77,7 @@ def _build_knowledge_ctx(
     progress_callback: Optional[Any],
     step_callback: Callable[[str], None],
     app_context: Optional[AppContext] = None,
+    project_id: Optional[str] = None,
 ) -> KnowledgeStageContext:
     return KnowledgeStageContext(
         structure_facts=structure_facts,
@@ -88,6 +89,8 @@ def _build_knowledge_ctx(
         progress_callback=progress_callback,
         step_callback=step_callback,
         app_context=app_context,
+        # v2.0：多租户 project_id，透传到 KnowledgeStageContext 再到 graph_config
+        project_id=project_id,
     )
 
 
@@ -109,6 +112,7 @@ def _build_interpretation_ctx(
     item_completed_callback: Optional[Any],
     item_started_callback: Optional[Callable[[str, InterpretPhase], None]],
     interpretation_stats_callback: Optional[Callable[[int, int, InterpretPhase], None]],
+    project_id: Optional[str] = None,
 ) -> InterpretationStageContext:
     return InterpretationStageContext(
         structure_facts=structure_facts,
@@ -129,6 +133,8 @@ def _build_interpretation_ctx(
         interpretation_stats_callback=interpretation_stats_callback,
         interp_stats={"skipped": True},
         biz_stats={"skipped": True},
+        # v2.0：多租户 project_id，透传到 InterpretationStage → run_business_interpretations
+        project_id=project_id,
     )
 
 

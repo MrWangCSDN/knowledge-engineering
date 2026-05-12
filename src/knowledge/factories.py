@@ -91,7 +91,9 @@ def _graph_build_neo4j(kwargs: dict[str, Any]) -> GraphBackendProtocol:
     user = kwargs.get("neo4j_user") or "neo4j"
     password = kwargs.get("neo4j_password") or "password"
     database = kwargs.get("neo4j_database") or "neo4j"
-    return Neo4jGraphBackend(uri, user, password, database)
+    # v2.0：从 kwargs 透传 project_id（由 pipeline run_pipeline 通过 GraphBackendFactory.create 注入）
+    project_id = kwargs.get("project_id") or None
+    return Neo4jGraphBackend(uri, user, password, database, project_id=project_id)
 
 
 def _graph_build_memory(_kwargs: dict[str, Any]) -> GraphBackendProtocol:

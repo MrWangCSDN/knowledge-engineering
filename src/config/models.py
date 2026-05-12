@@ -26,6 +26,9 @@ class RepoConfig(BaseModel):
     version: Optional[str] = None
     language: Optional[str] = None
     modules: list[RepoModuleConfig | dict[str, Any]] = Field(default_factory=list)
+    # v2.0：多租户 project_id，写入 Weaviate tenant 与 Neo4j 节点属性。
+    # 未配置时 pipeline 会从 config.repo.project_id 或 run_pipeline(project_id=...) 中取，再 fallback "default"。
+    project_id: Optional[str] = None
 
 
 class StructureConfig(BaseModel):
@@ -270,16 +273,22 @@ class KnowledgeConfig(BaseModel):
             "allow_fallback_to_memory": v.allow_fallback_to_memory,
         }
 
-    def to_graph_dict(self) -> dict[str, Any]:
-        """供 graph 使用的 dict。"""
+    def to_graph_dict(self, project_id: Optional[str] = None) -> dict[str, Any]:
+        """供 graph 使用的 dict。
+
+        v2.0：project_id 可选；若传入则写入 dict，供 _sync_graph_to_neo4j / GraphBackendFactory 透传。
+        """
         g = self.graph
-        return {
+        d: dict[str, Any] = {
             "backend": g.backend,
             "neo4j_uri": g.neo4j_uri,
             "neo4j_user": g.neo4j_user,
             "neo4j_password": g.neo4j_password,
             "neo4j_database": g.neo4j_database,
         }
+        if project_id:
+            d["project_id"] = project_id
+        return d
 
     def to_ontology_dict(self) -> dict[str, Any]:
         """供 ontology 使用的 dict。"""

@@ -97,6 +97,7 @@ def run_pipeline(
     structure_facts_repo: StructureFactsRepository | None = None,
     snapshot_repo: SnapshotRepository | None = None,
     app_context: AppContext | None = None,
+    project_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     执行完整流水线：数据与触发 → 结构 → 语义 → 知识层。
@@ -107,6 +108,11 @@ def run_pipeline(
     include_method_interpretation:
         None 时采用配置 knowledge.pipeline.include_method_interpretation_build；
         True 清空并 LLM 重建技术解读；False 仅重建图谱与代码向量，保留解读库。
+
+    project_id (v2.0):
+        多租户 project_id，写入 Weaviate tenant 与 Neo4j 节点属性。
+        优先级：本参数 > config.repo.project_id > "default"。
+        新工程应在 config YAML 中配置 repo.project_id，或在调用时传入本参数。
     """
     config = load_config(config_path)
     app_ctx = app_context if app_context is not None else AppContext.get()
@@ -116,6 +122,13 @@ def run_pipeline(
     snapshot_repo_impl = snapshot_repo or GraphSnapshotRepository()
 
     from src.pipeline.full_pipeline_orchestrator import FullPipelineScope, execute_full_pipeline_table
+
+    # v2.0：解析有效 project_id（优先级：参数 > config.repo.project_id > "default"）
+    effective_project_id = (
+        project_id
+        or getattr(config.repo, "project_id", None)
+        or "default"
+    )
 
     scope = FullPipelineScope(
         config=config,
@@ -133,5 +146,6 @@ def run_pipeline(
         interpretation_stats_callback=interpretation_stats_callback,
         include_method_interpretation=include_method_interpretation,
         include_business_interpretation=include_business_interpretation,
+        project_id=effective_project_id,
     )
     return execute_full_pipeline_table(scope)

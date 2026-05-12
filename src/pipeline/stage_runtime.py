@@ -64,6 +64,8 @@ class InterpretationStageContext(KnowledgeAwareStageContext):
     interpretation_stats_callback: Optional[Callable[[int, int, InterpretPhase], None]]
     interp_stats: dict[str, Any]
     biz_stats: dict[str, Any]
+    # v2.0：多租户 project_id，透传到 run_business_interpretations(project_id=...)
+    project_id: Optional[str] = None
 
 
 class PipelineStage(Protocol):
@@ -178,6 +180,7 @@ class KnowledgeStageContext(KnowledgeAwareStageContext):
     """知识层上下文。
 
     ``app_context``：图构建完成后 ``set_graph`` 的目标；为 ``None`` 时使用 ``AppContext.get()``。
+    ``project_id``：v2.0 多租户 project_id，透传到 Neo4j 节点属性与 Weaviate tenant。
     """
 
     structure_facts: StructureFacts
@@ -188,6 +191,8 @@ class KnowledgeStageContext(KnowledgeAwareStageContext):
     progress_callback: Optional[Any]
     graph: Optional[KnowledgeGraph] = None
     app_context: Optional[AppContext] = None
+    # v2.0：多租户标识，写入 Neo4j 节点属性与 Weaviate tenant
+    project_id: Optional[str] = None
 
 
 class KnowledgeStage:
@@ -292,7 +297,8 @@ class KnowledgeStage:
             vector_dim=vector_cfg.dimension,
             graph_backend=graph_backend,
             vector_backend=vector_cfg.backend,
-            graph_config=k.to_graph_dict(),
+            # v2.0：project_id 注入 to_graph_dict，由 _sync_graph_to_neo4j 透传到 Neo4jGraphBackend
+            graph_config=k.to_graph_dict(project_id=ctx.project_id),
             vector_config=k.to_vectordb_code_dict(),
             progress_callback=_wrap_graph_progress(ctx.progress_callback),
         )
@@ -433,6 +439,8 @@ class InterpretationStage:
                     item_completed_callback=ctx.item_completed_callback,
                     item_started_callback=ctx.item_started_callback,
                     interpretation_stats_callback=ctx.interpretation_stats_callback,
+                    # v2.0：透传 project_id，写入 Weaviate tenant
+                    project_id=ctx.project_id,
                 )
             except Exception as e:
                 ctx.biz_stats = {"skipped": True, "error": repr(e)}

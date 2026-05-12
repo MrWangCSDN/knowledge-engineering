@@ -11,15 +11,29 @@ def _rel_type(rel: str) -> str:
 
 
 class Neo4jGraphBackend:
-    """Neo4j 图后端：节点标签 Entity，属性 id/entity_type/name/location/module_id；关系类型为 rel_type 值。"""
+    """Neo4j 图后端：节点标签 Entity，属性 id/entity_type/name/location/module_id；关系类型为 rel_type 值。
+
+    v2.0 变更：构造时接受可选 ``project_id``；当 project_id 非空时，
+    add_node / add_edge 会自动把 project_id 写入节点/边的属性，
+    便于多租户场景按 project_id 过滤图数据。
+    """
 
     LABEL = "Entity"
 
-    def __init__(self, uri: str, user: str, password: str, database: str = "neo4j"):
+    def __init__(
+        self,
+        uri: str,
+        user: str,
+        password: str,
+        database: str = "neo4j",
+        project_id: Optional[str] = None,
+    ):
         self._uri = uri
         self._user = user
         self._password = password
         self._database = database
+        # v2.0：project_id 用于多租户写入，None 表示 legacy 模式（单租户）
+        self._project_id = project_id or None
         self._driver = None
         self._ensure_driver()
 
@@ -40,9 +54,10 @@ class Neo4jGraphBackend:
             session.run("MATCH (n:" + self.LABEL + ") DETACH DELETE n")
 
     def add_node(self, nid: str, **attrs: Any) -> None:
-        safe_id = nid.replace("'", "\\'")
-        props = ", ".join(f"n.{k} = ${k}" for k in attrs if attrs[k] is not None)
-        params = {"id": nid, **attrs}
+        # v2.0：当构造时传入了 project_id，自动注入到每个节点的属性中，
+        # 使多租户场景可通过 WHERE n.project_id = $pid 隔离不同项目的图数据。
+        if self._project_id:
+            attrs["project_id"] = self._project_id
         with self._driver.session(database=self._database) as session:
             session.run(
                 f"MERGE (n:{self.LABEL} {{id: $id}}) SET n += $attrs",
@@ -51,6 +66,10 @@ class Neo4jGraphBackend:
 
     def add_edge(self, source_id: str, target_id: str, rel_type: str, **attrs: Any) -> None:
         rtype = _rel_type(rel_type)
+        # v2.0：同 add_node，自动把 project_id 写入关系属性（便于按项目过滤边数据）。
+        edge_attrs: dict[str, Any] = {"rel_type": rel_type, **{k: v for k, v in attrs.items() if v is not None}}
+        if self._project_id:
+            edge_attrs["project_id"] = self._project_id
         with self._driver.session(database=self._database) as session:
             session.run(
                 f"""
@@ -61,7 +80,7 @@ class Neo4jGraphBackend:
                 """,
                 sid=source_id,
                 tid=target_id,
-                attrs={"rel_type": rel_type, **{k: v for k, v in attrs.items() if v is not None}},
+                attrs=edge_attrs,
             )
 
     def has_node(self, nid: str) -> bool:

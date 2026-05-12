@@ -53,6 +53,7 @@ def run_business_interpretations(
     item_completed_callback: Optional[Callable[[str, bool], None]] = None,
     item_started_callback: Optional[Callable[[str, InterpretPhase], None]] = None,
     interpretation_stats_callback: Optional[Callable[[int, int, InterpretPhase], None]] = None,
+    project_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     三层业务解读：
@@ -200,7 +201,10 @@ def run_business_interpretations(
                 prompt = prompt_fn(it)
 
                 def _persist(text: str, vec: list[float], item=it) -> tuple[bool, bool]:
-                    return weaviate_store.add_with_created(vec, **add_kwargs_fn(item, text))
+                    # v2.0：透传 tenant=project_id，启用 Multi-Tenancy 写入路径
+                    return weaviate_store.add_with_created(
+                        vec, tenant=project_id, **add_kwargs_fn(item, text)
+                    )
 
                 return interpret_one_llm_embed_store(
                     runner,

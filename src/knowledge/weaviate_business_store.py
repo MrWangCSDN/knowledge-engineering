@@ -1,9 +1,15 @@
-"""业务解读：独立 Weaviate collection，按 entity_id + level 存业务综述文本 + 向量。"""
+"""业务解读：独立 Weaviate collection，按 entity_id + level 存业务综述文本 + 向量。
+
+v2.0 变更：add / add_with_created / get_by_entity 均支持 keyword-only ``tenant`` 参数，
+启用 Weaviate Multi-Tenancy。省略 tenant 时走 legacy 路径（兼容 v1），并发出 deprecation 警告。
+"""
 from __future__ import annotations
 
 import json
 import logging
 from typing import Any, Optional
+
+_log = logging.getLogger(__name__)
 
 from src.core.weaviate_defaults import (
     DEFAULT_COLLECTION_BUSINESS_INTERPRETATION,
@@ -51,6 +57,22 @@ class WeaviateBusinessInterpretStore(BaseWeaviateStore):
             Property(name="related_entity_ids_json", data_type=DataType.TEXT),
         ]
 
+    def _resolve_collection(self, tenant: Optional[str] = None):
+        """
+        v2.0：按 tenant 参数决定使用 Multi-Tenant 视图还是 legacy 全局视图。
+
+        - tenant 非空：调用 .with_tenant(tenant) 返回 tenant-scoped 视图（Multi-Tenancy 路径）。
+        - tenant 为 None：发出 deprecation 警告后返回普通 collection（兼容 v1 旧调用方）。
+        """
+        coll = self._get_collection()
+        if tenant:
+            return coll.with_tenant(tenant)
+        _log.warning(
+            "WeaviateBusinessInterpretStore 被调用时未传 tenant 参数；"
+            "v2.0 多租户已启用，无 tenant 的写入属于 deprecated 行为，未来版本将变为必填。"
+        )
+        return coll
+
     def add(
         self,
         vector: list[float],
@@ -58,6 +80,7 @@ class WeaviateBusinessInterpretStore(BaseWeaviateStore):
         level: str,
         summary_text: str,
         *,
+        tenant: Optional[str] = None,
         entity_type: str = "",
         business_domain: str = "",
         business_capabilities: str = "",
@@ -65,12 +88,17 @@ class WeaviateBusinessInterpretStore(BaseWeaviateStore):
         context_json: str = "",
         related_entity_ids_json: str = "",
     ) -> bool:
-        """写入一条业务解读，成功返回 True，失败返回 False。已存在则 upsert 覆盖。"""
+        """写入一条业务解读，成功返回 True，失败返回 False。已存在则 upsert 覆盖。
+
+        v2.0：tenant 必填以启用 Multi-Tenancy。
+        None 表示走 legacy 路径（不带 tenant，向后兼容）。新工程必传。
+        """
         ok, _created = self.add_with_created(
             vector=vector,
             entity_id=entity_id,
             level=level,
             summary_text=summary_text,
+            tenant=tenant,
             entity_type=entity_type,
             business_domain=business_domain,
             business_capabilities=business_capabilities,
@@ -87,6 +115,7 @@ class WeaviateBusinessInterpretStore(BaseWeaviateStore):
         level: str,
         summary_text: str,
         *,
+        tenant: Optional[str] = None,
         entity_type: str = "",
         business_domain: str = "",
         business_capabilities: str = "",
@@ -98,10 +127,13 @@ class WeaviateBusinessInterpretStore(BaseWeaviateStore):
         写入一条业务解读并返回 (成功, 是否新建)。
         - 成功：insert 或 replace 没报错
         - 是否新建：仅首次 insert 创建新对象为 True；已存在则 replace 为 False
+
+        v2.0：tenant 必填以启用 Multi-Tenancy。
+        None 表示走 legacy 路径（不带 tenant，向后兼容）。新工程必传。
         """
         if not vector or len(vector) < self._dim:
             return False, False
-        coll = self._get_collection()
+        coll = self._resolve_collection(tenant)
         uid = self._to_uuid(entity_id + "|" + (level or "biz"))
         props = {
             "entity_id": entity_id,
@@ -124,17 +156,19 @@ class WeaviateBusinessInterpretStore(BaseWeaviateStore):
                     coll.data.replace(uuid=uid, properties=props, vector=vec)
                     return True, False
                 except Exception as e2:
-                    logging.getLogger(__name__).warning(
-                        "Weaviate 业务解读 replace 失败 (entity=%s, level=%s): %s",
+                    _log.warning(
+                        "Weaviate 业务解读 replace 失败 (entity=%s, level=%s, tenant=%s): %s",
                         entity_id[:50] if entity_id else "?",
                         level,
+                        tenant,
                         e2,
                     )
                     return False, False
-            logging.getLogger(__name__).warning(
-                "Weaviate 业务解读写入失败 (entity=%s, level=%s): %s",
+            _log.warning(
+                "Weaviate 业务解读写入失败 (entity=%s, level=%s, tenant=%s): %s",
                 entity_id[:50] if entity_id else "?",
                 level,
+                tenant,
                 e,
             )
             return False, False
@@ -146,6 +180,45 @@ class WeaviateBusinessInterpretStore(BaseWeaviateStore):
             from weaviate.classes.query import Filter
 
             coll = self._get_collection()
+            for eid_try in method_entity_id_variants(entity_id):
+                flt = Filter.by_property("entity_id").equal(eid_try)
+                if level:
+                    flt = flt & Filter.by_property("level").equal(level)
+                result = coll.query.fetch_objects(filters=flt, limit=1)
+                for obj in result.objects:
+                    p = obj.properties or {}
+                    return {
+                        "entity_id": p.get("entity_id", eid_try),
+                        "entity_type": p.get("entity_type", ""),
+                        "level": p.get("level", ""),
+                        "summary_text": p.get("summary_text", ""),
+                        "business_domain": p.get("business_domain", ""),
+                        "business_capabilities": p.get("business_capabilities", ""),
+                        "language": p.get("language", ""),
+                        "context_json": p.get("context_json", ""),
+                        "related_entity_ids_json": p.get("related_entity_ids_json", ""),
+                    }
+            return None
+        except Exception:
+            return None
+
+    def get_by_entity_with_tenant(
+        self, entity_id: str, *, tenant: str, level: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """
+        v2.0：在指定 tenant 的视图下按 entity_id（+ 可选 level）查询业务解读。
+        供 Task 20 adapter 及后续多租户读路径使用。
+
+        tenant：Weaviate tenant 名（通常等于 project_id），必填。
+        level：可选，过滤 class / api / module 等。
+        返回 dict 或 None（不存在 / 异常时均返回 None）。
+        """
+        if not entity_id or not self._client:
+            return None
+        try:
+            from weaviate.classes.query import Filter
+
+            coll = self._get_collection().with_tenant(tenant)
             for eid_try in method_entity_id_variants(entity_id):
                 flt = Filter.by_property("entity_id").equal(eid_try)
                 if level:

@@ -39,8 +39,12 @@ def _sync_graph_to_neo4j(
     password: str,
     database: str = "neo4j",
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    project_id: Optional[str] = None,
 ) -> None:
-    """将内存图同步到 Neo4j。progress_callback(current, total, message) 用于前端进度条。"""
+    """将内存图同步到 Neo4j。progress_callback(current, total, message) 用于前端进度条。
+
+    v2.0：project_id 非空时写入每个节点与边的属性，供多租户场景按 project_id 隔离查询。
+    """
     from src.knowledge.factories import GraphBackendFactory
     backend = GraphBackendFactory.create(
         "neo4j",
@@ -48,6 +52,7 @@ def _sync_graph_to_neo4j(
         neo4j_user=user,
         neo4j_password=password,
         neo4j_database=database,
+        project_id=project_id,
     )
     try:
         if progress_callback:
@@ -296,6 +301,8 @@ class KnowledgeGraph:
                     password=gc.get("neo4j_password") or "password",
                     database=gc.get("neo4j_database") or "neo4j",
                     progress_callback=progress_callback,
+                    # v2.0：透传 project_id，由 pipeline 通过 graph_config 注入
+                    project_id=gc.get("project_id") or None,
                 )
                 self._neo4j_sync_status = "ok"
             except Exception as e:

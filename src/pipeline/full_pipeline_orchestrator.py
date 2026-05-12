@@ -42,6 +42,9 @@ class FullPipelineScope:
     interpretation_stats_callback: Optional[Callable[[int, int, InterpretPhase], None]]
     include_method_interpretation: Optional[bool]
     include_business_interpretation: Optional[bool]
+    # v2.0：多租户 project_id，优先从 run_pipeline(project_id=...) 取，
+    # 次选 config.repo.project_id，最终 fallback "default"
+    project_id: Optional[str] = None
 
     # --- 派生（__post_init__）---
     k: Any = field(init=False)
@@ -68,6 +71,12 @@ class FullPipelineScope:
         )
         self.repo_cfg = self.config.repo
         self.struct_cfg = self.config.structure
+        # v2.0：解析有效 project_id（优先级：构造参数 > config.repo.project_id > "default"）
+        if not self.project_id:
+            self.project_id = (
+                getattr(self.repo_cfg, "project_id", None)
+                or "default"
+            )
 
     def step(self, msg: str) -> None:
         if self.step_callback_raw:
@@ -155,6 +164,8 @@ def _segment_knowledge(scope: FullPipelineScope) -> Optional[dict[str, Any]]:
         progress_callback=scope.progress_callback,
         step_callback=scope.step,
         app_context=scope.app_ctx,
+        # v2.0：透传 project_id，写入 Neo4j 节点属性
+        project_id=scope.project_id,
     )
     _execute_stages([KnowledgeStage()], knowledge_ctx)
     scope.graph = knowledge_ctx.graph
@@ -184,6 +195,8 @@ def _segment_interpretation(scope: FullPipelineScope) -> Optional[dict[str, Any]
         item_completed_callback=scope.item_completed_callback,
         item_started_callback=scope.item_started_callback,
         interpretation_stats_callback=scope.interpretation_stats_callback,
+        # v2.0：透传 project_id，写入 Weaviate tenant
+        project_id=scope.project_id,
     )
     _execute_stages([InterpretationStage()], interpret_ctx)
     scope.interp_stats = interpret_ctx.interp_stats
