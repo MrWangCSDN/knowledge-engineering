@@ -55,8 +55,10 @@ def upgrade() -> None:
                   sa.ForeignKey('groups.id', ondelete='RESTRICT'),
                   nullable=True),  # 根 group 为 None，子 group 指向父 ID
         # created_by_user_id: 创建者用户 ID（外键 → users.id）
+        # ondelete='SET NULL'：用户注销后仅将此字段置 NULL，不阻止删除用户（审计留痕，非强依赖）
+        # nullable=True：允许 NULL，与 ondelete='SET NULL' 配合使用（否则 DB 置 NULL 会违反 NOT NULL 约束）
         sa.Column('created_by_user_id', sa.Integer,
-                  sa.ForeignKey('users.id'), nullable=False),
+                  sa.ForeignKey('users.id', ondelete='SET NULL'), nullable=True),
         # server_default=sa.func.now() 表示数据库服务端自动填入当前时间
         # （区别于 Python 层的 default=datetime.now()，server_default 更可靠）
         sa.Column('created_at', sa.DateTime, server_default=sa.func.now(), nullable=False),
@@ -76,8 +78,11 @@ def upgrade() -> None:
                   sa.ForeignKey('groups.id', ondelete='CASCADE'),
                   primary_key=True),  # 复合主键之二
         sa.Column('role', sa.String(16), nullable=False),  # 角色：'reporter' / 'maintainer' / 'owner'
+        # added_by_user_id: 邀请人 ID（外键 → users.id）
+        # ondelete='SET NULL'：邀请人账号注销后置 NULL，不阻止删除用户（此字段仅供审计追溯）
+        # nullable=True：允许 NULL，与 ondelete='SET NULL' 配合（理由同 created_by_user_id）
         sa.Column('added_by_user_id', sa.Integer,
-                  sa.ForeignKey('users.id'), nullable=False),  # 是谁把这个人加进来的
+                  sa.ForeignKey('users.id', ondelete='SET NULL'), nullable=True),  # 是谁把这个人加进来的
         sa.Column('added_at', sa.DateTime, server_default=sa.func.now(), nullable=False),
         # sa.CheckConstraint(SQL表达式, name=约束名) 在数据库层面限制 role 只能是三个值之一
         # 这是 DB 级约束，比 Python 层校验更可靠（防止绕过 API 直接写库）
@@ -90,7 +95,8 @@ def upgrade() -> None:
         # autoincrement=True 表示 MySQL/SQLite 自动递增整数主键
         sa.Column('id', sa.Integer, primary_key=True, autoincrement=True),
         sa.Column('actor_user_id', sa.Integer,
-                  sa.ForeignKey('users.id'), nullable=False),  # 操作者（谁做的）
+                  sa.ForeignKey('users.id', ondelete='SET NULL'),
+                  nullable=True),  # v2.0：用户注销后审计 actor 置 NULL，记录保留（合规存档不可删）
         sa.Column('action', sa.String(64), nullable=False),    # 动作（如 "project.create"）
         sa.Column('resource_type', sa.String(32), nullable=False),  # 资源类型（如 "project"）
         sa.Column('resource_id', sa.String(128), nullable=False),   # 资源 ID

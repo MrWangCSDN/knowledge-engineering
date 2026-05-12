@@ -18,9 +18,6 @@
 # os 模块：操作系统接口，这里用 os.environ 设置/读取环境变量
 import os
 
-# pytest 测试框架
-import pytest
-
 # SQLAlchemy 内省工具：用于检查已存在数据库的表结构、列、索引等
 from sqlalchemy import inspect
 
@@ -113,6 +110,73 @@ def test_migration_v2_creates_tables_and_columns(tmp_path):
         assert 'owner_user_id' in cred_cols, (
             f"git_credentials.owner_user_id 不存在，实际列：{cred_cols}"
         )
+
+        # ── FK 验证 ─────────────────────────────────────────────────────────
+        # get_foreign_keys(表名): 返回外键信息字典列表，每个字典含 'referred_table' 等 key
+        # 集合推导式 {fk['referred_table'] for fk in ...}: 提取所有被引用表名，方便用 in 检查
+
+        # projects → groups 外键（projects.group_id 引用 groups.id）
+        fk_projects = {fk['referred_table'] for fk in insp.get_foreign_keys('projects')}
+        assert 'groups' in fk_projects, "projects → groups FK 未建上"
+
+        # git_credentials → users 外键（git_credentials.owner_user_id 引用 users.id）
+        fk_cred = {fk['referred_table'] for fk in insp.get_foreign_keys('git_credentials')}
+        assert 'users' in fk_cred, "git_credentials → users FK 未建上"
+
+        # group_members 同时有两个 FK：→ users 和 → groups
+        fk_group_members = {fk['referred_table'] for fk in insp.get_foreign_keys('group_members')}
+        assert 'users' in fk_group_members, "group_members → users FK 未建上"
+        assert 'groups' in fk_group_members, "group_members → groups FK 未建上"
+
+        # audit_logs → users 外键（actor_user_id 引用 users.id）
+        fk_audit = {fk['referred_table'] for fk in insp.get_foreign_keys('audit_logs')}
+        assert 'users' in fk_audit, "audit_logs → users FK 未建上"
+
+        # ── Index 验证 ────────────────────────────────────────────────────────
+        # get_indexes(表名): 返回索引信息字典列表，每个字典含 'name' 等 key
+
+        # groups 表：按 parent_group_id 的普通索引
+        idx_groups = {ix['name'] for ix in insp.get_indexes('groups')}
+        assert 'ix_groups_parent' in idx_groups, "ix_groups_parent 索引未建上"
+
+        # audit_logs 表：两个联合索引（actor+时间、资源类型+资源ID）
+        idx_audit = {ix['name'] for ix in insp.get_indexes('audit_logs')}
+        assert 'ix_audit_actor_time' in idx_audit, "ix_audit_actor_time 索引未建上"
+        assert 'ix_audit_resource' in idx_audit, "ix_audit_resource 索引未建上"
+
+    # ── Downgrade round-trip 验证 ──────────────────────────────────────────
+    # 验证 downgrade 能正确清理：3 张新表消失，projects/git_credentials 新列消失
+    # 重新设置环境变量（downgrade 也需要读 KE_DB_URL）
+    os.environ["KE_DB_URL"] = alembic_url
+    try:
+        # command.downgrade(cfg, "-1"): 回退一个版本（即撤销 v2_multi_tenant）
+        # "-1" 是 Alembic 的相对版本表达式，等同于 "向前回退 1 个迁移"
+        command.downgrade(cfg, "-1")
+    finally:
+        # 恢复环境变量
+        if old_url is None:
+            os.environ.pop("KE_DB_URL", None)
+        else:
+            os.environ["KE_DB_URL"] = old_url
+
+    # 重新 inspect，确认 downgrade 清理了所有 v2 的改动
+    with engine.connect() as conn2:
+        # 需要重新 inspect，因为表结构已经变化
+        insp2 = inspect(conn2)
+        tables_after = insp2.get_table_names()
+
+        # 3 张新表应已被删除
+        assert 'groups' not in tables_after, "downgrade 没清掉 groups 表"
+        assert 'group_members' not in tables_after, "downgrade 没清掉 group_members 表"
+        assert 'audit_logs' not in tables_after, "downgrade 没清掉 audit_logs 表"
+
+        # projects.group_id 列应已被删除
+        proj_cols_after = {c['name'] for c in insp2.get_columns('projects')}
+        assert 'group_id' not in proj_cols_after, "downgrade 没清掉 projects.group_id"
+
+        # git_credentials.owner_user_id 列应已被删除
+        cred_cols_after = {c['name'] for c in insp2.get_columns('git_credentials')}
+        assert 'owner_user_id' not in cred_cols_after, "downgrade 没清掉 git_credentials.owner_user_id"
 
     # 释放引擎（关闭所有连接池中的连接）
     engine.dispose()
