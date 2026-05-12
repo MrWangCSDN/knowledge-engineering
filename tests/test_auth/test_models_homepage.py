@@ -21,9 +21,15 @@ def test_project_table_name():
 def test_project_columns():
     cols = {c.name for c in Project.__table__.columns}
     assert cols == {
+        # 基础字段
         "id", "name", "repo_url", "language",
         "status", "pipeline_at", "indexing_progress",
         "created_at", "created_by",
+        # 仓库管理 v1.0 新增
+        "git_url", "git_branch", "git_credential_id",
+        "last_synced_at", "last_synced_commit", "sync_schedule",
+        # v2.0 多租户新增
+        "group_id",  # FK → groups.id，nullable=True，ondelete='SET NULL'
     }
 
 
