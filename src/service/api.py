@@ -232,7 +232,10 @@ def _try_build_real_retriever() -> tuple[Any, Any]:
         )
         # 试探一下连接（调一个轻量查询）
         _ = neo4j_backend.node_count()
-        graph_adapter = Neo4jGraphAdapter(neo4j_backend)
+        # TODO(Task 22): per-request 构造时删除此占位 project_id；
+        # Task 22 改成在 request 处理时按 request.state.project_id 构造 adapter，
+        # 届时 startup 处不再全局构造 Neo4jGraphAdapter。
+        graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id="petclinic")
         _log.info("[startup] Neo4j 连接成功: %s", neo4j_uri)
     except Exception as e:
         _log.warning("[startup] Neo4j 连接失败: %s", e)

@@ -206,8 +206,10 @@ class WeaviateBusinessAdapter:
 class Neo4jGraphAdapter:
     """实现 `qa_engine.retriever.GraphProto`。
 
-    主仓的 `Neo4jGraphBackend` 已经天然有 successors / predecessors 方法，
-    签名和 Protocol 完全一致，所以这层 adapter 其实是"零包装"。
+    v2.0：project_id 现在是必填参数，所有 Cypher 查询都带 project_id WHERE
+    条件，实现多工程数据隔离。不再通过主仓 Neo4jGraphBackend 的 successors /
+    predecessors 方法（它们不知道 project_id），而是直接用 backend._driver
+    发送带隔离过滤的 Cypher。
 
     单独定义类的好处：
       1. 给 Protocol 一个具名实现，方便后续扩展（加 caching / 过滤 / 重试）
@@ -215,23 +217,72 @@ class Neo4jGraphAdapter:
       3. 关闭时统一释放（Neo4jGraphBackend.close 不会自动关）
     """
 
-    def __init__(self, backend: Neo4jGraphBackend) -> None:
+    def __init__(self, backend: Neo4jGraphBackend, project_id: str) -> None:
+        """v2.0：project_id 现在是必填，绑定单工程上下文。
+
+        :param backend: 主仓已初始化好的 Neo4jGraphBackend（含 driver）
+        :param project_id: 工程标识，非空字符串；空值直接拒绝（防止跨租户误查）
+        :raises TypeError: project_id 缺失或为空时抛出
+        """
+        # 空值检查：None 或 "" 都被拒绝，强制调用方显式传 project_id
+        if not project_id:
+            raise TypeError("project_id is required for Neo4jGraphAdapter (v2.0)")
         # 注入已经初始化好的 Neo4j 后端
         self._backend = backend
+        # 保存 project_id，后续所有查询都会带上这个过滤条件
+        self._project_id = project_id
 
     def successors(self, entity_id: str, rel_type: Optional[str] = None) -> list[str]:
-        """下游邻居（method A --calls--> method B 时，A 的 successors 含 B）。"""
-        # 把 None 传给底层完全 OK（底层会跳过 rel_type 过滤）
+        """下游邻居（method A --calls--> method B 时，A 的 successors 含 B）。
+
+        v2.0：直接走 driver 发送带 project_id 的 Cypher，确保只返回
+        同一 project 内的节点，不再委托 backend.successors。
+        """
+        # 用 backend._driver.session() 打开一个会话（上下文管理器，自动 close）
+        # with ... as s: 是 Python 上下文管理器语法，等效于 try/finally close()
         try:
-            return list(self._backend.successors(entity_id, rel_type))
+            with self._backend._driver.session() as s:
+                # Cypher：找到 entity_id + project_id 匹配的起始节点，
+                # 再沿任意关系 [r]-> 找到同 project 的下游节点 b
+                # $eid / $pid / $rel 是 Cypher 参数占位符，防注入且可复用计划缓存
+                result = s.run(
+                    """
+                    MATCH (a:Entity {id: $eid, project_id: $pid})-[r]->(b:Entity)
+                    WHERE b.project_id = $pid
+                      AND ($rel = '' OR type(r) = $rel)
+                    RETURN b.id AS nid
+                    """,
+                    eid=entity_id,
+                    pid=self._project_id,
+                    rel=rel_type or "",  # None 转成 '' 与 Cypher 条件对应
+                )
+                # 把每行的 "nid" 字段取出，组成 list[str] 返回
+                return [row["nid"] for row in result]
         except Exception as e:
             _log.debug("Neo4j successors(%s, %s) 失败: %s", entity_id, rel_type, e)
             return []
 
     def predecessors(self, entity_id: str, rel_type: Optional[str] = None) -> list[str]:
-        """上游邻居（调用方）。"""
+        """上游邻居（调用方）。
+
+        v2.0：与 successors 对称，方向改为 <-[r]-（即找"谁调用了 entity_id"）。
+        同样带 project_id 过滤，防止跨工程返回节点。
+        """
         try:
-            return list(self._backend.predecessors(entity_id, rel_type))
+            with self._backend._driver.session() as s:
+                # Cypher：方向反转 <-[r]-，找上游节点 b
+                result = s.run(
+                    """
+                    MATCH (a:Entity {id: $eid, project_id: $pid})<-[r]-(b:Entity)
+                    WHERE b.project_id = $pid
+                      AND ($rel = '' OR type(r) = $rel)
+                    RETURN b.id AS nid
+                    """,
+                    eid=entity_id,
+                    pid=self._project_id,
+                    rel=rel_type or "",
+                )
+                return [row["nid"] for row in result]
         except Exception as e:
             _log.debug("Neo4j predecessors(%s, %s) 失败: %s", entity_id, rel_type, e)
             return []
