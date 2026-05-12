@@ -149,9 +149,9 @@ def test_migration_v2_creates_tables_and_columns(tmp_path):
     # 重新设置环境变量（downgrade 也需要读 KE_DB_URL）
     os.environ["KE_DB_URL"] = alembic_url
     try:
-        # command.downgrade(cfg, "-1"): 回退一个版本（即撤销 v2_multi_tenant）
-        # "-1" 是 Alembic 的相对版本表达式，等同于 "向前回退 1 个迁移"
-        command.downgrade(cfg, "-1")
+        # 回滚到 v1 head（v2 之前），干净测试 v2_multi_tenant 的 downgrade
+        # 不用 "-1" 因为现在 v2 有 2 个 migrations（v2_multi_tenant + v2b）
+        command.downgrade(cfg, "59e1dde21b76")
     finally:
         # 恢复环境变量
         if old_url is None:
