@@ -99,6 +99,27 @@ class Group(Base):
         nullable=False,
     )
 
+    # ─── 表级约束与索引 ────────────────────────────────────────────────────
+    # __table_args__ 是 SQLAlchemy 约定属性，接受 tuple；Table 选项（dict）放最后
+    # 显式声明索引名 ix_groups_parent 与 migration 保持一致，避免 autogenerate drift
+    __table_args__ = (
+        # 加速"列出某父 group 的子 group"查询（parent_group_id IS NOT NULL 的过滤场景）
+        # 索引名必须与 migration 里 op.create_index('ix_groups_parent', ...) 完全一致
+        Index("ix_groups_parent", "parent_group_id"),
+    )
+
+    # ─── 关系导航 ─────────────────────────────────────────────────────────
+    # relationship 是 SQLAlchemy ORM 层的"导航属性"，不对应 DB 列，只是 Python 层的快捷访问
+    # cascade="all, delete-orphan"：删 Group 时，其下所有 GroupMember 记录也自动从 session 中删
+    # back_populates="group"：在 GroupMember 里有对应的 group 属性，形成双向导航
+    # Mapped[list["GroupMember"]] 是 SQLAlchemy 2.0 写法，表示"零到多个 GroupMember"
+    # 用字符串 "GroupMember" 前置引用（forward reference），因为该类在下面才定义
+    members: Mapped[list["GroupMember"]] = relationship(
+        "GroupMember",
+        cascade="all, delete-orphan",  # 删 Group 级联删所有 GroupMember
+        back_populates="group",        # 与 GroupMember.group 双向绑定
+    )
+
 
 # ─── 2. group_members 表 ─────────────────────────────────────────────────────
 
@@ -149,6 +170,16 @@ class GroupMember(Base):
         DateTime,
         server_default=func.now(),  # SQL: DEFAULT CURRENT_TIMESTAMP
         nullable=False,
+    )
+
+    # ─── 关系导航 ─────────────────────────────────────────────────────────
+    # group 是从 GroupMember 到 Group 的多对一导航属性（每条成员记录归属一个组）
+    # back_populates="members"：与 Group.members 双向绑定
+    # Mapped["Group"] 使用字符串前置引用（虽然 Group 在上面定义，但加 from __future__ import annotations
+    # 后所有注解默认是字符串，这里保持风格一致）
+    group: Mapped["Group"] = relationship(
+        "Group",
+        back_populates="members",  # 与 Group.members 双向绑定
     )
 
     # ─── 表级约束与索引 ────────────────────────────────────────────────────

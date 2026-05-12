@@ -144,6 +144,15 @@ class GitCredential(Base):
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     """最后一次被 fetch / ls-remote 使用的时间。"""
 
+    # v2.0 新增：凭证归属用户
+    # 暂时 nullable=True（迁移期间允许空）；Task 6 数据迁移完之后改 NOT NULL
+    # ondelete='SET NULL'：用户注销后凭证保留（避免误删 + 配合审计）
+    owner_user_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
 
 # ─── 2. user_project_access ──────────────────────────────────────────────────
 

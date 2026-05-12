@@ -123,17 +123,19 @@ def test_group_member_added_by_is_nullable():
 
 
 def test_group_member_fks_ondelete():
-    """user_id + group_id FK 应为 CASCADE（成员随用户/组删除），added_by FK 为 SET NULL。"""
+    """GroupMember 三个 FK 的 ondelete 必须对：
+    user_id → CASCADE（用户注销删成员关系）
+    group_id → CASCADE（组删成员关系一起删）
+    added_by_user_id → SET NULL（仅记录，不强约束）
+    """
     fks = list(GroupMember.__table__.foreign_keys)
-    # 按目标表名分类
-    fk_by_table = {fk.column.table.name: fk for fk in fks}
-
-    # user_id → users 应 CASCADE（成员随用户删除）
-    assert "users" in fk_by_table, "缺少指向 users 表的外键"
-    # added_by_user_id 也指向 users，用 SET NULL；user_id 用 CASCADE
-    # 由于两个 FK 都指向 users，这里只验证存在指向 groups 的 FK（CASCADE）
-    assert "groups" in fk_by_table, "缺少指向 groups 表的外键"
-    assert fk_by_table["groups"].ondelete == "CASCADE"
+    # 按本表列名（parent.name）做 key，而不是按目标表名——
+    # 原因：user_id 和 added_by_user_id 都指向 users 表，用目标表名做 key 会发生后者覆盖前者的 bug
+    # fk.parent 是"本表的列对象"，fk.column 是"目标表的列对象"
+    fk_by_col = {fk.parent.name: fk for fk in fks}
+    assert fk_by_col["user_id"].ondelete == "CASCADE"
+    assert fk_by_col["group_id"].ondelete == "CASCADE"
+    assert fk_by_col["added_by_user_id"].ondelete == "SET NULL"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -230,3 +232,22 @@ def test_project_group_id_fk_ondelete_set_null():
     group_fks = [fk for fk in fks if fk.column.table.name == "groups"]
     assert len(group_fks) == 1, f"应有 1 个指向 groups 的 FK，实际：{len(group_fks)}"
     assert group_fks[0].ondelete == "SET NULL"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5. Group.__table_args__ 含 ix_groups_parent 索引声明
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_group_has_parent_index():
+    """ix_groups_parent 索引声明在 Group.__table_args__ 里，名字与 migration 完全一致。
+
+    显式声明 Index 对象是为了避免 Alembic autogenerate drift：
+    如果用 mapped_column(index=True) 则 SQLAlchemy 会自动生成名字 ix_groups_parent_group_id，
+    与 migration 里的 ix_groups_parent 不一致，导致每次 autogenerate 都会产生"删旧建新"的 diff。
+    """
+    from sqlalchemy import Index as SAIndex
+    # __table_args__ 是 Group 类的类属性，包含 Table 级约束和索引的元组
+    indexes = [obj for obj in Group.__table_args__ if isinstance(obj, SAIndex)]
+    names = {idx.name for idx in indexes}
+    assert "ix_groups_parent" in names, f"Group.__table_args__ 里缺少 ix_groups_parent，现有：{names}"
