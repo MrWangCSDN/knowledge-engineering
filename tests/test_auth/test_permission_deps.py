@@ -197,8 +197,7 @@ async def test_nested_group_inheritance(db):
 
 # ─── 测试 5：_pick_higher 取两个 role 中较高者 ──────────────────────────────
 
-@pytest.mark.asyncio
-async def test_pick_higher_takes_max():
+def test_pick_higher_takes_max():
     """_pick_higher(a, b) 返回等级更高的 role；None 表示无 role。
 
     这是一个纯函数（不依赖 DB），直接调用验证逻辑正确性。

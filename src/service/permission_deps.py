@@ -144,16 +144,21 @@ async def resolve_role(
 
     # ── 2. Group 继承链：向上遍历 parent_group_id，取最高 role ────────────
     # 算法：从 project.group_id 开始，顺着 parent_group_id 向上走，收集沿途的 role
-    # 防护：visited set 防止循环引用（虽然 DB 层有 RESTRICT 约束，但程序层也要安全）
-    # 深度隐式上限：visited set 最多包含所有 group，自然终止
+    # 防护 1：visited set 防止循环引用（虽然 DB 层有 RESTRICT 约束，但程序层也要安全）
+    # 防护 2：depth 计数器限制最多走 3 层（spec 要求：直接 group + 父 + 爷，第 4 层截断）
 
     inherited: Optional[str] = None  # 从 group 继承来的最高 role（初始为 None）
     cur_gid: Optional[str] = project.group_id  # 当前遍历到的 group id，从 project 的 group 开始
     visited: set[str] = set()  # 已访问过的 group id 集合（set 的 in 操作是 O(1)）
+    depth: int = 0  # 当前层深度：0=直接 group，1=父 group，2=爷 group，≥3 截断
 
-    # while 循环：只要还有 group 没遍历，且没有循环引用就继续
+    # while 循环：只要还有 group 没遍历，且没有循环引用，且未超出深度限制就继续
     # cur_gid not in visited：防止循环（防御性编程）
     while cur_gid and cur_gid not in visited:
+        # spec 要求 group 嵌套上限 3 层（depth 0/1/2），第 4 层（depth >= 3）防御性截断
+        if depth >= 3:
+            break
+
         visited.add(cur_gid)  # 把当前 group 标记为已访问
 
         # 查当前 group 是否有该用户的成员记录（GroupMember 的复合主键是 (user_id, group_id)）
@@ -170,6 +175,7 @@ async def resolve_role(
         cur_gid = await db.scalar(
             select(Group.parent_group_id).filter_by(id=cur_gid)
         )
+        depth += 1  # 计完这一层再 +1，进入下一轮循环时检查
 
     # ── 3. 取 max(直接成员 role, 继承 role) ───────────────────────────────
     # _pick_higher 处理 None 的情况，不需要额外的 if None 检查
