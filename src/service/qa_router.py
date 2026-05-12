@@ -5,12 +5,15 @@
 路由：
   POST /api/projects/{pid}/qa/explain    流式问答（SSE）
 
-依赖：
-  app.state.qa_retriever     QARetriever 实例（startup 注入）
-  app.state.qa_synthesizer   QASynthesizer 实例（startup 注入）
+依赖（Task 22 per-request 模式）：
+  app.state.weaviate_business_store  WeaviateBusinessInterpretStore singleton
+  app.state.neo4j_backend            Neo4jGraphBackend singleton
+  app.state.qa_synthesizer           QASynthesizer 实例（startup 注入，singleton）
+  app.state.qa_router                SkillRouter 实例（startup 注入，singleton）
 
-注：retriever / synthesizer 实例由 api.py startup 初始化时注入到 app.state。
-   测试时 fixture 把 mock 实例直接挂上去（见 test_qa_router.py）。
+向后兼容（旧 singleton 模式，用于测试夹具）：
+  如果 app.state.qa_retriever 已经挂上，explain endpoint 会直接用它
+  而不走 per-request 构造，保证现有测试不破。
 """
 from __future__ import annotations
 
@@ -48,6 +51,72 @@ from src.service.permission_deps import require_project_role
 
 
 router = APIRouter(prefix="/projects/{project_id}/qa", tags=["qa"])
+
+
+# ─── per-request 构造 helpers（Task 22） ─────────────────────────────────────
+
+
+def build_retriever_for_project(project_id: str, request: Request):
+    """每个请求构造一个绑定 project_id 的 QARetriever。
+
+    使用 app.state 里的 singleton 底层资源（weaviate_business_store + neo4j_backend），
+    为每个请求分别构造 adapter，确保 Neo4jGraphAdapter 绑定正确的 project_id，
+    实现多租户数据隔离。
+
+    :param project_id: URL path 中的工程 ID，非空字符串
+    :param request: FastAPI Request，用于访问 app.state singleton 资源
+    :return: QARetriever 实例（已绑定 project_id）
+    :raises RuntimeError: weaviate_business_store 或 neo4j_backend 未就绪时抛出
+    """
+    # 从 app.state 取 singleton 底层资源（startup 时已连接）
+    biz_store = getattr(request.app.state, "weaviate_business_store", None)
+    neo4j_backend = getattr(request.app.state, "neo4j_backend", None)
+
+    if biz_store is None or neo4j_backend is None:
+        raise RuntimeError(
+            "底层存储资源未就绪（weaviate_business_store / neo4j_backend）"
+        )
+
+    # 延迟导入：避免 module-level 循环依赖
+    from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateBusinessAdapter
+    from src.service.qa_engine.retriever import QARetriever
+
+    # 每个请求构造新的 adapter 实例：
+    # WeaviateBusinessAdapter：包装 singleton store，本身无状态，轻量
+    biz_adapter = WeaviateBusinessAdapter(biz_store)
+    # Neo4jGraphAdapter：绑定 project_id，所有 Cypher 查询带 project_id 过滤
+    graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id=project_id)
+
+    # QARetriever：注入上面两个 adapter，本请求专用
+    return QARetriever(business_store=biz_adapter, graph=graph_adapter)
+
+
+def build_tools_for_project(project_id: str, request: Request):
+    """每个请求构造一个绑定 project_id 的 ToolRegistry。
+
+    与 build_retriever_for_project 同理：adapter 按 project_id 绑定，
+    工具里的 handler 通过 input dict 的 project_id 字段传递隔离信息（ke_search 等）。
+
+    :param project_id: URL path 中的工程 ID
+    :param request: FastAPI Request
+    :return: ToolRegistry 实例（已绑定 project_id 的 adapter）
+    :raises RuntimeError: 底层资源未就绪时抛出
+    """
+    biz_store = getattr(request.app.state, "weaviate_business_store", None)
+    neo4j_backend = getattr(request.app.state, "neo4j_backend", None)
+
+    if biz_store is None or neo4j_backend is None:
+        raise RuntimeError(
+            "底层存储资源未就绪（weaviate_business_store / neo4j_backend）"
+        )
+
+    from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateBusinessAdapter
+    from src.service.qa_engine.tools import build_default_registry
+
+    biz_adapter = WeaviateBusinessAdapter(biz_store)
+    graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id=project_id)
+
+    return build_default_registry(graph=graph_adapter, business_store=biz_adapter)
 
 
 # ─── 请求体 ─────────────────────────────────────────────────────────────────
@@ -114,16 +183,41 @@ async def explain(
         db.add(sess)
         await db.commit()
 
-    # 3. 拿 app.state 注入的 retriever / synthesizer / router
-    app = request.app
-    retriever = getattr(app.state, "qa_retriever", None)
-    synthesizer = getattr(app.state, "qa_synthesizer", None)
+    # 3. 获取 retriever / synthesizer / router
+    # Task 22 per-request 构造：
+    #   优先检查 app.state.qa_retriever（测试夹具注入路径，向后兼容）
+    #   若不存在则走 per-request 构造（生产路径，按 project_id 隔离）
+    _app = request.app
+    synthesizer = getattr(_app.state, "qa_synthesizer", None)
     # router 是可选的（v1.1 引入）；缺失时 SSE 不带 skill 字段，向后兼容
-    skill_router = getattr(app.state, "qa_router", None)
-    if retriever is None or synthesizer is None:
+    skill_router = getattr(_app.state, "qa_router", None)
+
+    # 向后兼容路径：测试 fixture 在 app.state.qa_retriever 上挂了 mock
+    _legacy_retriever = getattr(_app.state, "qa_retriever", None)
+    if _legacy_retriever is not None:
+        # 旧路径（singleton / mock）：直接使用，不走 per-request 构造
+        retriever = _legacy_retriever
+    else:
+        # Task 22 新路径（per-request）：按 project_id 构造绑定的 QARetriever
+        _biz_store = getattr(_app.state, "weaviate_business_store", None)
+        _neo4j = getattr(_app.state, "neo4j_backend", None)
+        if _biz_store is None or _neo4j is None:
+            raise HTTPException(
+                status_code=503,
+                detail="QA 引擎未就绪（底层存储资源不可用）",
+            )
+        try:
+            retriever = build_retriever_for_project(project_id, request)
+        except Exception as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"QA 引擎未就绪（per-request retriever 构造失败）: {e}",
+            )
+
+    if synthesizer is None:
         raise HTTPException(
             status_code=503,
-            detail="QA 引擎未就绪（app.state.qa_retriever/qa_synthesizer 缺失）",
+            detail="QA 引擎未就绪（app.state.qa_synthesizer 缺失）",
         )
 
     # 4. 持久化回调（在 SSE 流末尾被调用）
