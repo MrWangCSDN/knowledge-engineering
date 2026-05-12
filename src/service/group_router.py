@@ -1,11 +1,17 @@
 """Group CRUD 路由 (v2.0)。
 
 接口列表（前缀 /groups）：
-  - GET    /groups             列出当前用户可见的所有 group
-  - POST   /groups             建 group（根组仅 Instance Admin；子组需父组 Owner）
-  - GET    /groups/{gid}       查看单个 group（reporter+）
-  - PATCH  /groups/{gid}       改 group 名称/描述（maintainer+）
-  - DELETE /groups/{gid}       删 group（owner + 无子组 + 无工程）
+  - GET    /groups                          列出当前用户可见的所有 group
+  - POST   /groups                          建 group（根组仅 Instance Admin；子组需父组 Owner）
+  - GET    /groups/{gid}                    查看单个 group（reporter+）
+  - PATCH  /groups/{gid}                    改 group 名称/描述（maintainer+）
+  - DELETE /groups/{gid}                    删 group（owner + 无子组 + 无工程）
+
+  Members sub-routes：
+  - GET    /groups/{gid}/members            列出 group 成员（reporter+）
+  - POST   /groups/{gid}/members            加成员（owner）
+  - PATCH  /groups/{gid}/members/{user_id}  改成员 role（owner）
+  - DELETE /groups/{gid}/members/{user_id}  删成员（owner；保护最后一个 owner）
 
 关键约束：
   1. 嵌套深度 ≤ MAX_GROUP_DEPTH（= 3）
@@ -37,7 +43,8 @@ from pydantic import BaseModel, Field
 
 # SQLAlchemy 2.0 查询构造器
 # select(Model.col).filter_by(...)：构造 SELECT SQL 语句
-from sqlalchemy import select
+# func：SQL 函数（如 func.count 做聚合统计）
+from sqlalchemy import func, select
 
 # AsyncSession：异步数据库会话类型（用于类型注解 + await 调用）
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -564,6 +571,399 @@ async def delete_group(
     # db.delete(group)：标记删除，等 commit 时执行 SQL DELETE
     # 注意：GroupMember 有 cascade="all, delete-orphan"，级联删除成员记录
     await db.delete(group)
+
+    # ── 原子提交 ─────────────────────────────────────────────────────────────
+    # 审计日志 + 实际删除同一个事务里提交，保证原子性
+    await db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Members sub-routes（成员管理，路径 /groups/{group_id}/members）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ─── Members Pydantic Schema ───────────────────────────────────────────────────
+
+# VALID_MEMBER_ROLES：合法的 role 值集合，用于 Pydantic 校验和运行时检查
+# frozenset：不可变集合（tuple 的无序版本），用 in 操作时 O(1) 复杂度
+VALID_MEMBER_ROLES: frozenset[str] = frozenset({"reporter", "maintainer", "owner"})
+
+
+class MemberAddRequest(BaseModel):
+    """POST /groups/{gid}/members 请求体。
+
+    Attributes:
+        user_id: 要加入的用户整数 ID（必填）。
+        role:    赋予的角色，必须是 reporter / maintainer / owner 之一。
+    """
+    user_id: int  # 目标用户的数据库整数 ID（对应 users.id）
+    # Literal["reporter", "maintainer", "owner"]：Pydantic v2 字面量类型约束，
+    # 只允许三个枚举字符串，其他值触发 422 Unprocessable Entity
+    role: str = Field(
+        ...,
+        # pattern 正则校验：等价于 Literal，但 Pydantic v2 对 Literal 的 422 消息更友好
+        # 这里用 pattern 做校验，若传 "super-admin" 等无效值，Pydantic 自动拒绝并返回 422
+        pattern=r"^(reporter|maintainer|owner)$",
+    )
+
+
+class MemberRoleUpdateRequest(BaseModel):
+    """PATCH /groups/{gid}/members/{user_id} 请求体。
+
+    Attributes:
+        role: 新 role，必须是三个合法值之一。
+    """
+    role: str = Field(
+        ...,
+        pattern=r"^(reporter|maintainer|owner)$",  # 同 MemberAddRequest.role 校验规则
+    )
+
+
+class MemberResponse(BaseModel):
+    """GET/POST/PATCH /groups/{gid}/members/* 单个成员的响应体。
+
+    Attributes:
+        user_id:  成员的用户整数 ID。
+        group_id: 所属 group 的字符串 ID。
+        role:     当前角色。
+        added_at: 加入时间（ISO8601 字符串）。
+    """
+    user_id: int
+    group_id: str
+    role: str
+    added_at: str  # datetime.isoformat() 转换为字符串，方便 JSON 序列化
+
+
+def _to_member_response(member: GroupMember) -> MemberResponse:
+    """将 GroupMember ORM 实例转换为 MemberResponse Pydantic Schema。
+
+    DRY 原则：统一 GET / POST / PATCH 成员接口的返回格式。
+
+    Args:
+        member: GroupMember ORM 实例。
+
+    Returns:
+        MemberResponse：标准化成员响应体。
+    """
+    return MemberResponse(
+        user_id=member.user_id,
+        group_id=member.group_id,
+        role=member.role,
+        # .isoformat()：datetime → ISO8601 字符串（如 '2026-05-12T08:00:00'）
+        added_at=member.added_at.isoformat(),
+    )
+
+
+# ─── 内部工具：最后一个 owner 保护 ────────────────────────────────────────────
+
+async def _count_group_owners(group_id: str, db: AsyncSession) -> int:
+    """统计 group 里当前有多少个 owner 成员。
+
+    用于"最后一个 owner 保护"：
+    - DELETE 前：如果 owner 数量 = 1 且要删的正是那个 owner → 422
+    - PATCH 前：如果 owner 数量 = 1 且要改的正是那个 owner（降级）→ 422
+
+    Args:
+        group_id: 目标 group 的字符串 ID。
+        db:       异步数据库 session。
+
+    Returns:
+        int：owner 成员的数量（>= 0）。
+    """
+    # func.count(GroupMember.user_id)：生成 SQL COUNT(user_id) 聚合函数
+    # filter_by(group_id=group_id, role="owner")：WHERE group_id=? AND role='owner'
+    count = await db.scalar(
+        select(func.count(GroupMember.user_id)).filter_by(
+            group_id=group_id,
+            role="owner",
+        )
+    )
+    # db.scalar 返回 None 时 count 为 None（空表），用 or 0 保证返回 int
+    return count or 0
+
+
+# ─── 路由：GET /groups/{group_id}/members（列成员）────────────────────────────
+
+@router.get(
+    "/{group_id}/members",
+    response_model=list[MemberResponse],  # 返回 MemberResponse 数组
+    # require_group_role("reporter")：reporter+ 才能查看成员列表
+    dependencies=[Depends(require_group_role("reporter"))],
+)
+async def list_group_members(
+    group_id: str,                       # FastAPI 从 URL path 自动提取 {group_id}
+    db: AsyncSession = Depends(get_db),  # 依赖注入：异步 DB session
+) -> list[MemberResponse]:
+    """列出 group 的所有成员（需 reporter+ 权限）。
+
+    Args:
+        group_id: 路径参数，目标 group 的业务 ID。
+        db:       异步 DB session。
+
+    Returns:
+        MemberResponse 列表（可能为空）。
+
+    Raises:
+        HTTPException(404): group 不存在（由 require_group_role dependency 处理）。
+        HTTPException(403): 权限不足。
+    """
+    # 查该 group 下所有成员记录（group_id = group_id）
+    # db.scalars(select(Model).filter_by(...))：返回 ORM 对象的异步游标
+    # .all()：把游标里所有行一次取出，返回 Sequence
+    members = (await db.scalars(
+        select(GroupMember).filter_by(group_id=group_id)
+    )).all()
+
+    # 列表推导式：对每个 GroupMember 调用 _to_member_response 转为 Pydantic Schema
+    return [_to_member_response(m) for m in members]
+
+
+# ─── 路由：POST /groups/{group_id}/members（加成员）──────────────────────────
+
+@router.post(
+    "/{group_id}/members",
+    response_model=MemberResponse,
+    status_code=201,   # 创建成功返回 201 Created
+    # require_group_role("owner")：只有 owner 才能加成员
+    dependencies=[Depends(require_group_role("owner"))],
+)
+async def add_group_member(
+    group_id: str,
+    body: MemberAddRequest,                          # 请求体：user_id + role
+    request: Request,                                # 原始请求，用于提取客户端 IP
+    user: User = Depends(get_current_user),          # 当前登录用户（操作者）
+    db: AsyncSession = Depends(get_db),
+) -> MemberResponse:
+    """往 group 加一个成员（需 owner 权限）。
+
+    规则：
+      - target user 必须存在（v2.0 Q6：用户必须先注册）
+      - 不能重复加（已存在成员 → 409）
+      - role 必须是合法值（Pydantic 校验，非法 → 422）
+      - 写审计日志 GROUP_MEMBER_ADD
+
+    Args:
+        group_id: 路径参数，目标 group 的业务 ID。
+        body:     请求体（user_id + role）。
+        request:  FastAPI Request，用于提取客户端 IP。
+        user:     当前登录用户（操作者）。
+        db:       异步 DB session。
+
+    Returns:
+        MemberResponse：新加成员的信息。
+
+    Raises:
+        HTTPException(404): 目标用户不存在。
+        HTTPException(409): 用户已经是成员。
+    """
+    # ── 目标用户必须存在 ─────────────────────────────────────────────────────
+    # db.get(User, pk)：按主键查询，比 select+filter 更简洁，返回 ORM 对象或 None
+    target_user = await db.get(User, body.user_id)
+    if not target_user:
+        raise HTTPException(
+            status_code=404,
+            detail="用户不存在",
+        )
+
+    # ── 不能重复加（幂等保护）────────────────────────────────────────────────
+    # GroupMember 的复合主键是 (user_id, group_id)，所以用 db.get 传 tuple
+    # SQLAlchemy 复合主键 get 语法：db.get(Model, (pk1_val, pk2_val))
+    existing = await db.get(GroupMember, (body.user_id, group_id))
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="该用户已经是成员",
+        )
+
+    # ── 创建 GroupMember ORM 实例 ────────────────────────────────────────────
+    member = GroupMember(
+        user_id=body.user_id,          # 被加入的用户 ID
+        group_id=group_id,             # 所属 group ID（来自 URL 路径）
+        role=body.role,                # 赋予的角色（Pydantic 已做格式校验）
+        added_by_user_id=user.id,      # 操作者 ID（审计字段）
+    )
+    db.add(member)  # 把 ORM 实例加入 session（此时还未写库，等 commit）
+
+    # ── 写审计日志 ──────────────────────────────────────────────────────────
+    # log_audit：不自己 commit，和业务数据在同一个事务里原子提交
+    await log_audit(
+        db,
+        actor_user_id=user.id,
+        action=actions.GROUP_MEMBER_ADD,     # "group_member.add"
+        resource_type="group_member",
+        resource_id=group_id,                # 以 group_id 作为资源 ID
+        metadata={
+            "target_user_id": body.user_id,
+            "role": body.role,
+        },
+        ip_address=request.client.host if request.client else None,
+    )
+
+    # ── 原子提交 ─────────────────────────────────────────────────────────────
+    # GroupMember + AuditLog 同一个事务里提交，保证原子性
+    await db.commit()
+
+    # ── 刷新并返回 ──────────────────────────────────────────────────────────
+    # commit 后 ORM 对象可能"过期"（expire_on_commit=True 时）
+    # refresh 确保 added_at 等 server_default 字段已经读回 Python 层
+    await db.refresh(member)
+    return _to_member_response(member)
+
+
+# ─── 路由：PATCH /groups/{group_id}/members/{user_id}（改 role）──────────────
+
+@router.patch(
+    "/{group_id}/members/{user_id}",
+    response_model=MemberResponse,
+    # require_group_role("owner")：只有 owner 才能改成员 role
+    dependencies=[Depends(require_group_role("owner"))],
+)
+async def update_member_role(
+    group_id: str,
+    user_id: int,            # FastAPI 从 URL path 提取 {user_id}，自动转换为 int
+    body: MemberRoleUpdateRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MemberResponse:
+    """改 group 成员的 role（需 owner 权限）。
+
+    保护规则：
+      - 如果被改的成员是 group 的唯一 owner，且新 role 不是 owner（即降级），
+        返回 422 "组必须至少 1 个 owner"
+
+    Args:
+        group_id: 路径参数，目标 group 的业务 ID。
+        user_id:  路径参数，目标成员的用户 ID（整数）。
+        body:     请求体（role）。
+        request:  FastAPI Request，用于提取客户端 IP。
+        user:     当前登录用户（操作者）。
+        db:       异步 DB session。
+
+    Returns:
+        MemberResponse：更新后的成员信息。
+
+    Raises:
+        HTTPException(404): 成员不存在。
+        HTTPException(422): 降级唯一 owner 被拒绝。
+    """
+    # ── 查成员记录是否存在 ───────────────────────────────────────────────────
+    # GroupMember 复合主键：(user_id, group_id)
+    member = await db.get(GroupMember, (user_id, group_id))
+    if not member:
+        raise HTTPException(
+            status_code=404,
+            detail="成员不存在",
+        )
+
+    # ── 最后一个 owner 保护 ──────────────────────────────────────────────────
+    # 如果当前成员是 owner，且新 role 不是 owner（降级），才需要检查
+    # 如果新 role 也是 owner（平级改），不影响 owner 数量，跳过检查
+    if member.role == "owner" and body.role != "owner":
+        owner_count = await _count_group_owners(group_id, db)
+        if owner_count <= 1:
+            # 唯一的 owner 被降级 → 违反约束
+            raise HTTPException(
+                status_code=422,
+                detail="组必须至少 1 个 owner",
+            )
+
+    # ── 记录变更（审计用）+ 更新字段 ────────────────────────────────────────
+    old_role = member.role    # 保存旧 role，用于审计日志
+    member.role = body.role   # 直接赋值修改 ORM 对象属性（等 commit 时写库）
+
+    # ── 写审计日志 ──────────────────────────────────────────────────────────
+    await log_audit(
+        db,
+        actor_user_id=user.id,
+        action=actions.GROUP_MEMBER_ROLE_CHANGE,   # "group_member.role_change"
+        resource_type="group_member",
+        resource_id=group_id,
+        metadata={
+            "target_user_id": user_id,
+            "old_role": old_role,
+            "new_role": body.role,
+        },
+        ip_address=request.client.host if request.client else None,
+    )
+
+    # ── 原子提交 ─────────────────────────────────────────────────────────────
+    await db.commit()
+
+    # commit 后刷新，确保返回的是数据库最新值
+    await db.refresh(member)
+    return _to_member_response(member)
+
+
+# ─── 路由：DELETE /groups/{group_id}/members/{user_id}（删成员）──────────────
+
+@router.delete(
+    "/{group_id}/members/{user_id}",
+    status_code=204,   # 成功删除返回 204 No Content（无响应体）
+    # require_group_role("owner")：只有 owner 才能删成员
+    dependencies=[Depends(require_group_role("owner"))],
+)
+async def remove_group_member(
+    group_id: str,
+    user_id: int,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """从 group 删除一个成员（需 owner 权限）。
+
+    保护规则：
+      - 如果被删的是 group 的唯一 owner，返回 422 "组必须至少 1 个 owner"
+      - group 必须始终至少有一个 owner
+
+    Args:
+        group_id: 路径参数，目标 group 的业务 ID。
+        user_id:  路径参数，要删除的成员用户 ID（整数）。
+        request:  FastAPI Request，用于提取客户端 IP。
+        user:     当前登录用户（操作者）。
+        db:       异步 DB session。
+
+    Raises:
+        HTTPException(404): 成员不存在。
+        HTTPException(422): 尝试删除 group 的唯一 owner。
+    """
+    # ── 查成员记录是否存在 ───────────────────────────────────────────────────
+    member = await db.get(GroupMember, (user_id, group_id))
+    if not member:
+        raise HTTPException(
+            status_code=404,
+            detail="成员不存在",
+        )
+
+    # ── 最后一个 owner 保护 ──────────────────────────────────────────────────
+    # 如果被删的成员是 owner，检查是否是唯一 owner
+    if member.role == "owner":
+        owner_count = await _count_group_owners(group_id, db)
+        if owner_count <= 1:
+            # 这是最后一个 owner，禁止删除
+            raise HTTPException(
+                status_code=422,
+                detail="组必须至少 1 个 owner",
+            )
+
+    # ── 写审计日志（删除前记录，删后无法再查 role）────────────────────────
+    deleted_role = member.role  # 提前保存 role，删后无法访问
+    await log_audit(
+        db,
+        actor_user_id=user.id,
+        action=actions.GROUP_MEMBER_REMOVE,    # "group_member.remove"
+        resource_type="group_member",
+        resource_id=group_id,
+        metadata={
+            "target_user_id": user_id,
+            "role": deleted_role,
+        },
+        ip_address=request.client.host if request.client else None,
+    )
+
+    # ── 删除 ORM 对象 ──────────────────────────────────────────────────────
+    # db.delete(member)：标记删除，等 commit 时执行 SQL DELETE
+    await db.delete(member)
 
     # ── 原子提交 ─────────────────────────────────────────────────────────────
     # 审计日志 + 实际删除同一个事务里提交，保证原子性
