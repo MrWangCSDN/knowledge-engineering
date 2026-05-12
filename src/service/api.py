@@ -22,6 +22,7 @@ from src.service.project_member_router import router as project_member_router  #
 from src.service.user_router import router as user_router                      # v2.0 User Management CRUD 路由
 from src.service.project_router import router as project_router
 from src.service.qa_router import router as qa_router
+from src.service.audit_router import router as audit_router  # v2.0 Task 11：审计日志查询路由
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
 try:
@@ -80,6 +81,7 @@ app.include_router(credentials_router)  # v2.0：用户级凭证 CRUD（/credent
 app.include_router(group_router)        # v2.0：Groups CRUD（/groups/*）
 app.include_router(project_member_router)  # v2.0：Project Members CRUD（/projects/{pid}/members/*）
 app.include_router(user_router)            # v2.0：User Management CRUD（/admin/users/*）
+app.include_router(audit_router)           # v2.0 Task 11：审计日志查询（/admin/audit-logs + /groups/{gid}/audit-logs）
 
 
 @app.on_event("startup")
