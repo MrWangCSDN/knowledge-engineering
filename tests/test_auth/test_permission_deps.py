@@ -33,9 +33,11 @@ from src.service.db_models_homepage import Project               # 工程模型
 from src.service.permission_deps import (
     ROLE_RANK,              # role 等级字典，如 {'reporter': 1, 'maintainer': 2, 'owner': 3}
     resolve_role,           # 计算用户在工程上的最终 role
-    list_accessible_projects,  # 列出用户可访问的所有工程（本测试文件暂不覆盖）
+    list_accessible_projects,  # 列出用户可访问的所有工程
     _pick_higher,           # 取两个 role 中权限较高者
 )
+# 导入 UserProjectAccess 供 Important 4 新测试创建直接成员记录使用
+from src.service.db_models_homepage import UserProjectAccess  # 工程直接成员权限 ORM 模型
 
 
 # ─── Fixture：每个测试独享一个 in-memory DB session ─────────────────────────
@@ -223,3 +225,154 @@ def test_pick_higher_takes_max():
     # 两者都 None → None（用户无任何权限）
     # is None 检查：用 is 而不是 ==，因为 None 是单例（Python 惯用法）
     assert _pick_higher(None, None) is None
+
+
+# ─── 测试 6：直接 maintainer + 继承 reporter → 取 maintainer ─────────────────
+
+@pytest.mark.asyncio
+async def test_resolve_role_takes_max_of_direct_and_inherited(db):
+    """直接 maintainer + group 继承 reporter → 取 maintainer（max 语义）。
+
+    设计验证：
+      - 用户对工程的直接成员 role 是 maintainer（user_project_access 表）
+      - 用户通过 group 继承得到 reporter
+      - resolve_role 应取两者的 max → maintainer
+
+    覆盖场景：_pick_higher 在 resolve_role 里的实际应用。
+    """
+    # 先创建用户并 flush 以分配 u.id（后续外键依赖）
+    u = User(email="x@x.com", username="x", hashed_password="x", is_admin=False, is_active=True)
+    db.add(u)
+    # flush 是"半提交"：把 INSERT 发给 DB 以分配 id，但不 commit（事务未结束）
+    await db.flush()
+
+    # 创建 group（需要 created_by_user_id 为有效 user.id）
+    db.add(Group(id="g1", name="G1", created_by_user_id=u.id))
+
+    # 将用户加入 group，角色为 reporter（继承来的较低 role）
+    db.add(GroupMember(user_id=u.id, group_id="g1", role="reporter", added_by_user_id=u.id))
+
+    # 创建工程，归属于 g1（工程会继承 g1 的 reporter role）
+    p = Project(id="p1", name="P1", status="ready", group_id="g1")
+    db.add(p)
+
+    # 同时给用户添加直接成员记录，角色为 maintainer（直接 role 更高）
+    # UserProjectAccess 复合主键 (user_id, project_id)
+    db.add(UserProjectAccess(user_id=u.id, project_id="p1", role="maintainer"))
+    await db.commit()
+
+    # 断言：max(direct=maintainer, inherited=reporter) → maintainer
+    assert await resolve_role(u, p, db) == "maintainer"
+
+
+# ─── 测试 7：4 层 group 嵌套，第 4 层 role 被 depth 截断 ─────────────────────
+
+@pytest.mark.asyncio
+async def test_resolve_role_depth_3_limit(db):
+    """4 层 group 嵌套时，第 4 层 group 的 role 不被采纳（spec 要求 ≤ 3 层）。
+
+    构造：
+      g_root(用户是 reporter) → g_l1 → g_l2 → g_l3（project 在 g_l3）
+
+    从 g_l3（project 的直接 group）向上数：
+      depth 0 = g_l3   → 用户无成员记录
+      depth 1 = g_l2   → 用户无成员记录
+      depth 2 = g_l1   → 用户无成员记录
+      depth >= 3 截断  → g_root 不再遍历
+
+    预期：用户只在 g_root 有 reporter，g_root 被截断 → resolve_role 返回 None
+    """
+    # 创建用户并 flush 分配 id
+    u = User(email="y@x.com", username="y", hashed_password="x", is_admin=False, is_active=True)
+    db.add(u)
+    await db.flush()
+
+    # 创建 4 层嵌套 group 链：g_root → g_l1 → g_l2 → g_l3
+    # parent_group_id=None 表示根 group（无父）
+    db.add(Group(id="g_root", name="root", created_by_user_id=u.id))
+    # parent_group_id 指向父 group id，形成树状结构
+    db.add(Group(id="g_l1", name="l1", parent_group_id="g_root", created_by_user_id=u.id))
+    db.add(Group(id="g_l2", name="l2", parent_group_id="g_l1", created_by_user_id=u.id))
+    db.add(Group(id="g_l3", name="l3", parent_group_id="g_l2", created_by_user_id=u.id))
+
+    # 用户只在 g_root 有 reporter（第 4 层，depth >= 3 时被截断）
+    db.add(GroupMember(user_id=u.id, group_id="g_root", role="reporter", added_by_user_id=u.id))
+
+    # 工程归属于 g_l3（第 1 层，从 g_l3 向上走 3 跳才能到 g_root）
+    p = Project(id="p1", name="P1", status="ready", group_id="g_l3")
+    db.add(p)
+    await db.commit()
+
+    # 断言：g_root 是第 4 层（depth=3 时截断），用户在 g_l3/g_l2/g_l1 无成员记录
+    # → 应返回 None（无权限）
+    assert await resolve_role(u, p, db) is None
+
+
+# ─── 测试 8：is_admin 用户能看到所有工程 ─────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_list_accessible_projects_for_admin_returns_all(db):
+    """is_admin 用户能看到所有工程（Instance Admin 全局可见）。
+
+    设计：is_admin=True 的用户无视 group 归属，可见数据库里所有工程。
+    覆盖 list_accessible_projects 里 is_admin 分支的逻辑。
+    """
+    # 创建 admin 用户（is_admin=True）
+    u_admin = User(
+        email="a@x.com", username="a", hashed_password="x",
+        is_admin=True,    # 实例级管理员
+        is_active=True,
+    )
+    db.add(u_admin)
+
+    # 创建两个工程，都不归属任何 group（存量工程场景）
+    db.add(Project(id="p1", name="P1", status="ready", group_id=None))
+    db.add(Project(id="p2", name="P2", status="ready", group_id=None))
+    await db.commit()
+
+    # 调用 list_accessible_projects，返回用户可见的工程列表
+    projects = await list_accessible_projects(u_admin, db)
+
+    # 用集合比较：不关心顺序，只关心 id 是否完整
+    # {p.id for p in projects} 是集合推导式（set comprehension），等价于 set(map(lambda p: p.id, projects))
+    assert {p.id for p in projects} == {"p1", "p2"}
+
+
+# ─── 测试 9：普通成员只能看到有权限的工程 ────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_list_accessible_projects_for_member_filters(db):
+    """普通成员只能看到：group 内的工程 + 直接成员工程，看不到 orphan 工程。
+
+    场景：
+      - p_in_group：归属 g1，用户是 g1 的成员 → 可见（group 继承）
+      - p_direct：无 group，用户有直接成员记录 → 可见（直接成员）
+      - p_orphan：无 group，用户无任何关系 → 不可见
+    """
+    # 创建普通用户并 flush 分配 id
+    u = User(email="m@x.com", username="m", hashed_password="x", is_admin=False, is_active=True)
+    db.add(u)
+    await db.flush()  # 分配 u.id，后续 GroupMember 需要用
+
+    # 创建 g1 group 并将用户加入（reporter 角色）
+    db.add(Group(id="g1", name="G1", created_by_user_id=u.id))
+    db.add(GroupMember(user_id=u.id, group_id="g1", role="reporter", added_by_user_id=u.id))
+
+    # 创建 3 个工程，分别对应 3 种场景
+    db.add(Project(id="p_in_group", name="P1", status="ready", group_id="g1"))  # group 内
+    db.add(Project(id="p_orphan",   name="P2", status="ready", group_id=None))  # 孤立工程
+    db.add(Project(id="p_direct",   name="P3", status="ready", group_id=None))  # 直接成员
+
+    # 给用户添加对 p_direct 的直接成员记录（reporter）
+    db.add(UserProjectAccess(user_id=u.id, project_id="p_direct", role="reporter"))
+    await db.commit()
+
+    # 调用 list_accessible_projects
+    projects = await list_accessible_projects(u, db)
+    # 提取返回的工程 id 集合
+    pids = {p.id for p in projects}
+
+    # 断言可见性
+    assert "p_in_group" in pids   # 通过 group 成员继承可见
+    assert "p_direct" in pids     # 通过直接成员可见
+    assert "p_orphan" not in pids  # 无任何关系，不可见

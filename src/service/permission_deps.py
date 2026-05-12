@@ -205,9 +205,15 @@ async def resolve_group_role(
     inherited: Optional[str] = None  # 目前为止的最高 role
     cur_gid: Optional[str] = group_id  # 当前遍历的 group id
     visited: set[str] = set()  # 防循环
+    depth: int = 0  # 深度计数器，与 resolve_role 里的 Group 继承段保持一致（≤ 3 层截断）
 
-    # 遍历逻辑与 resolve_role 里的 Group 继承段完全相同
+    # 遍历逻辑与 resolve_role 里的 Group 继承段完全相同，包括 depth 上限防护
+    # spec 要求 group 嵌套上限 3 层（depth 0/1/2），第 4 层（depth >= 3）防御性截断
     while cur_gid and cur_gid not in visited:
+        # depth 上限与 resolve_role 保持一致：最多走 3 层
+        if depth >= 3:
+            break
+
         visited.add(cur_gid)
 
         # 查用户在当前 group 的成员 role
@@ -223,6 +229,7 @@ async def resolve_group_role(
         cur_gid = await db.scalar(
             select(Group.parent_group_id).filter_by(id=cur_gid)
         )
+        depth += 1  # 计完这一层再 +1，进入下一轮循环时检查（与 resolve_role 相同）
 
     return inherited  # 返回继承链中最高的 role（None 表示无权限）
 
@@ -384,6 +391,19 @@ def require_project_role(min_role: str = "reporter"):
         闭包（Closure）：内层函数（checker）可以访问外层函数（require_project_role）的变量（min_role）
         即使外层函数已经返回，内层函数依然持有 min_role 的引用（这就是"捕获"）
     """
+    # ── 启动期校验：早爆好过运行期 500 ──────────────────────────────────────
+    # 在工厂函数体最开头就校验 min_role 合法性
+    # 这样传入 "admin" / "super" 等无效值时，模块 import / 路由注册阶段就会立刻抛出 ValueError
+    # 而不是等到第一个请求进来才触发 ROLE_RANK[min_role] 的 KeyError → 500
+    # if ... not in dict：字典的 __contains__ 操作（O(1)），检查 key 是否存在
+    if min_role not in ROLE_RANK:
+        raise ValueError(
+            f"require_project_role: min_role={min_role!r} 不合法，"
+            # !r 是 f-string 的 repr 格式符，相当于 repr(min_role)，对字符串会加引号
+            # list(ROLE_RANK) 返回字典的 key 列表，如 ['reporter', 'maintainer', 'owner']
+            f"合法值：{list(ROLE_RANK)}"
+        )
+
     # checker 是一个内层 async 函数（闭包），捕获了外层的 min_role 变量
     # FastAPI 会自动检测函数参数的类型注解和 Depends(...)，完成依赖注入
     async def checker(
@@ -446,6 +466,14 @@ def require_group_role(min_role: str = "reporter"):
     Returns:
         async checker 闭包
     """
+    # ── 启动期校验：同 require_project_role，早爆好过运行期 500 ─────────────
+    # 传入非法 min_role 时在路由注册阶段就立即报错，而不是等到请求到来时 KeyError → 500
+    if min_role not in ROLE_RANK:
+        raise ValueError(
+            f"require_group_role: min_role={min_role!r} 不合法，"
+            f"合法值：{list(ROLE_RANK)}"
+        )
+
     async def checker(
         group_id: str,                             # 从 URL path 自动提取（{group_id}）
         user: User = Depends(get_current_user),    # FastAPI 注入：当前用户

@@ -173,8 +173,12 @@ class UserProjectAccess(Base):
         primary_key=True,
     )
 
-    role: Mapped[str] = mapped_column(String(32), default="reader", nullable=False)
-    """角色：reader / writer / admin。"""
+    role: Mapped[str] = mapped_column(String(32), default="reporter", nullable=False)
+    """角色：reporter / maintainer / owner（v2.0 GitLab 风格三级）。
+
+    v1 旧值（reader/writer/admin）保留向后兼容，但 v2 不再产出。
+    migration v2b_remap_role 会把存量 reader→reporter / writer→maintainer / admin→owner 迁移。
+    """
 
 
 # ─── 3. qa_sessions ──────────────────────────────────────────────────────────
