@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+# AsyncIterator: complete_stream 的返回值类型
+# Awaitable / Callable: on_token 回调类型
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Protocol
 
 from src.service.qa_engine.prompts import (
     SYSTEM_PROMPT,
@@ -26,6 +28,20 @@ class LLMProviderProto(Protocol):
 
     async def complete(self, *, system: str, user: str, **kwargs: Any) -> str:
         """同步式：把 system + user prompt 喂给模型，等完整答复返回。"""
+        ...
+
+
+class StreamingLLMProto(Protocol):
+    """v1.6 起的可选流式接口；DashScopeProvider 实现这个。"""
+
+    def complete_stream(
+        self, *, system: str, user: str, **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        """流式：yield 每个文本 chunk；调用方负责累计 + 调 on_token 回调。
+
+        注意签名：返回 AsyncIterator[str]，本身不是 async function（不要写 `async def`）。
+        但 yield 的实现是 async generator —— 调用方用 `async for chunk in provider.complete_stream(...)`。
+        """
         ...
 
 
@@ -106,6 +122,65 @@ class QASynthesizer:
             raw_output=raw,
         )
 
+    # ─── v1.6 streaming ───────────────────────────────────────────────────
+
+    async def synthesize_stream(
+        self,
+        ctx: RetrievedContext,
+        history: list[dict] | None = None,
+        on_token: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> SynthesizedAnswer:
+        """流式版本的 synthesize：边收 LLM token 边调 on_token 回调。
+
+        要求 `self.llm` 实现 `complete_stream`；没实现就抛 AttributeError（早暴露问题）。
+
+        :param on_token: 每个 chunk 来时调用；签名 `async (chunk: str) -> None`
+                         SSE emitter 用这个把 token 转发到前端
+        :return: 累计完整后再解析的 SynthesizedAnswer
+        """
+        ctx_dict = _ctx_to_dict(ctx)
+        if history:
+            user_prompt = build_user_prompt_with_history(ctx.question, ctx_dict, history=history)
+        else:
+            user_prompt = build_user_prompt(ctx.question, ctx_dict)
+
+        # 累计 chunks 到这个 buffer，结束后整体解析
+        # 用 list + join 比反复 += 字符串高效（Python 字符串不可变）
+        buffer: list[str] = []
+
+        # 任何异常都在这里吃掉，转成 error 段
+        try:
+            # `complete_stream` 返回 async generator；用 async for 迭代
+            async for chunk in self.llm.complete_stream(system=SYSTEM_PROMPT, user=user_prompt):
+                buffer.append(chunk)
+                # 触发回调（让 SSE 立即把 token 推给前端）
+                if on_token is not None:
+                    try:
+                        await on_token(chunk)
+                    except Exception:
+                        # 回调内部出错不应中断 LLM 流；吞掉继续
+                        pass
+        except Exception as e:
+            # LLM 流断了 → 返回错误段
+            return SynthesizedAnswer(
+                sections=[{
+                    "type": "overview",
+                    "title": "出错了",
+                    "content": f"LLM 流式调用失败：{e}",
+                    "references": [],
+                }],
+                raw_output="".join(buffer),
+            )
+
+        raw = "".join(buffer)
+        sections = self._parse_sections(raw)
+        approx_tokens = _estimate_tokens(SYSTEM_PROMPT, user_prompt, raw)
+        return SynthesizedAnswer(
+            sections=sections,
+            token_usage=approx_tokens,
+            raw_output=raw,
+        )
+
     @staticmethod
     def _parse_sections(raw: str) -> list[dict]:
         """解析 LLM 输出。
@@ -115,15 +190,30 @@ class QASynthesizer:
         都失败时降级成单段 markdown。
         """
         # 1. 找 ```json fence
+        # 注意：LLM 的 sections.content 里允许嵌入 ```mermaid 这种子代码块，
+        # 所以**不能**用 `split("```", 1)[0]`（会被首个内部 fence 截断）。
+        # 用 rsplit 从最后一个 ``` 反向定位，保证拿到最外层 fence。
         candidate = raw.strip()
         if "```json" in candidate:
             try:
-                candidate = candidate.split("```json", 1)[1].split("```", 1)[0].strip()
+                # 取 ```json 之后的全部内容
+                after_open = candidate.split("```json", 1)[1]
+                # 从右往左找最后一个 ```（外层 fence 的关闭标记）
+                # 没找到（LLM 忘了关 fence）时返回全部 → after_open 自身
+                if "```" in after_open:
+                    candidate = after_open.rsplit("```", 1)[0].strip()
+                else:
+                    candidate = after_open.strip()
             except IndexError:
                 pass
         elif candidate.startswith("```"):
             try:
-                candidate = candidate.split("```", 1)[1].split("```", 1)[0].strip()
+                # 同理：rsplit 找最后一个 ``` 关闭
+                after_open = candidate.split("```", 1)[1]
+                if "```" in after_open:
+                    candidate = after_open.rsplit("```", 1)[0].strip()
+                else:
+                    candidate = after_open.strip()
             except IndexError:
                 pass
 
@@ -161,6 +251,9 @@ def _ctx_to_dict(ctx: RetrievedContext) -> dict:
         "callees_by_entry": ctx.callees_by_entry,
         "callers_by_entry": ctx.callers_by_entry,
         "table_access_by_entry": ctx.table_access_by_entry,
+        # v1.1：把 skill_id 一并送下去，build_user_prompt 据此加视角偏置提示
+        # getattr 是为了向后兼容旧 RetrievedContext 实例（万一缺这个字段）
+        "skill_id": getattr(ctx, "skill_id", "architecture"),
     }
 
 
