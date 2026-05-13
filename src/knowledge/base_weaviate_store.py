@@ -80,6 +80,8 @@ class BaseWeaviateStore(ABC):
             except Exception:
                 pass
 
+        # v2.0 staging：跳过 gRPC ping init check（启动期不稳定，操作时再用）
+        conn_kw["skip_init_checks"] = True
         client = weaviate.connect_to_custom(**conn_kw)
         try:
             if not client.collections.exists(self._collection_name):

@@ -57,11 +57,16 @@ class WeaviateVectorStore(BaseWeaviateStore):
         entity_type: Optional[str] = None,
         name: Optional[str] = None,
         code_snippet: Optional[str] = None,
+        *,
+        tenant: Optional[str] = None,
     ) -> None:
+        # v2.0：tenant 非空时通过 with_tenant 写入对应租户分区
         if not vector or len(vector) < self._dim:
             return
         try:
             coll = self._get_collection()
+            if tenant:
+                coll = coll.with_tenant(tenant)
             vec = vector[: self._dim]
             props = {
                 "entity_id": entity_id,
@@ -77,9 +82,12 @@ class WeaviateVectorStore(BaseWeaviateStore):
         except Exception:
             pass
 
-    def add_many(self, items: list[tuple[str, list[float]]]) -> None:
+    def add_many(self, items: list[tuple[str, list[float]]], *, tenant: Optional[str] = None) -> None:
+        # v2.0：tenant 透传到 with_tenant
         try:
             coll = self._get_collection()
+            if tenant:
+                coll = coll.with_tenant(tenant)
             with coll.batch.dynamic() as batch:
                 for i, (eid, vec) in enumerate(items):
                     if not vec or len(vec) < self._dim:

@@ -44,7 +44,9 @@ def _sync_graph_to_neo4j(
     """将内存图同步到 Neo4j。progress_callback(current, total, message) 用于前端进度条。
 
     v2.0：project_id 非空时写入每个节点与边的属性，供多租户场景按 project_id 隔离查询。
+    v2.0 staging：连接池有概率被空闲 close，clear 时 retry 一次。
     """
+    import time
     from src.knowledge.factories import GraphBackendFactory
     backend = GraphBackendFactory.create(
         "neo4j",
@@ -57,7 +59,17 @@ def _sync_graph_to_neo4j(
     try:
         if progress_callback:
             progress_callback(0, 1, "正在清空 Neo4j 旧数据…")
-        backend.clear()
+        # v2.0 staging：clear() 可能因 defunct connection 抛 ServiceUnavailable
+        # 最多重试 2 次（每次新连接），仍失败再上抛
+        for attempt in range(3):
+            try:
+                backend.clear()
+                break
+            except Exception as e:
+                if attempt < 2 and ('defunct' in str(e).lower() or 'unavailable' in str(e).lower()):
+                    time.sleep(1)
+                    continue
+                raise
         nodes = list(g.nodes)
         edges = list(g.edges(keys=True))
         n_total, e_total = len(nodes), len(edges)
@@ -265,13 +277,16 @@ class KnowledgeGraph:
                     e.id for e in structure_facts.entities
                     if e.type == EntityType.METHOD and (e.attributes or {}).get("code_snippet")
                 }
+                # v2.0：从 graph_config 拿 project_id 作为 Weaviate tenant
+                # （graph_config 是 build_from 的 kwarg，由 stage_runtime 注入项目 id）
+                _vs_tenant = (graph_config or {}).get("project_id") if graph_config else None
                 for se in semantic_facts.semantic_entities:
                     if not se.embed_text:
                         continue
                     if se.structure_entity_id in method_ids_with_snippet:
                         continue
                     vec = get_embedding(se.embed_text, vector_dim)
-                    self._vector_store.add(se.structure_entity_id, vec)
+                    self._vector_store.add(se.structure_entity_id, vec, tenant=_vs_tenant)
                 for e in structure_facts.entities:
                     if e.type != EntityType.METHOD:
                         continue
@@ -287,6 +302,7 @@ class KnowledgeGraph:
                             entity_type="method",
                             name=e.name or "",
                             code_snippet=snippet,
+                            tenant=_vs_tenant,
                         )
 
         # 当 graph.backend=neo4j 时，将内存图同步到 Neo4j（graph_config 为空则用默认连接参数）
