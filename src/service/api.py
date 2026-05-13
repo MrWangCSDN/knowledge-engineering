@@ -14,9 +14,15 @@ from src.core.context import AppContext, get_app_context
 from src.knowledge import KnowledgeGraph
 from src.service.auth_dependencies import get_current_user
 from src.service.auth_models import User
+from src.service.admin_router import router as admin_router
 from src.service.auth_router import router as auth_router
+from src.service.credentials_router import router as credentials_router  # v2.0 user-scoped 凭证路由
+from src.service.group_router import router as group_router              # v2.0 Groups CRUD 路由
+from src.service.project_member_router import router as project_member_router  # v2.0 Project Members CRUD 路由
+from src.service.user_router import router as user_router                      # v2.0 User Management CRUD 路由
 from src.service.project_router import router as project_router
 from src.service.qa_router import router as qa_router
+from src.service.audit_router import router as audit_router  # v2.0 Task 11：审计日志查询路由
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
 try:
@@ -70,34 +76,217 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 app.include_router(auth_router)
 app.include_router(project_router)
 app.include_router(qa_router)
+app.include_router(admin_router)
+app.include_router(credentials_router)  # v2.0：用户级凭证 CRUD（/credentials/*）
+app.include_router(group_router)        # v2.0：Groups CRUD（/groups/*）
+app.include_router(project_member_router)  # v2.0：Project Members CRUD（/projects/{pid}/members/*）
+app.include_router(user_router)            # v2.0：User Management CRUD（/admin/users/*）
+app.include_router(audit_router)           # v2.0 Task 11：审计日志查询（/admin/audit-logs + /groups/{gid}/audit-logs）
 
 
 @app.on_event("startup")
 async def init_qa_engine() -> None:
     """启动时初始化 QA 引擎（注入到 app.state）。
 
-    MVP 阶段（W6 第 1 步）：
-      - retriever  使用 StubRetriever（不查 Weaviate / Graph，返回空 context）
-      - synthesizer 使用 DashScopeProvider（通义千问 OpenAI 兼容接口）
+    v2.0 Task 22：
+      - 只保存底层 singleton 资源：weaviate_business_store、neo4j_backend、llm
+      - 不再预构造 qa_retriever / qa_tools（改为 per-request 构造，见 qa_router.py）
+      - synthesizer / router 仍是 singleton（无状态，线程安全）
 
-    W6 第 2 步会替换 StubRetriever → 真实 QARetriever（接主仓 Weaviate + Graph）。
+    向后兼容：
+      - 测试 fixture 可预先把 qa_retriever 挂到 app.state；qa_router.py 的
+        explain endpoint 会检测到 qa_retriever 存在时走"旧路径"，不走 per-request 构造
+        （纯粹为了不破现有测试）
+
+    环境变量（写在 .env.local）：
+      WEAVIATE_URL         默认 http://localhost:8080
+      WEAVIATE_GRPC_PORT   默认 50051
+      WEAVIATE_API_KEY     （可选，私有 Weaviate 需要）
+      NEO4J_URI            默认 bolt://localhost:7687
+      NEO4J_USER           默认 neo4j
+      NEO4J_PASSWORD       必填（生产用）；缺失时只走 StubRetriever
     """
+    # hasattr 判断属性是否存在；测试场景里测试夹具可能预先注入了 qa_retriever
+    # （向后兼容：测试注入了就跳过真实初始化）
     if hasattr(app.state, "qa_retriever") and app.state.qa_retriever is not None:
-        return  # 测试已经手动注入
+        return  # 测试已经手动注入，不要覆盖
+
+    # os：标准库，读环境变量
+    import os
+    # 标准日志：startup 信息走 logger，方便生产线上 collected logs 看
+    import logging
 
     from src.service.qa_engine import QASynthesizer
-    from src.service.qa_engine.stub_retriever import StubRetriever
     from src.service.qa_engine.llm_dashscope import DashScopeProvider
+    from src.service.qa_engine.router import SkillRouter
 
+    _log = logging.getLogger("qa_engine.startup")
+
+    # 先初始化 LLM —— 这是 chat 的"必备"组件，挂了就别拉后端资源了
     try:
         llm = DashScopeProvider()
-        app.state.qa_retriever = StubRetriever()
-        app.state.qa_synthesizer = QASynthesizer(llm_provider=llm)
-        print(f"[startup] qa_engine ready (model={llm.model})")
     except Exception as e:
-        print(f"[startup] qa_engine init failed: {e}")
-        app.state.qa_retriever = None
+        # `from None` 是 Python 异常链的"切断"语法；这里直接打日志不抛出
+        _log.error("[startup] DashScope LLM 初始化失败: %s", e)
+        # LLM 挂了，所有下游都没意义；清零 state
+        app.state.weaviate_business_store = None
+        app.state.neo4j_backend = None
+        app.state.llm = None
         app.state.qa_synthesizer = None
+        app.state.qa_router = None
+        return
+
+    # ── 试图连接底层存储（获取 singleton 资源） ─────────────────────────────
+    biz_store, neo4j_backend = _try_connect_backends()
+
+    if biz_store is not None and neo4j_backend is not None:
+        # Task 22：只存底层 singleton 资源；qa_retriever / qa_tools 改为 per-request 构造
+        app.state.weaviate_business_store = biz_store
+        app.state.neo4j_backend = neo4j_backend
+        app.state.llm = llm
+        _log.info("[startup] 底层资源就绪：Weaviate + Neo4j（per-request retriever 模式）")
+    else:
+        # 后端不可用 → 挂占位 StubRetriever（向后兼容：qa_router.py 检测 qa_retriever 走旧路径）
+        from src.service.qa_engine.stub_retriever import StubRetriever
+        app.state.weaviate_business_store = None
+        app.state.neo4j_backend = None
+        app.state.llm = llm
+        # 兼容旧路径：qa_router.py explain 检查 qa_retriever；
+        # 后端未就绪时仍提供 StubRetriever 让 chat 能跑（context 为空）
+        app.state.qa_retriever = StubRetriever()
+        app.state.qa_tools = None
+        _log.warning("[startup] 后端未就绪 → 使用 StubRetriever（context 将为空）")
+
+    # v1.3：根据环境变量 KE_QA_USE_REACT 决定用 QASynthesizer 还是 ReActSynthesizer
+    # 默认关闭（保留 v1.2 的稳定路径）；设 KE_QA_USE_REACT=1 才启用 ReAct 循环
+    use_react = os.environ.get("KE_QA_USE_REACT", "").strip() in {"1", "true", "yes"}
+    if use_react:
+        # ReActSynthesizer 在 per-request 路径里由 build_tools_for_project 提供 registry；
+        # 这里构造时不绑定 tool_registry（留给 per-request 注入）
+        # 如果 neo4j_backend 未就绪，app.state.qa_tools 为 None，ReAct 也会降级
+        from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+        max_iter = int(os.environ.get("KE_QA_REACT_MAX_ITER", "3"))
+        # per-request 模式下：tool_registry 由 explain endpoint 注入；
+        # 这里先不绑（react_synthesizer 接受 None tool_registry 会降级到 single-shot）
+        # TODO(Task 24): ReActSynthesizer 改为接受 per-request tool_registry 参数
+        tools_hint = getattr(app.state, "qa_tools", None)
+        app.state.qa_synthesizer = ReActSynthesizer(
+            llm_provider=llm,
+            tool_registry=tools_hint,
+            max_iterations=max_iter,
+        )
+        _log.info(
+            "[startup] qa_engine ready (model=%s, mode=ReAct, max_iter=%d)",
+            llm.model, max_iter,
+        )
+    else:
+        app.state.qa_synthesizer = QASynthesizer(llm_provider=llm)
+        _log.info("[startup] qa_engine ready (model=%s, mode=QA-single-shot)", llm.model)
+
+    # SkillRouter：纯关键词路径无依赖；LLM provider 注入后 route_async 才有 fallback 能力
+    # 当前 SSE 链路只调同步 router.route()，所以连 None 也能跑，
+    # 但既然 LLM 已经在手就一并注入，未来 route_async 想用立刻可用。
+    app.state.qa_router = SkillRouter(llm_provider=llm)
+
+
+def _try_connect_backends() -> tuple[Any, Any]:
+    """连接底层存储资源；任意后端失败就返回 (None, None)。
+
+    Task 22：只返回 singleton 原始 store 对象（WeaviateBusinessInterpretStore 和
+    Neo4jGraphBackend）。不再预构造 adapter / retriever / tool_registry；
+    这些改由 qa_router.py 的 build_retriever_for_project / build_tools_for_project
+    在每个请求时按 project_id 按需构造。
+
+    分两步：
+      1. 连 Weaviate BusinessInterpretation
+      2. 连 Neo4j
+
+    任一步失败都视作整体失败 → 退回 StubRetriever（避免半连接状态）。
+
+    :return: (WeaviateBusinessInterpretStore 或 None, Neo4jGraphBackend 或 None)
+    """
+    import os
+    import logging
+
+    _log = logging.getLogger("qa_engine.startup")
+
+    # ─── 1) Weaviate ───
+    try:
+        # 主仓的业务解读 store；直接用它的默认参数 + .env 覆盖 URL/Key
+        from src.knowledge.weaviate_business_store import WeaviateBusinessInterpretStore
+
+        weaviate_url = os.environ.get("WEAVIATE_URL", "http://localhost:8080")
+        weaviate_grpc_port = int(os.environ.get("WEAVIATE_GRPC_PORT", "50051"))
+        weaviate_api_key = os.environ.get("WEAVIATE_API_KEY") or None
+        # 维度固定 1024（bge-m3 输出维度）；如果将来换 embedding 模型再环境变量化
+        weaviate_dimension = int(os.environ.get("WEAVIATE_DIMENSION", "1024"))
+
+        biz_store = WeaviateBusinessInterpretStore(
+            url=weaviate_url,
+            grpc_port=weaviate_grpc_port,
+            dimension=weaviate_dimension,
+            api_key=weaviate_api_key,
+        )
+        _log.info("[startup] Weaviate 业务解读 store 连接成功: %s", weaviate_url)
+    except Exception as e:
+        _log.warning("[startup] Weaviate 业务解读连接失败: %s", e)
+        return None, None
+
+    # ─── 2) Neo4j ───
+    try:
+        from src.knowledge.graph_neo4j import Neo4jGraphBackend
+
+        neo4j_uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+        neo4j_user = os.environ.get("NEO4J_USER", "neo4j")
+        neo4j_password = os.environ.get("NEO4J_PASSWORD")
+        neo4j_database = os.environ.get("NEO4J_DATABASE", "neo4j")
+
+        # 密码必填，没设就直接放弃（避免 driver 抛一个让人困惑的认证错）
+        if not neo4j_password:
+            _log.warning("[startup] NEO4J_PASSWORD 未设 → 跳过 Neo4j → 不构造真实 retriever")
+            return None, None
+
+        neo4j_backend = Neo4jGraphBackend(
+            uri=neo4j_uri, user=neo4j_user, password=neo4j_password, database=neo4j_database
+        )
+        # 试探一下连接（调一个轻量查询）
+        _ = neo4j_backend.node_count()
+        _log.info("[startup] Neo4j 连接成功: %s", neo4j_uri)
+    except Exception as e:
+        _log.warning("[startup] Neo4j 连接失败: %s", e)
+        return None, None
+
+    # Task 22：只返回原始 singleton 资源，不在这里预构造 adapter / retriever / tools
+    return biz_store, neo4j_backend
+
+
+@app.on_event("shutdown")
+async def close_qa_engine() -> None:
+    """关闭时释放资源：主要是 Neo4j driver。
+
+    Task 22：shutdown 改为关闭 app.state.neo4j_backend（singleton 资源），
+    不再关闭 qa_neo4j_adapter（已删除）。
+    向后兼容：如果旧版 adapter 还在 app.state，也一并尝试关闭。
+    """
+    import logging
+    _log = logging.getLogger("qa_engine.startup")
+
+    # Task 22 新路径：关闭 singleton neo4j_backend
+    backend = getattr(app.state, "neo4j_backend", None)
+    if backend is not None:
+        try:
+            backend.close()
+            _log.info("[shutdown] neo4j_backend 已关闭")
+        except Exception as e:
+            _log.warning("[shutdown] neo4j_backend 关闭时出错: %s", e)
+
+    # 向后兼容旧路径（如果旧版 adapter 还挂着）
+    adapter = getattr(app.state, "qa_neo4j_adapter", None)
+    if adapter is not None:
+        try:
+            adapter.close()
+        except Exception:
+            pass
 
 
 @app.get("/health")

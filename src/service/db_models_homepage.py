@@ -49,13 +49,16 @@ class Project(Base):
     """工程显示名，如 '存款系统'。"""
 
     repo_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    """git 仓库地址，可选。"""
+    """[deprecated] 旧字段，建议迁到 git_url。保留以兼容已有数据。"""
 
     language: Mapped[str] = mapped_column(String(32), default="java", nullable=False)
     """主语言，目前只支持 java。"""
 
     status: Mapped[str] = mapped_column(String(32), default="indexing", nullable=False)
-    """状态：ready / indexing / partial / failed。详见 spec §4.3。"""
+    """状态：configured / indexing / ready / partial / failed。
+
+    v1.0 仓库管理新增 'configured' 表示已配 git，但 pipeline 还没跑（v1.0 不做实际 clone）。
+    """
 
     pipeline_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     """上次 pipeline 跑完的时间。indexing 时为 NULL。"""
@@ -70,8 +73,84 @@ class Project(Base):
     created_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     """创建人 username（人类可读，不是 FK）。"""
 
+    # ─── 仓库管理 v1.0 新增字段 ─────────────────────────────────
+    git_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    """Git 仓库 URL，如 https://gitlab.bank.com/dep/core 或 git@host:path.git"""
+
+    git_branch: Mapped[str] = mapped_column(String(128), default="main", nullable=False)
+    """要跟踪的分支名，默认 main。"""
+
+    git_credential_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("git_credentials.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    """关联到 git_credentials 表；NULL 表示公开仓库不需凭证。"""
+
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    """最后一次成功 git fetch 的时间。"""
+
+    last_synced_commit: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    """最后一次同步的 commit hash（前 40 字符 sha1）。"""
+
+    sync_schedule: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
+    """同步频率：manual / hourly / daily。v1.0 只支持 manual。"""
+
+    # ─── v2.0 多租户新增字段 ──────────────────────────────────────
+    # group_id：工程所属的分组（FK → groups.id）
+    # nullable=True：存量工程可以不属于任何 group，逐步迁移
+    # ondelete='SET NULL'：组被删除时，工程的 group_id 置 NULL，工程本身不删除
+    group_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("groups.id", ondelete="SET NULL"),  # 删 group 不级联删工程
+        nullable=True,  # 允许工程不归属任何 group（存量数据兼容）
+    )
+
     __table_args__ = (
         Index("idx_projects_status", "status"),
+    )
+
+
+class GitCredential(Base):
+    """Git 仓库访问凭证（PAT / 未来 SSH Key）。
+
+    凭证内容用 Fernet 对称加密；密钥从 KE_TOKEN_ENC_KEY env 读取，不入库。
+    UI 上只展示 token_hint（末 4 位），原文永远不返回前端。
+    """
+    __tablename__ = "git_credentials"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    """凭证 ID，如 'cred_abc123'。"""
+
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    """人类可读名称，如 'My GitLab PAT'。"""
+
+    type: Mapped[str] = mapped_column(String(32), default="pat", nullable=False)
+    """凭证类型。v1.0 只支持 'pat'，v2 可加 'ssh_key'。"""
+
+    encrypted_token: Mapped[str] = mapped_column(Text, nullable=False)
+    """Fernet 加密后的 token 密文。解密见 token_crypto.decrypt_token。"""
+
+    token_hint: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    """末 4 位明文（如 '****abc'），仅 UI 展示用。"""
+
+    created_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    """创建人 username。"""
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    """最后一次被 fetch / ls-remote 使用的时间。"""
+
+    # v2.0 新增：凭证归属用户
+    # 暂时 nullable=True（迁移期间允许空）；Task 6 数据迁移完之后改 NOT NULL
+    # ondelete='SET NULL'：用户注销后凭证保留（避免误删 + 配合审计）
+    owner_user_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
 
@@ -94,8 +173,12 @@ class UserProjectAccess(Base):
         primary_key=True,
     )
 
-    role: Mapped[str] = mapped_column(String(32), default="reader", nullable=False)
-    """角色：reader / writer / admin。"""
+    role: Mapped[str] = mapped_column(String(32), default="reporter", nullable=False)
+    """角色：reporter / maintainer / owner（v2.0 GitLab 风格三级）。
+
+    v1 旧值（reader/writer/admin）保留向后兼容，但 v2 不再产出。
+    migration v2b_remap_role 会把存量 reader→reporter / writer→maintainer / admin→owner 迁移。
+    """
 
 
 # ─── 3. qa_sessions ──────────────────────────────────────────────────────────

@@ -23,9 +23,11 @@ from src.service.db_models_homepage import (
     Project as ProjectModel,
     QAMessage,
     QASession,
+    UserProjectAccess,  # v2.0 Task 5：RBAC 测试需要直接操作成员表
 )
 from src.service.project_router import router as project_router
 from src.service.qa_engine.retriever import RetrievedContext
+from src.service.qa_engine.router import SkillRouter
 from src.service.qa_engine.synthesizer import SynthesizedAnswer
 from src.service.qa_router import router as qa_router
 
@@ -69,7 +71,8 @@ def _build_app(session_maker, *, retriever=None, synthesizer=None):
             entry_candidates=[{"entity_id": "method://m1"}],
         ))
     if synthesizer is None:
-        synthesizer = MagicMock()
+        # spec=['synthesize']：限制 mock 只有这一个属性；防止 sse_emitter 误判"支持流式"
+        synthesizer = MagicMock(spec=['synthesize'])
         synthesizer.synthesize = AsyncMock(return_value=SynthesizedAnswer(
             sections=[{"type": "overview", "title": "概述", "content": "答案", "references": []}],
             token_usage=100,
@@ -77,6 +80,9 @@ def _build_app(session_maker, *, retriever=None, synthesizer=None):
         ))
     app.state.qa_retriever = retriever
     app.state.qa_synthesizer = synthesizer
+    # 真实 SkillRouter（关键词路径无依赖，注入零成本）
+    # 不 mock，因为 router 自己是个纯函数，比 mock 更接近真实行为
+    app.state.qa_router = SkillRouter()
     return app
 
 
@@ -185,6 +191,40 @@ def test_explain_sse_events_in_order(client, seed_ready_project):
     assert "event: section_done" in body
 
 
+# ───────── 路由：meta 事件带 skill 决策 ─────────
+
+
+def test_explain_meta_event_includes_skill_decision(client, seed_ready_project):
+    """meta 事件的 data 应该带 skill_id + route_source，便于前端展示『识别为 xxx 类问题』。
+
+    用 dependency 关键词的问题，验证 skill_id == 'dependency'。
+    """
+    import json as _json  # 避免和模块顶部某些 json 字符串冲突
+
+    token = _login(client)
+    with client.stream(
+        "POST",
+        f"/projects/{seed_ready_project}/qa/explain",
+        headers=_auth(token),
+        # "调用" 命中 dependency 关键词
+        json={"question": "OwnerController 调用了哪些方法？"},
+    ) as r:
+        body = "".join(r.iter_text())
+
+    # SSE 帧格式：`event: <type>\ndata: <json>\n\n`
+    # 找到 meta 行后面紧跟的 data: 行
+    lines = body.split("\n")
+    meta_line_idx = next(i for i, l in enumerate(lines) if l == "event: meta")
+    # data: 行紧跟在 event: 行之后
+    data_line = lines[meta_line_idx + 1]
+    assert data_line.startswith("data: ")
+    meta_payload = _json.loads(data_line[len("data: "):])
+
+    assert meta_payload.get("skill_id") == "dependency"
+    # source 应该是 'keyword'（关键词命中而不是 LLM）
+    assert meta_payload.get("route_source") == "keyword"
+
+
 # ───────── 持久化 ─────────
 
 @pytest.mark.asyncio
@@ -212,3 +252,180 @@ async def test_explain_persists_user_and_assistant_messages(session_maker, seed_
         assert sess_count[0].project_id == seed_ready_project
         # 标题取问题前 30 字
         assert "存款开户" in (sess_count[0].title or "")
+
+
+# ───────── v1.5 docx 导出 ─────────
+
+
+@pytest.mark.asyncio
+async def test_export_message_as_docx(session_maker, seed_ready_project):
+    """GET /sessions/{sid}/messages/{mid}/export?format=docx
+       → 返回 200 + word docx binary + Content-Disposition: attachment。
+    """
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    # 1) 先发一个问题让 DB 里有 user + assistant 消息
+    with client.stream(
+        "POST",
+        f"/projects/{seed_ready_project}/qa/explain",
+        headers=_auth(token),
+        json={"question": "测试问题"},
+    ) as r:
+        "".join(r.iter_text())  # 消费完触发持久化
+
+    # 2) 找 assistant 消息的 id
+    async with session_maker() as db:
+        msgs = (await db.execute(
+            select(QAMessage).where(QAMessage.role == "assistant")
+        )).scalars().all()
+        assert len(msgs) == 1
+        assistant_msg = msgs[0]
+        session_id = assistant_msg.session_id
+
+    # 3) 调导出 endpoint
+    r = client.get(
+        f"/projects/{seed_ready_project}/qa/sessions/{session_id}/messages/{assistant_msg.id}/export",
+        headers=_auth(token),
+        params={"format": "docx"},
+    )
+    assert r.status_code == 200
+    # MIME 类型应该是 Word
+    assert "officedocument.wordprocessingml" in r.headers["content-type"]
+    # Content-Disposition 应该是 attachment + filename
+    cd = r.headers.get("content-disposition", "")
+    assert "attachment" in cd.lower()
+    assert ".docx" in cd
+
+    # 内容应该是合法 docx（zip 起头 PK）
+    assert r.content[:2] == b"PK"
+    assert len(r.content) > 1000  # 远大于一个最简单文档
+
+
+@pytest.mark.asyncio
+async def test_export_404_when_message_not_found(session_maker, seed_ready_project):
+    """不存在的 message_id → 404。"""
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+    r = client.get(
+        f"/projects/{seed_ready_project}/qa/sessions/fake-sess/messages/fake-msg/export",
+        headers=_auth(token),
+        params={"format": "docx"},
+    )
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_export_rejects_unsupported_format(session_maker, seed_ready_project):
+    """目前只支持 docx；传 pdf → 400。"""
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+    # 不必有真消息也能触发 format 校验（在解析参数阶段就拒）
+    r = client.get(
+        f"/projects/{seed_ready_project}/qa/sessions/x/messages/y/export",
+        headers=_auth(token),
+        params={"format": "pdf"},
+    )
+    assert r.status_code == 400
+
+
+# ───────── v2.0 Task 5：require_project_role RBAC 校验 ─────────
+
+# 以下两个测试专门验证非 admin 路径下的 RBAC 行为：
+#   - 非 admin + 未加入工程 → 403
+#   - 非 admin + 加为 reporter → 200
+# 注意：alice 默认是 admin（is_admin=True），既有测试走的全是 admin 路径，
+# 加了 require_project_role 后 admin 路径不受影响（is_admin=True → resolve_role 直接返回 owner）。
+
+
+def test_explain_403_when_user_not_project_member(client, seed_ready_project, session_maker):
+    """非 admin 用户、未加入工程 → /qa/explain 应 403。
+
+    步骤：
+      1. 把 alice 的 is_admin 降为 False（让她成为普通用户）
+      2. 不向 user_project_access 插入记录（alice 对工程无任何成员关系）
+      3. 请求 /qa/explain → 期望 403
+    """
+    import asyncio
+    # sqlalchemy 的 update 函数：生成 UPDATE 语句
+    from sqlalchemy import update
+
+    # ── 把 alice 降为普通用户 ────────────────────────────────────────────────
+    async def remove_admin():
+        """异步辅助：在独立 session 里把 is_admin 改为 False。"""
+        # async with session_maker() as s：上下文管理器，自动关闭 session（同时处理异常）
+        async with session_maker() as s:
+            # update(User).where(...).values(...)：构造 UPDATE users SET is_admin=false WHERE username='alice'
+            await s.execute(
+                update(User).where(User.username == "alice").values(is_admin=False)
+            )
+            await s.commit()  # 提交事务，写入数据库
+
+    # asyncio.get_event_loop().run_until_complete(coro)：
+    #   在同步函数里执行异步协程的标准做法（TestClient 的测试函数是同步的，不能直接 await）
+    asyncio.get_event_loop().run_until_complete(remove_admin())
+
+    # ── alice 此时：既非 admin，又不是工程成员 → resolve_role 返 None → 403 ─
+    token = _login(client)
+    r = client.post(
+        f"/projects/{seed_ready_project}/qa/explain",
+        headers=_auth(token),
+        json={"question": "x"},
+    )
+    # require_project_role 加上之前：此处会返回 200（旧行为）
+    # require_project_role 加上之后：应该返回 403（新的正确行为）
+    assert r.status_code == 403, f"期望 403，实际 {r.status_code}: {r.text}"
+
+
+def test_explain_200_when_user_is_project_member(client, seed_ready_project, session_maker):
+    """非 admin 用户 + user_project_access 加为 reporter → 应能正常问答（200）。
+
+    步骤：
+      1. 把 alice 的 is_admin 降为 False
+      2. 向 user_project_access 插入 alice→seed_ready_project 的 reporter 成员记录
+      3. 请求 /qa/explain → 期望 200（SSE 流）
+    """
+    import asyncio
+    from sqlalchemy import select, update
+
+    # ── 降级 alice + 注册为 reporter ────────────────────────────────────────
+    async def setup():
+        """异步辅助：降级 + 插入成员记录（在同一个 session 里保持事务一致性）。"""
+        async with session_maker() as s:
+            # step 1：把 alice 改为非 admin
+            await s.execute(
+                update(User).where(User.username == "alice").values(is_admin=False)
+            )
+            # step 2：查出 alice 的 id（UserProjectAccess 需要整数 user_id）
+            # select(User).where(...)：构造 SELECT * FROM users WHERE username='alice'
+            # scalar_one()：期望恰好一条结果，若零条 / 多条都会抛出异常
+            user = (
+                await s.execute(select(User).where(User.username == "alice"))
+            ).scalar_one()
+
+            # step 3：插入 reporter 成员记录
+            # UserProjectAccess(user_id=..., project_id=..., role=...)：
+            #   构造 ORM 对象，s.add() 把它放入 session 的待插入队列
+            s.add(
+                UserProjectAccess(
+                    user_id=user.id,
+                    project_id=seed_ready_project,
+                    role="reporter",  # 最低权限：只读，可以访问 qa
+                )
+            )
+            await s.commit()  # 一次性提交：is_admin 更新 + 成员插入同在一个事务里
+
+    asyncio.get_event_loop().run_until_complete(setup())
+
+    # ── alice 此时：非 admin，但是工程 reporter → resolve_role 返 'reporter' ≥ 'reporter' → 200
+    token = _login(client)
+    r = client.post(
+        f"/projects/{seed_ready_project}/qa/explain",
+        headers=_auth(token),
+        json={"question": "x"},
+    )
+    # mock retriever / synthesizer 已在 _build_app 中注入，会返回 SSE 流（200）
+    assert r.status_code == 200, f"期望 200，实际 {r.status_code}: {r.text}"

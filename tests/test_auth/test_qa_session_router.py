@@ -127,11 +127,17 @@ def test_list_sessions_with_data(client, seeded_session):
 
 
 def test_list_sessions_filters_by_user(client, seeded_session):
-    """bob 看不到 alice 的会话。"""
+    """bob 未加入工程 → 被 require_project_role("reporter") 拦截，返回 403。
+
+    v2.0 RBAC 行为变更：
+      v1.x：bob 能访问 endpoint，返回空列表（按 user_id 过滤）
+      v2.0：bob 不是工程成员，连 endpoint 都进不去 → 403
+    这更安全：非成员无法探知工程下是否存在任何 QA 数据。
+    """
     token, _ = _login(client, username="bob")
     r = client.get("/projects/deposit/qa/sessions", headers=_auth(token))
-    assert r.status_code == 200
-    assert r.json()["sessions"] == []
+    # require_project_role 先于路由函数执行；bob 无成员关系 → HTTPException(403)
+    assert r.status_code == 403
 
 
 def test_list_sessions_requires_auth(client):
@@ -164,14 +170,20 @@ def test_get_session_404(client):
 
 
 def test_get_session_other_user_forbidden(client, seeded_session):
-    """bob 拿不到 alice 的会话。"""
+    """bob 未加入工程 → 403（被 require_project_role 拦截，无法获取他人会话）。
+
+    v2.0 RBAC 行为变更：
+      v1.x：bob 能进 endpoint，但因 sess.user_id != bob.id 而 404
+      v2.0：bob 不是工程成员，在 endpoint 入口处就被 403 拒绝
+    结果：非成员既无法猜测会话 ID，也无法确认会话是否存在。
+    """
     token, _ = _login(client, username="bob")
     r = client.get(
         f"/projects/deposit/qa/sessions/{seeded_session}",
         headers=_auth(token),
     )
-    # 设计上是 404（不暴露存在性），不是 403
-    assert r.status_code == 404
+    # require_project_role 先执行；bob 非工程成员 → 403，路由函数体不会被执行
+    assert r.status_code == 403
 
 
 # ───────── DELETE /sessions/{sid} ─────────
@@ -203,13 +215,20 @@ def test_delete_session_404(client):
 
 
 def test_delete_other_user_forbidden(client, seeded_session):
-    """bob 不能删 alice 的会话。"""
+    """bob 未加入工程 → 403（被 require_project_role 拦截，无法删除他人会话）。
+
+    v2.0 RBAC 行为变更：
+      v1.x：bob 能进 endpoint，但因 sess.user_id != bob.id 而 404
+      v2.0：bob 不是工程成员，在 endpoint 入口处就被 403 拒绝
+    安全性提升：非成员连"会话是否存在"的信息也无法探测。
+    """
     token, _ = _login(client, username="bob")
     r = client.delete(
         f"/projects/deposit/qa/sessions/{seeded_session}",
         headers=_auth(token),
     )
-    assert r.status_code == 404
+    # require_project_role 先执行；bob 非工程成员 → 403
+    assert r.status_code == 403
 
 
 # ───────── POST /sessions/{sid}/messages/{mid}/feedback ─────────

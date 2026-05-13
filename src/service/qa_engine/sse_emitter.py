@@ -24,8 +24,11 @@ import time
 import uuid
 from typing import AsyncIterator, Awaitable, Callable
 
+from src.service.qa_engine.react_synthesizer import ReActSynthesizer
 from src.service.qa_engine.retriever import QARetriever
+from src.service.qa_engine.router import SkillRouter
 from src.service.qa_engine.synthesizer import QASynthesizer
+from src.service.qa_engine.token_batcher import TokenBatcher
 
 
 # ─── 工具：format SSE 行 ────────────────────────────────────────────────────
@@ -59,32 +62,60 @@ async def stream_qa_answer(
     session_id: str,
     retriever: QARetriever,
     synthesizer: QASynthesizer,
+    router: SkillRouter | None = None,
     history: list[dict] | None = None,
     on_complete: OnCompleteCallback | None = None,
 ) -> AsyncIterator[str]:
     """流式产出 SSE 事件文本。
 
     Args:
+        router: 可选 SkillRouter；传入时会在 meta 事件里附 skill_id + route_source。
+                不传时 meta 不带 skill 字段（向后兼容旧调用方）。
         on_complete: 答案合成成功后的回调（router 用它来持久化消息到 DB）。
                      失败时不调用。
     """
     message_id = "msg_" + uuid.uuid4().hex[:12]
     start = time.monotonic()
 
-    # 1. meta
-    yield format_sse("meta", {
+    # 0. 路由（同步快路径；纯关键词，零延迟）
+    # 如果调用方没传 router，meta 就不带 skill 字段（旧测试/旧调用照常工作）
+    meta_payload: dict[str, object] = {
         "session_id": session_id,
         "message_id": message_id,
         "plan_steps": ["searching", "chain_extraction", "synthesizing"],
-    })
+    }
+    # 决策出来后存起来，下面 retriever.retrieve 还要用 skill_id
+    skill_id_for_retriever: str | None = None
+    if router is not None:
+        # `route` 永远不抛错 —— 兜底到 architecture
+        decision = router.route(question)
+        meta_payload["skill_id"] = decision.skill_id
+        meta_payload["route_source"] = decision.source
+        # matched_keywords 在 UI 上能展示『识别到关键词：调用 / 依赖』方便调优
+        if decision.matched_keywords:
+            meta_payload["matched_keywords"] = decision.matched_keywords
+        # 后面 retriever.retrieve 调用要用
+        skill_id_for_retriever = decision.skill_id
+
+    # 1. meta
+    yield format_sse("meta", meta_payload)
 
     # 2. step: searching
     yield format_sse("step", {"phase": "searching", "desc": "检索相关代码实体"})
 
+    # 把 skill_id 透传给 retriever（router 决定了走哪条 retrieval 策略）
+    # `**` 字典解包：根据 skill_id_for_retriever 是否为 None 动态加字段，
+    # 避免 retrieve 收到 skill_id=None 后被当成"显式传 None"覆盖默认值。
+    retrieve_kwargs: dict[str, object] = {
+        "question": question,
+        "project_id": project_id,
+        "top_k": 5,
+    }
+    if skill_id_for_retriever is not None:
+        retrieve_kwargs["skill_id"] = skill_id_for_retriever
+
     try:
-        ctx = await retriever.retrieve(
-            question=question, project_id=project_id, top_k=5
-        )
+        ctx = await retriever.retrieve(**retrieve_kwargs)
     except Exception as e:
         yield format_sse("error", {
             "code": "RETRIEVE_FAILED",
@@ -99,8 +130,102 @@ async def stream_qa_answer(
     # 4. step: synthesizing
     yield format_sse("step", {"phase": "synthesizing", "desc": "合成业务文档"})
 
+    # ReAct 路径：synthesizer 是 ReActSynthesizer 实例时，注入 on_tool_call 回调
+    # 让它每次调工具前后都 emit SSE 事件给前端"实时反馈"
+    # 用 nonlocal list 收集事件（async generator 跨 await 的标准做法）
+    pending_tool_events: list[tuple[str, dict]] = []
+
+    async def _on_tool_call(phase: str, call, result=None):
+        """ReActSynthesizer 调工具时触发；把事件压栈，主流程 yield 之前 flush。
+
+        因为这个回调是 await 来的，不能直接 yield SSE（yield 必须在 async generator 主体里）；
+        所以暂存到 list，主流程在合适的时机 flush。
+        """
+        # 只塞最关键字段：name + arguments / result（截断）
+        payload: dict = {"phase": phase, "id": call.id, "name": call.name}
+        if phase == "starting":
+            payload["arguments"] = call.arguments
+        else:  # complete
+            # 结果可能很大，截断 600 字以内（足够前端展示概要）
+            result_text = json.dumps(result or {}, ensure_ascii=False)
+            payload["result_preview"] = result_text[:600]
+        pending_tool_events.append(("tool_call", payload))
+
+    # 判断要不要带 on_tool_call：只有 ReActSynthesizer 才认这个 kwarg
+    is_react = isinstance(synthesizer, ReActSynthesizer)
+
+    # v1.7：synthesizer 实现了 synthesize_stream 就走流式路径（QASynthesizer / ReActSynthesizer 都行）
+    # `getattr(obj, "synthesize_stream", None)` 是 Python 鸭子类型检查的常规做法：
+    # 不强求继承某个 ABC，只看实例有没有这个方法
+    supports_stream = (
+        hasattr(synthesizer, "synthesize_stream")
+        and callable(getattr(synthesizer, "synthesize_stream", None))
+    )
+
+    # v1.6 token 流：跟 tool_call 类似，用 list 暂存 token，让 on_token 回调里压栈、主流程 yield
+    # v1.7：经过 TokenBatcher 攒批降事件密度（20 字 / 80ms）
+    pending_tokens: list[str] = []
+    token_batcher = TokenBatcher(min_chars=20, max_ms=80)
+
+    async def _on_token(delta: str) -> None:
+        """LLM 一吐 chunk 就经过 batcher；攒够了再压栈让主循环 yield SSE。"""
+        batch = await token_batcher.add(delta)
+        if batch is not None:
+            pending_tokens.append(batch)
+
     try:
-        answer = await synthesizer.synthesize(ctx, history=history)
+        if supports_stream:
+            # v1.6/v1.7 streaming 路径：
+            #   QASynthesizer.synthesize_stream(ctx, history, on_token)
+            #   ReActSynthesizer.synthesize_stream(ctx, history, on_token, on_tool_call)
+            # 用 asyncio.create_task 把 synthesize_stream 跑在后台，
+            # 主循环每 tick 检查 pending_tokens / pending_tool_events 并 flush。
+            import asyncio
+
+            # 动态构造调用参数：ReAct 才传 on_tool_call
+            stream_kwargs: dict[str, Any] = {
+                "history": history,
+                "on_token": _on_token,
+            }
+            if is_react:
+                stream_kwargs["on_tool_call"] = _on_tool_call
+
+            task = asyncio.create_task(
+                synthesizer.synthesize_stream(ctx, **stream_kwargs)
+            )
+            # 边等 task 边 flush 事件：每 20ms 检查一次
+            while not task.done():
+                # flush pending tool_call events（ReAct 模式才有）
+                while pending_tool_events:
+                    ev_type, ev_data = pending_tool_events.pop(0)
+                    yield format_sse(ev_type, ev_data)
+                # flush 当前 pending tokens
+                while pending_tokens:
+                    delta = pending_tokens.pop(0)
+                    yield format_sse("token", {"delta": delta})
+                await asyncio.sleep(0.02)
+            # task 完成后 buffer 里可能还有最后几个事件
+            while pending_tool_events:
+                ev_type, ev_data = pending_tool_events.pop(0)
+                yield format_sse(ev_type, ev_data)
+            while pending_tokens:
+                delta = pending_tokens.pop(0)
+                yield format_sse("token", {"delta": delta})
+            # v1.7：batcher 里的最后一截残留也要 flush 给前端
+            final_batch = await token_batcher.flush()
+            if final_batch:
+                yield format_sse("token", {"delta": final_batch})
+            answer = task.result()
+        elif is_react:
+            # ReAct 非流式兜底（v1.3 老路径，spec=['synthesize'] mock 走这里）
+            answer = await synthesizer.synthesize(
+                ctx, history=history, on_tool_call=_on_tool_call
+            )
+            for ev_type, ev_data in pending_tool_events:
+                yield format_sse(ev_type, ev_data)
+        else:
+            # 兜底：旧 QASynthesizer 仅有 synthesize
+            answer = await synthesizer.synthesize(ctx, history=history)
     except Exception as e:
         yield format_sse("error", {
             "code": "LLM_FAILED",

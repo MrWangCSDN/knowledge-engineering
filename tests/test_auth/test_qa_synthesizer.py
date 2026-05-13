@@ -148,3 +148,135 @@ async def test_synthesize_with_history():
     user_prompt = llm.complete.call_args.kwargs["user"]
     assert "对话历史" in user_prompt
     assert "上轮答案" in user_prompt
+
+
+# ───────── 嵌套 fence 解析（v1.1 修复） ─────────
+
+@pytest.mark.asyncio
+async def test_synthesize_includes_skill_hint_in_user_prompt():
+    """RetrievedContext.skill_id 设了之后，user prompt 末尾要有"本题分类为 xxx"的提示词。
+
+    LLM 看到这个后，在 Step 1 选视角时会更明确（dependency → dependency-map, etc）。
+    """
+    llm = AsyncMock()
+    llm.complete = AsyncMock(return_value=_ok_answer_json())
+
+    s = QASynthesizer(llm_provider=llm)
+    ctx = RetrievedContext(
+        question="OwnerController 调用了什么",
+        project_id="p",
+        entry_candidates=[{"entity_id": "M1", "summary_text": "x", "level": "api"}],
+        skill_id="dependency",  # 新字段
+    )
+    await s.synthesize(ctx)
+
+    user_prompt = llm.complete.call_args.kwargs["user"]
+    # 关键断言：prompt 里出现 skill_id（不强求确切措辞，只要 dependency 字眼即可）
+    assert "dependency" in user_prompt
+
+
+# ───────── v1.6 streaming ─────────
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_calls_on_token_for_each_chunk():
+    """synthesize_stream(ctx, on_token) 应该：
+      - 调 llm.complete_stream（不是 complete）
+      - 每个 chunk 都调用 on_token(chunk)
+      - 最终返回完整 SynthesizedAnswer（解析后的 sections）
+    """
+    # mock 一个 async generator yield 3 个 chunks
+    async def fake_stream(*, system: str, user: str, **kwargs):
+        # 把 _ok_answer_json 拆成 3 段模拟流
+        full = _ok_answer_json()
+        # 简单 3 段：前半 ```json + body 前半 + body 后半 + ``` 结束
+        mid = len(full) // 2
+        yield full[:mid]
+        yield full[mid:]
+
+    llm = AsyncMock()
+    llm.complete_stream = fake_stream  # 直接换成 async generator function
+
+    s = QASynthesizer(llm_provider=llm)
+
+    # 收集 token 回调的实参
+    tokens: list[str] = []
+
+    async def on_token(t: str):
+        tokens.append(t)
+
+    result = await s.synthesize_stream(_make_ctx(), on_token=on_token)
+
+    # 应该至少收到 2 个 chunk
+    assert len(tokens) == 2
+    # 拼起来等于完整原文
+    assert "".join(tokens) == _ok_answer_json()
+    # 最终解析成结构化答案
+    assert isinstance(result, SynthesizedAnswer)
+    assert len(result.sections) == 2  # _ok_answer_json 有 2 段
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_handles_llm_error():
+    """流式调用中途抛错 → 返回单段 error 答案，不传播异常给上层。"""
+    async def fake_stream(*, system: str, user: str, **kwargs):
+        # 先 yield 一点东西，然后抛
+        yield "前半..."
+        raise RuntimeError("LLM disconnected")
+
+    llm = AsyncMock()
+    llm.complete_stream = fake_stream
+
+    s = QASynthesizer(llm_provider=llm)
+    tokens: list[str] = []
+
+    async def on_token(t: str):
+        tokens.append(t)
+
+    result = await s.synthesize_stream(_make_ctx(), on_token=on_token)
+
+    # 第一段 chunk 收到了
+    assert tokens == ["前半..."]
+    # 但最终返回的是错误兜底答案，不抛
+    assert isinstance(result, SynthesizedAnswer)
+    assert len(result.sections) >= 1
+    assert "失败" in result.sections[0]["content"] or "error" in result.sections[0]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_synthesize_handles_nested_mermaid_fence():
+    """回归：sections.content 嵌入 ```mermaid 子块时，外层 ```json fence 不能被首个内部 ``` 截断。
+
+    历史 bug：parser 用 `split("```", 1)[0]` 从前向后找 fence 结束，
+    遇到 ```mermaid 就会提前截断 → JSON 不完整 → 解析失败 → fallback 单段。
+    修复后用 rsplit 找最后一个 fence。
+    """
+    # 模拟一个含 mermaid 子块的 LLM 输出
+    raw_llm_output = """```json
+{
+  "sections": [
+    {
+      "type": "overview",
+      "title": "业务概述",
+      "content": "测试嵌套 fence 的稳健性",
+      "references": []
+    },
+    {
+      "type": "call_chain",
+      "title": "调用链",
+      "content": "```mermaid\\ngraph LR\\n  A --> B\\n```",
+      "references": []
+    }
+  ]
+}
+```"""
+    llm = AsyncMock()
+    llm.complete = AsyncMock(return_value=raw_llm_output)
+    s = QASynthesizer(llm_provider=llm)
+    result = await s.synthesize(_make_ctx())
+
+    # 修复后：应该解析出 2 段（overview + call_chain）
+    assert len(result.sections) == 2, f"期望 2 段，实际 {len(result.sections)} 段：{result.sections}"
+    assert result.sections[0]["type"] == "overview"
+    assert result.sections[1]["type"] == "call_chain"
+    assert "mermaid" in result.sections[1]["content"]

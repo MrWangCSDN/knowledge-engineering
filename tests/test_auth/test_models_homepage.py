@@ -5,6 +5,7 @@
 """
 from src.service.db_models_homepage import (
     Project,
+    GitCredential,
     UserProjectAccess,
     QASession,
     QAMessage,
@@ -21,9 +22,15 @@ def test_project_table_name():
 def test_project_columns():
     cols = {c.name for c in Project.__table__.columns}
     assert cols == {
+        # 基础字段
         "id", "name", "repo_url", "language",
         "status", "pipeline_at", "indexing_progress",
         "created_at", "created_by",
+        # 仓库管理 v1.0 新增
+        "git_url", "git_branch", "git_credential_id",
+        "last_synced_at", "last_synced_commit", "sync_schedule",
+        # v2.0 多租户新增
+        "group_id",  # FK → groups.id，nullable=True，ondelete='SET NULL'
     }
 
 
@@ -124,3 +131,25 @@ def test_qa_feedback_message_id_pk_and_cascade():
     msg_fks = [fk for fk in fks if fk.column.table.name == "qa_messages"]
     assert len(msg_fks) == 1
     assert msg_fks[0].ondelete == "CASCADE"
+
+
+# ───────── git_credentials（v2.0 新增字段）─────────
+
+def test_git_credential_has_owner_user_id():
+    """v2.0 GitCredential 加 owner_user_id 字段（FK → users.id，nullable=True）。"""
+    cols = {c.name for c in GitCredential.__table__.columns}
+    assert "owner_user_id" in cols, f"GitCredential 缺少 owner_user_id 列，现有：{cols}"
+
+
+def test_git_credential_owner_user_id_nullable():
+    """owner_user_id 必须可为 NULL（迁移期间存量凭证尚未关联用户）。"""
+    cols = {c.name: c for c in GitCredential.__table__.columns}
+    assert cols["owner_user_id"].nullable is True
+
+
+def test_git_credential_owner_user_id_fk_ondelete_set_null():
+    """owner_user_id FK ondelete 应为 SET NULL（用户注销后凭证保留，配合审计）。"""
+    fks = list(GitCredential.__table__.foreign_keys)
+    user_fks = [fk for fk in fks if fk.column.table.name == "users"]
+    assert len(user_fks) == 1, f"GitCredential 应有 1 个指向 users 的 FK，实际：{len(user_fks)}"
+    assert user_fks[0].ondelete == "SET NULL"
