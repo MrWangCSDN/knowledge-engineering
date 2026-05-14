@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Protocol
 
 from src.service.qa_engine.prompts import (
     SYSTEM_PROMPT,
+    _CHIT_CHAT_SYSTEM,  # v1.2 chit-chat 专属
     build_user_prompt,
     build_user_prompt_with_history,
 )
@@ -72,6 +73,25 @@ class QASynthesizer:
     def __init__(self, llm_provider: LLMProviderProto):
         self.llm = llm_provider
 
+    async def _synthesize_chit_chat(self, ctx: RetrievedContext) -> SynthesizedAnswer:
+        """v1.2 chit-chat 闲聊路径：用专属 prompt 调 LLM，返回单段 chit-chat section。
+        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.4。"""
+        reply = await self.llm.complete(
+            system=_CHIT_CHAT_SYSTEM,
+            user=ctx.question,
+        )
+        return SynthesizedAnswer(
+            sections=[{
+                "type": "chit-chat",
+                "title": "",          # 前端不显示 h3 header
+                "content": reply,
+                "references": [],
+            }],
+            token_usage=len(reply.split()),  # 粗算 token；后续可从 LLM provider 拿真实值
+            cost_yuan=0.0,
+            raw_output=reply,
+        )
+
     async def synthesize(
         self,
         ctx: RetrievedContext,
@@ -85,6 +105,10 @@ class QASynthesizer:
           2. 调 LLM 拿 raw 输出
           3. 解析 6 段式 JSON（失败时降级为单段 markdown）
         """
+        # v1.2: chit-chat 走专属分支，跳过 6 段式逻辑
+        if ctx.skill_id == "chit-chat":
+            return await self._synthesize_chit_chat(ctx)
+
         ctx_dict = _ctx_to_dict(ctx)
         if history:
             user_prompt = build_user_prompt_with_history(
