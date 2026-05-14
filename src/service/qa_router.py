@@ -450,7 +450,7 @@ async def archive_session(
 
     return ArchiveResponse(
         id=sess.id,
-        archived_at=sess.archived_at.isoformat() if sess.archived_at else None,
+        archived_at=_iso(sess.archived_at) if sess.archived_at else None,
     )
 
 

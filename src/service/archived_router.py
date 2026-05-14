@@ -2,6 +2,7 @@
 
 设计文档：[[会话归档-设计]] §5.1, §5.5
 """
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends
@@ -14,8 +15,18 @@ from src.service.auth_models import User
 from src.service.db import get_db
 from src.service.db_models_homepage import Project as ProjectModel, QASession
 
-# prefix=/api/user：用户维度（不绑定 project），与 qa_router 的 /projects/.. 平级
-router = APIRouter(prefix="/api/user", tags=["user-archived"])
+
+def _iso(dt: datetime) -> str:
+    """SQLAlchemy naive datetime → 带 Z 后缀的 ISO 8601。
+    设计文档：[[会话归档-设计]] §5.4（规范 ISO 格式）。"""
+    if dt is None:
+        return ""
+    fixed = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+    return fixed.isoformat().replace("+00:00", "Z")
+
+# prefix=/user：用户维度（不绑定 project），与 qa_router 的 /projects/.. 平级
+# 注：/api 前缀由 vite 代理 + production nginx 负责添加和剥离
+router = APIRouter(prefix="/user", tags=["user-archived"])
 
 
 class _ArchivedSessionDTO(BaseModel):
@@ -69,9 +80,9 @@ async def list_archived_sessions(
         by_pid[r.project_id].append(_ArchivedSessionDTO(
             id=r.id,
             title=r.title,
-            archived_at=r.archived_at.isoformat(),
-            created_at=r.created_at.isoformat(),
-            updated_at=r.updated_at.isoformat(),
+            archived_at=_iso(r.archived_at),
+            created_at=_iso(r.created_at),
+            updated_at=_iso(r.updated_at),
             message_count=r.message_count,
         ))
 

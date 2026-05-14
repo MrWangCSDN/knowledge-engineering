@@ -297,7 +297,7 @@ async def test_list_archived_sessions_cross_project(session_maker):
     client = TestClient(app)
     token = _login(client)
 
-    resp = client.get("/api/user/archived-sessions",
+    resp = client.get("/user/archived-sessions",
                       headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     data = resp.json()
@@ -332,7 +332,7 @@ async def test_list_archived_sessions_user_scoped(session_maker):
     client = TestClient(app)
     token = _login(client)  # alice
 
-    resp = client.get("/api/user/archived-sessions",
+    resp = client.get("/user/archived-sessions",
                       headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     data = resp.json()
