@@ -92,3 +92,86 @@ async def test_list_sessions_filters_out_archived(session_maker):
     # 只看到活动，看不到归档
     assert "sess_active" in ids
     assert "sess_archived" not in ids
+
+
+# ───────── Task 4 测试 ─────────
+
+
+@pytest.mark.asyncio
+async def test_archive_session_success(session_maker):
+    """归档自己的 session → 200 + archived_at 被设置。"""
+    async with session_maker() as s:
+        s.add(QASession(id="sess_a", project_id="p1", user_id=1,
+                        title="x", message_count=1))
+        await s.commit()
+
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    resp = client.post("/projects/p1/qa/sessions/sess_a/archive",
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "sess_a"
+    assert body["archived_at"] is not None  # ISO 8601 字符串
+
+    # DB 状态确认
+    async with session_maker() as s:
+        sess = await s.get(QASession, "sess_a")
+        assert sess.archived_at is not None
+
+
+@pytest.mark.asyncio
+async def test_archive_idempotent(session_maker):
+    """归档已归档的 session → 200 + 返回原有 archived_at（不更新时间戳）。"""
+    original = datetime(2026, 5, 1, 12, 0, 0)
+    async with session_maker() as s:
+        s.add(QASession(id="sess_a", project_id="p1", user_id=1,
+                        title="x", message_count=1,
+                        archived_at=original))
+        await s.commit()
+
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    resp = client.post("/projects/p1/qa/sessions/sess_a/archive",
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    # 时间戳保持不变（幂等性）
+    assert body["archived_at"].startswith("2026-05-01")
+
+
+@pytest.mark.asyncio
+async def test_archive_not_owner_returns_404(session_maker):
+    """非 owner 归档别人的 session → 404（与现有 delete 一致，不暴露存在性）。"""
+    async with session_maker() as s:
+        # bob 是另一个用户，session 属于 bob 不属于 alice
+        s.add(User(id=2, email="bob@x.com", username="bob",
+                   hashed_password=sec.hash_password("12345678"),
+                   is_active=True, is_admin=False))
+        s.add(QASession(id="sess_b", project_id="p1", user_id=2,
+                        title="bob 的 session"))
+        await s.commit()
+
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)  # alice 登录
+
+    resp = client.post("/api/projects/p1/qa/sessions/sess_b/archive",
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_archive_session_not_found_returns_404(session_maker):
+    """session 不存在 → 404。"""
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    resp = client.post("/api/projects/p1/qa/sessions/nonexistent/archive",
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 404
