@@ -41,6 +41,7 @@ _SECTION_TITLES: dict[str, str] = {
     "db_ops": "数据库操作",
     "rules": "关键约束与业务规则",
     "sources": "引用来源",
+    "chit-chat": "对话回复",  # v1.2: 防 KeyError 兜底（chit-chat 一般不导 docx）
 }
 
 # 段类型 → emoji（仅在 Word 的小标题里点缀；不依赖 emoji 也能看）
@@ -51,6 +52,7 @@ _SECTION_EMOJIS: dict[str, str] = {
     "db_ops": "💾",
     "rules": "⚠️",
     "sources": "🔗",
+    "chit-chat": "💬",  # v1.2
 }
 
 

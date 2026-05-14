@@ -305,3 +305,15 @@ def test_build_docx_skips_mermaid_render_for_non_call_chain_sections(monkeypatch
     ]
     build_docx(question="x", sections=sections, project_name="P")
     assert captured == []  # 一次都没调
+
+
+# ───────── v1.2: chit-chat fallback ─────────
+
+
+def test_docx_exporter_handles_chit_chat_section_type():
+    """v1.2: chit-chat session 也可以导 docx，title/icon 有兜底。"""
+    from src.service.qa_engine.docx_exporter import _SECTION_TITLES, _SECTION_EMOJIS
+    assert "chit-chat" in _SECTION_TITLES
+    assert "chit-chat" in _SECTION_EMOJIS
+    assert _SECTION_TITLES["chit-chat"] == "对话回复"
+    assert _SECTION_EMOJIS["chit-chat"] == "💬"
