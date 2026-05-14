@@ -242,3 +242,75 @@ async def test_unarchive_not_owner_returns_404(session_maker):
     resp = client.post("/projects/p1/qa/sessions/sess_b/unarchive",
                        headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 404
+
+
+# ─── Task 6: GET /api/user/archived-sessions 测试 ─────────
+
+
+@pytest.mark.asyncio
+async def test_list_archived_sessions_cross_project(session_maker):
+    """跨工程汇总当前用户的所有归档 session，按工程分组。"""
+    async with session_maker() as s:
+        # 再加一个 project p2，alice 也是 reporter
+        s.add(ProjectModel(id="p2", name="P2", status="ready"))
+        s.add(UserProjectAccess(user_id=1, project_id="p2", role="reporter"))
+        # alice 在 p1 一个归档 + p1 一个活动 + p2 一个归档
+        s.add(QASession(id="sess_a1_arch", project_id="p1", user_id=1,
+                        title="p1 归档", message_count=1,
+                        archived_at=datetime(2026, 5, 10, 0, 0, 0)))
+        s.add(QASession(id="sess_a2_active", project_id="p1", user_id=1,
+                        title="p1 活动", message_count=1))
+        s.add(QASession(id="sess_a3_arch", project_id="p2", user_id=1,
+                        title="p2 归档", message_count=2,
+                        archived_at=datetime(2026, 5, 12, 0, 0, 0)))
+        await s.commit()
+
+    # 需要把 archived_router 也挂上去
+    from src.service.archived_router import router as archived_router
+    app = _build_app(session_maker)
+    app.include_router(archived_router)
+    client = TestClient(app)
+    token = _login(client)
+
+    resp = client.get("/api/user/archived-sessions",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # by_project 列表里有 2 个 project（p1 + p2），且按 project_name 排序
+    project_ids = [g["project_id"] for g in data["by_project"]]
+    assert "p1" in project_ids
+    assert "p2" in project_ids
+
+    # 每个 project 里只有归档的 session（活动的不见）
+    p1_group = next(g for g in data["by_project"] if g["project_id"] == "p1")
+    p1_ids = [s["id"] for s in p1_group["sessions"]]
+    assert "sess_a1_arch" in p1_ids
+    assert "sess_a2_active" not in p1_ids
+
+
+@pytest.mark.asyncio
+async def test_list_archived_sessions_user_scoped(session_maker):
+    """看不到其他用户的归档（按 current_user.id 过滤）。"""
+    async with session_maker() as s:
+        s.add(User(id=2, email="bob@x.com", username="bob",
+                   hashed_password=sec.hash_password("12345678"),
+                   is_active=True, is_admin=False))
+        s.add(QASession(id="sess_bob", project_id="p1", user_id=2,
+                        title="bob 的归档", message_count=1,
+                        archived_at=datetime(2026, 5, 10, 0, 0, 0)))
+        await s.commit()
+
+    from src.service.archived_router import router as archived_router
+    app = _build_app(session_maker)
+    app.include_router(archived_router)
+    client = TestClient(app)
+    token = _login(client)  # alice
+
+    resp = client.get("/api/user/archived-sessions",
+                      headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    data = resp.json()
+    # alice 看不到 bob 的
+    all_session_ids = [s["id"] for g in data["by_project"] for s in g["sessions"]]
+    assert "sess_bob" not in all_session_ids
