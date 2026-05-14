@@ -160,7 +160,7 @@ async def test_archive_not_owner_returns_404(session_maker):
     client = TestClient(app)
     token = _login(client)  # alice 登录
 
-    resp = client.post("/api/projects/p1/qa/sessions/sess_b/archive",
+    resp = client.post("/projects/p1/qa/sessions/sess_b/archive",
                        headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 404
 
@@ -172,6 +172,6 @@ async def test_archive_session_not_found_returns_404(session_maker):
     client = TestClient(app)
     token = _login(client)
 
-    resp = client.post("/api/projects/p1/qa/sessions/nonexistent/archive",
+    resp = client.post("/projects/p1/qa/sessions/nonexistent/archive",
                        headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 404
