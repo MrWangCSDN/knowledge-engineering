@@ -309,6 +309,7 @@ async def list_sessions(
         .where(
             QASession.project_id == project_id,
             QASession.user_id == user.id,
+            QASession.archived_at.is_(None),  # 默认只返回活动 session（归档的从此接口看不见）
         )
         .order_by(QASession.updated_at.desc())
     )
