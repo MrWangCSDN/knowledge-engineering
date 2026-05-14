@@ -214,6 +214,12 @@ class QASession(Base):
     message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     """消息数（缓存值，便于列表页展示，不用每次 join）。"""
 
+    archived_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, default=None
+    )
+    """归档时间。NULL = 活动会话（默认）；非 NULL = 已归档（值即归档时刻，归档列表按此倒序）。
+    设计：[[会话归档-设计]] §4.1。"""
+
     __table_args__ = (
         # 主查询：左栏会话历史，按 project_id + user_id 过滤、按 updated_at 倒序
         Index(
