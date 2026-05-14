@@ -34,9 +34,9 @@ class LLMProviderProto(Protocol):
     async def complete(self, *, system: str, user: str, **kwargs: Any) -> str: ...
 
 
-# 4 个 skill 的合法值；用 frozenset 不允许后续修改（防御性编程）
+# 5 个 skill 的合法值；用 frozenset 不允许后续修改（防御性编程）
 # 放模块级而不是类级 —— 它属于"全局常量"语义
-_VALID_SKILL_IDS = frozenset({"business", "dependency", "data-flow", "architecture"})
+_VALID_SKILL_IDS = frozenset({"business", "dependency", "data-flow", "architecture", "chit-chat"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,15 +57,16 @@ class RouteDecision:
 
 # `_SYS_PROMPT_LLM_ROUTE` 是模块级私有常量；用于 LLM fallback 时让模型只选 1 个 skill
 # 用 textwrap.dedent 风格保持缩进干净（这里直接顶头写）
-_LLM_ROUTE_SYSTEM = """你是问题分类器。把用户问题归到下面 4 个 skill 中的 1 个，**只输出 skill 名**，不要任何其他文字。
+_LLM_ROUTE_SYSTEM = """你是问题分类器。把用户问题归到下面 5 个 skill 中的 1 个，**只输出 skill 名**，不要任何其他文字。
 
 可选 skill：
   - business      业务规则 / 约束 / 校验
   - dependency    调用 / 依赖 / 谁调了谁
   - data-flow     数据流 / 表 / 持久化
+  - chit-chat     闲聊 / 社交问候 / 产品问询（如「你好」「你是谁」「能做什么」「KE 是什么」）
   - architecture  整体架构 / 是什么 / 怎么实现 （兜底类）
 
-输出示例（**严格遵守，只输出这 4 个字符串之一**）：
+输出示例（**严格遵守，只输出这 5 个字符串之一**）：
 dependency
 """
 
@@ -79,13 +80,24 @@ class SkillRouter:
                              同步 `route`/`classify` 路径不依赖 LLM。
         """
         # 关键词词典：值是字符串列表，遇到任意一个就归到 key 对应的 skill
-        # 优先级 = dict 插入顺序（Python 3.7+ 保证）：dependency → data-flow → business
+        # 优先级 = dict 插入顺序（Python 3.7+ 保证）：dependency → data-flow → business → chit-chat
         # 一句话同时命中多个 skill 时，越靠前的赢
-        # 设计直觉：dependency 最具体（"调用"），business 最抽象（"规则"），所以前者优先
+        # 设计直觉：dependency 最具体（"调用"），chit-chat 最通用（"你好"），所以前者优先
         self._keywords: dict[str, list[str]] = {
             "dependency": ["调用", "依赖", "调了"],
             "data-flow": ["写表", "写到哪些表", "数据流", "怎么流", "数据库表"],
             "business": ["业务规则", "约束", "限制", "校验"],
+            # v1.2 新增：闲聊 / 社交问候 / 产品问询（放最后，让业务词先命中）
+            "chit-chat": [
+                "你好", "您好", "嗨", "hi", "hello", "hey",
+                "在吗", "在么", "在不在",
+                "早上好", "晚上好", "下午好", "早安", "晚安",
+                "谢谢", "感谢", "辛苦", "thank",
+                "再见", "拜拜", "bye", "goodbye",
+                "抱歉", "对不起", "sorry",
+                "你是谁", "你叫什么", "你能做什么", "你是干嘛的",
+                "KE 是什么", "怎么用", "有什么用",
+            ],
         }
         # 注入式 LLM provider；None 表示"没有 LLM 兜底，硬走默认"
         self._llm = llm_provider
