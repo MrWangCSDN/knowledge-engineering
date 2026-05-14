@@ -92,6 +92,34 @@ class QASynthesizer:
             raw_output=reply,
         )
 
+    async def _synthesize_chit_chat_stream(
+        self,
+        ctx: RetrievedContext,
+        on_token: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> SynthesizedAnswer:
+        """v1.2 chit-chat 流式版：边收 LLM token 边调 on_token。
+        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.6。"""
+        parts: list[str] = []
+        async for tok in self.llm.complete_stream(
+            system=_CHIT_CHAT_SYSTEM,
+            user=ctx.question,
+        ):
+            parts.append(tok)
+            if on_token is not None:
+                await on_token(tok)
+        reply = "".join(parts)
+        return SynthesizedAnswer(
+            sections=[{
+                "type": "chit-chat",
+                "title": "",
+                "content": reply,
+                "references": [],
+            }],
+            token_usage=len(reply.split()),
+            cost_yuan=0.0,
+            raw_output=reply,
+        )
+
     async def synthesize(
         self,
         ctx: RetrievedContext,
@@ -162,6 +190,10 @@ class QASynthesizer:
                          SSE emitter 用这个把 token 转发到前端
         :return: 累计完整后再解析的 SynthesizedAnswer
         """
+        # v1.2: chit-chat 走专属流式分支
+        if ctx.skill_id == "chit-chat":
+            return await self._synthesize_chit_chat_stream(ctx, on_token=on_token)
+
         ctx_dict = _ctx_to_dict(ctx)
         if history:
             user_prompt = build_user_prompt_with_history(ctx.question, ctx_dict, history=history)

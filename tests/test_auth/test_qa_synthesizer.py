@@ -350,3 +350,35 @@ async def test_synthesize_chit_chat_passes_user_question():
 
     call_kwargs = mock_llm.complete.call_args.kwargs
     assert call_kwargs.get("user") == "你是谁"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_chit_chat_emits_tokens():
+    """chit-chat 流式：边接 LLM token 边调 on_token 回调。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.service.qa_engine.synthesizer import QASynthesizer
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    # 模拟 LLM 流式返回 3 个 token
+    async def fake_stream(*, system, user, **kwargs):
+        for tok in ["你好", "！", "有什么可以帮你的？"]:
+            yield tok
+
+    mock_llm = MagicMock()
+    mock_llm.complete_stream = fake_stream  # async generator
+    synthesizer = QASynthesizer(llm_provider=mock_llm)
+
+    received_tokens: list[str] = []
+    async def on_token(t: str):
+        received_tokens.append(t)
+
+    ctx = RetrievedContext(question="你好", project_id="p1", skill_id="chit-chat")
+    answer = await synthesizer.synthesize_stream(ctx, on_token=on_token)
+
+    # 验证：3 个 token 都通过回调推过
+    assert received_tokens == ["你好", "！", "有什么可以帮你的？"]
+    # 验证：最终 answer 单段 chit-chat type，内容拼起来
+    assert len(answer.sections) == 1
+    assert answer.sections[0]["type"] == "chit-chat"
+    assert answer.sections[0]["content"] == "你好！有什么可以帮你的？"
+    assert answer.sections[0]["references"] == []
