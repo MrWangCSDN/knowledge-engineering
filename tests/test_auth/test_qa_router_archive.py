@@ -175,3 +175,70 @@ async def test_archive_session_not_found_returns_404(session_maker):
     resp = client.post("/projects/p1/qa/sessions/nonexistent/archive",
                        headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 404
+
+
+# ───────── Task 5 测试 ─────────
+
+
+@pytest.mark.asyncio
+async def test_unarchive_session_success(session_maker):
+    """unarchive 已归档 session → 200 + archived_at 清空。"""
+    async with session_maker() as s:
+        s.add(QASession(id="sess_a", project_id="p1", user_id=1,
+                        title="x", message_count=1,
+                        archived_at=datetime(2026, 5, 1, 0, 0, 0)))
+        await s.commit()
+
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    resp = client.post("/projects/p1/qa/sessions/sess_a/unarchive",
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "sess_a"
+    assert body["archived_at"] is None
+
+    async with session_maker() as s:
+        sess = await s.get(QASession, "sess_a")
+        assert sess.archived_at is None
+
+
+@pytest.mark.asyncio
+async def test_unarchive_idempotent_on_active_session(session_maker):
+    """unarchive 活动 session → 200 + 仍是 null（无操作）。"""
+    async with session_maker() as s:
+        s.add(QASession(id="sess_a", project_id="p1", user_id=1,
+                        title="x", message_count=1))
+        await s.commit()
+
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    resp = client.post("/projects/p1/qa/sessions/sess_a/unarchive",
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert resp.json()["archived_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_unarchive_not_owner_returns_404(session_maker):
+    """非 owner unarchive → 404。"""
+    async with session_maker() as s:
+        s.add(User(id=2, email="bob@x.com", username="bob",
+                   hashed_password=sec.hash_password("12345678"),
+                   is_active=True, is_admin=False))
+        s.add(QASession(id="sess_b", project_id="p1", user_id=2,
+                        title="bob",
+                        archived_at=datetime(2026, 5, 1, 0, 0, 0)))
+        await s.commit()
+
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    resp = client.post("/projects/p1/qa/sessions/sess_b/unarchive",
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 404

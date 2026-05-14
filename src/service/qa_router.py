@@ -445,6 +445,31 @@ async def archive_session(
     )
 
 
+@router.post(
+    "/sessions/{session_id}/unarchive",
+    # 设计 §5.1：unarchive 需要 session owner + project reporter+
+    dependencies=[Depends(require_project_role("reporter"))],
+)
+async def unarchive_session(
+    project_id: str,
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ArchiveResponse:
+    """把归档 session 恢复为活动状态。幂等：本来就是活动的直接返回 null。
+    设计：[[会话归档-设计]] §5.1, §5.4。"""
+    sess = await db.get(QASession, session_id)
+    if not sess or sess.project_id != project_id or sess.user_id != user.id:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    # 幂等：活动 session 不需要变更
+    if sess.archived_at is not None:
+        sess.archived_at = None
+        await db.commit()
+
+    return ArchiveResponse(id=sess.id, archived_at=None)
+
+
 # ─── 反馈 ───────────────────────────────────────────────────────────────────
 
 class FeedbackRequest(BaseModel):
