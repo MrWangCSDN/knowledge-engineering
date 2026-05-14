@@ -19,6 +19,9 @@ from src.service.db_models_homepage import (
     UserProjectAccess,
 )
 from src.service.project_router import router as project_router
+from src.service.qa_engine.retriever import RetrievedContext
+from src.service.qa_engine.router import SkillRouter
+from src.service.qa_engine.synthesizer import SynthesizedAnswer
 from src.service.qa_router import router as qa_router
 
 
@@ -43,7 +46,8 @@ async def session_maker(monkeypatch):
     return SM
 
 
-def _build_app(session_maker):
+def _build_app(session_maker, *, retriever=None, synthesizer=None):
+    """构造一个新 FastAPI app，注入 mock retriever/synthesizer 到 app.state。"""
     app = FastAPI()
     app.include_router(auth_router)
     app.include_router(project_router)
@@ -54,6 +58,27 @@ def _build_app(session_maker):
             yield s
             await s.commit()
     app.dependency_overrides[get_db] = override_db
+
+    # 默认 mock：
+    if retriever is None:
+        retriever = MagicMock()
+        retriever.retrieve = AsyncMock(return_value=RetrievedContext(
+            question="x", project_id="p",
+            entry_candidates=[{"entity_id": "method://m1"}],
+        ))
+    if synthesizer is None:
+        # spec=['synthesize']：限制 mock 只有这一个属性；防止 sse_emitter 误判"支持流式"
+        synthesizer = MagicMock(spec=['synthesize'])
+        synthesizer.synthesize = AsyncMock(return_value=SynthesizedAnswer(
+            sections=[{"type": "overview", "title": "概述", "content": "答案", "references": []}],
+            token_usage=100,
+            cost_yuan=0.05,
+        ))
+    app.state.qa_retriever = retriever
+    app.state.qa_synthesizer = synthesizer
+    # 真实 SkillRouter（关键词路径无依赖，注入零成本）
+    # 不 mock，因为 router 自己是个纯函数，比 mock 更接近真实行为
+    app.state.qa_router = SkillRouter()
     return app
 
 
@@ -314,3 +339,30 @@ async def test_list_archived_sessions_user_scoped(session_maker):
     # alice 看不到 bob 的
     all_session_ids = [s["id"] for g in data["by_project"] for s in g["sessions"]]
     assert "sess_bob" not in all_session_ids
+
+
+# ───────── Task 7 测试 ─────────
+
+
+@pytest.mark.asyncio
+async def test_explain_to_archived_session_returns_409(session_maker):
+    """对已归档 session POST /qa/explain → 409 Conflict。"""
+    async with session_maker() as s:
+        s.add(QASession(id="sess_arch", project_id="p1", user_id=1,
+                        title="归档了",
+                        archived_at=datetime(2026, 5, 1, 0, 0, 0)))
+        await s.commit()
+
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    resp = client.post(
+        "/projects/p1/qa/explain",
+        json={"question": "继续问", "session_id": "sess_arch"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 409
+    detail = resp.json().get("detail", "")
+    # 友好错误信息含「归档」字样，前端可据此提示
+    assert "归档" in detail or "archived" in detail.lower()

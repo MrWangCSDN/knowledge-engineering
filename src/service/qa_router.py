@@ -171,6 +171,15 @@ async def explain(
     session_id = body.session_id
     is_new_session = session_id is None
 
+    # 检查已有会话是否已归档（仅当 session_id 被提供时）
+    if not is_new_session:
+        existing_session = await db.get(QASession, session_id)
+        if existing_session and existing_session.archived_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="该会话已归档，请先恢复后继续提问"
+            )
+
     if is_new_session:
         session_id = "sess_" + uuid.uuid4().hex[:12]
         sess = QASession(
