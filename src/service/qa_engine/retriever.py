@@ -110,6 +110,15 @@ class QARetriever:
           2. 对 top-N 候选，按 skill_id 决定深度取上下游调用关系
           3. 提取数据表访问（best-effort，失败不抛错）
         """
+        # v1.2: chit-chat 不需要 KG context，直接返回空 ctx（节省 latency + token）
+        # 设计：[[chit-chat-闲聊路径-设计]] §4.2
+        if skill_id == "chit-chat":
+            return RetrievedContext(
+                question=question,
+                project_id=project_id,
+                skill_id="chit-chat",
+            )
+
         # 把 skill_id 一并存入 ctx，下游 synthesizer 据此调整 user prompt
         ctx = RetrievedContext(question=question, project_id=project_id, skill_id=skill_id)
 

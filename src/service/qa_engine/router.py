@@ -34,9 +34,9 @@ class LLMProviderProto(Protocol):
     async def complete(self, *, system: str, user: str, **kwargs: Any) -> str: ...
 
 
-# 4 个 skill 的合法值；用 frozenset 不允许后续修改（防御性编程）
+# 5 个 skill 的合法值；用 frozenset 不允许后续修改（防御性编程）
 # 放模块级而不是类级 —— 它属于"全局常量"语义
-_VALID_SKILL_IDS = frozenset({"business", "dependency", "data-flow", "architecture"})
+_VALID_SKILL_IDS = frozenset({"business", "dependency", "data-flow", "architecture", "chit-chat"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,15 +57,16 @@ class RouteDecision:
 
 # `_SYS_PROMPT_LLM_ROUTE` 是模块级私有常量；用于 LLM fallback 时让模型只选 1 个 skill
 # 用 textwrap.dedent 风格保持缩进干净（这里直接顶头写）
-_LLM_ROUTE_SYSTEM = """你是问题分类器。把用户问题归到下面 4 个 skill 中的 1 个，**只输出 skill 名**，不要任何其他文字。
+_LLM_ROUTE_SYSTEM = """你是问题分类器。把用户问题归到下面 5 个 skill 中的 1 个，**只输出 skill 名**，不要任何其他文字。
 
 可选 skill：
   - business      业务规则 / 约束 / 校验
   - dependency    调用 / 依赖 / 谁调了谁
   - data-flow     数据流 / 表 / 持久化
+  - chit-chat     闲聊 / 社交问候 / 产品问询（如「你好」「你是谁」「能做什么」「KE 是什么」）
   - architecture  整体架构 / 是什么 / 怎么实现 （兜底类）
 
-输出示例（**严格遵守，只输出这 4 个字符串之一**）：
+输出示例（**严格遵守，只输出这 5 个字符串之一**）：
 dependency
 """
 
@@ -79,13 +80,24 @@ class SkillRouter:
                              同步 `route`/`classify` 路径不依赖 LLM。
         """
         # 关键词词典：值是字符串列表，遇到任意一个就归到 key 对应的 skill
-        # 优先级 = dict 插入顺序（Python 3.7+ 保证）：dependency → data-flow → business
+        # 优先级 = dict 插入顺序（Python 3.7+ 保证）：dependency → data-flow → business → chit-chat
         # 一句话同时命中多个 skill 时，越靠前的赢
-        # 设计直觉：dependency 最具体（"调用"），business 最抽象（"规则"），所以前者优先
+        # 设计直觉：dependency 最具体（"调用"），chit-chat 最通用（"你好"），所以前者优先
         self._keywords: dict[str, list[str]] = {
             "dependency": ["调用", "依赖", "调了"],
             "data-flow": ["写表", "写到哪些表", "数据流", "怎么流", "数据库表"],
             "business": ["业务规则", "约束", "限制", "校验"],
+            # v1.2 新增：闲聊 / 社交问候 / 产品问询（放最后，让业务词先命中）
+            "chit-chat": [
+                "你好", "您好", "嗨", "hi", "hello", "hey",
+                "在吗", "在么", "在不在",
+                "早上好", "晚上好", "下午好", "早安", "晚安",
+                "谢谢", "感谢", "辛苦", "thank",
+                "再见", "拜拜", "bye", "goodbye",
+                "抱歉", "对不起", "sorry",
+                "你是谁", "你叫什么", "你能做什么", "你是干嘛的",
+                "KE 是什么", "怎么用", "有什么用",
+            ],
         }
         # 注入式 LLM provider；None 表示"没有 LLM 兜底，硬走默认"
         self._llm = llm_provider
@@ -95,15 +107,22 @@ class SkillRouter:
     def route(self, question: str) -> RouteDecision:
         """纯关键词路由。返回 RouteDecision，永不抛错。
 
+        v1.2.1：兜底从 architecture 改为 chit-chat。
+        理由：业务问题通常含明显关键词（调用 / 数据流 / 业务规则）；
+        关键词不命中说明大概率是社交语 / 模糊问询 / 用户措辞不精准 —
+        走 chit-chat 让 LLM 友好引导回业务能力，比强行走 architecture
+        KG 查询（很可能查空 + 报错）体验更好。
+
         :param question: 用户问题原文
-        :return: RouteDecision，source='keyword' 或兜底 architecture（source='keyword'，matched_keywords=[]）
+        :return: RouteDecision，source='keyword' 或兜底 chit-chat（matched_keywords=[]）
         """
         for skill_id, kws in self._keywords.items():
             hits = [kw for kw in kws if kw in question]
             if hits:
                 return RouteDecision(skill_id=skill_id, matched_keywords=hits, source="keyword")
-        # 兜底；source 仍然是 'keyword'（默认值），因为没用 LLM
-        return RouteDecision(skill_id="architecture")
+        # v1.2.1: 兜底 chit-chat（之前是 architecture）
+        # source 仍然是 'keyword'（默认值），因为没用 LLM
+        return RouteDecision(skill_id="chit-chat")
 
     def classify(self, question: str) -> str:
         """便捷壳：只要 skill_id 字符串时用这个。等价于 `self.route(question).skill_id`。"""
@@ -113,9 +132,10 @@ class SkillRouter:
 
     async def route_async(self, question: str) -> RouteDecision:
         """关键词命中 → 直接返回（同 route）；
-        关键词不命中 → 异步调 LLM 让它在 4 个 skill 里选 1 个。
+        关键词不命中 → 异步调 LLM 让它在 5 个 skill 里选 1 个。
 
-        异常 / 不合法返回都兜底到 architecture，永不抛错（chat 链路不能 5xx）。
+        v1.2.1：异常 / 不合法返回都兜底到 chit-chat（之前是 architecture）。
+        永不抛错（chat 链路不能 5xx）。
         """
         # 1. 先走关键词；命中就直接返回，省 LLM 钱
         keyword_decision = self.route(question)
@@ -134,7 +154,8 @@ class SkillRouter:
             raw = await self._llm.complete(system=_LLM_ROUTE_SYSTEM, user=question)
         except Exception:
             # 任何 LLM 异常都兜底；不暴露错误细节给前端
-            return RouteDecision(skill_id="architecture", source="llm-error")
+            # v1.2.1: 兜底 chit-chat（之前是 architecture）
+            return RouteDecision(skill_id="chit-chat", source="llm-error")
 
         # 4. 解析 + 兜底
         # 取 strip 后第一个 token，避免 LLM 啰嗦多说一句
@@ -142,5 +163,6 @@ class SkillRouter:
         # 在合法 skill 集合里 → 直接采用
         if candidate in _VALID_SKILL_IDS:
             return RouteDecision(skill_id=candidate, source="llm")
-        # 不合法 → 兜底 architecture，但 source 标记为 'llm-fallback' 便于排查"LLM 又胡说了"
-        return RouteDecision(skill_id="architecture", source="llm-fallback")
+        # 不合法 → 兜底 chit-chat（之前是 architecture），但 source 标记为
+        # 'llm-fallback' 便于排查"LLM 又胡说了"
+        return RouteDecision(skill_id="chit-chat", source="llm-fallback")

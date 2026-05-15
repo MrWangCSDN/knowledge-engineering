@@ -68,21 +68,21 @@ def test_classify_business_when_question_asks_about_rules() -> None:
 #   - 锁住"默认必须是 architecture，不能是 None 或抛错"这个 API 契约
 #   - 防止有人为加新 skill 把默认改成别的导致回归
 # 不算严格意义上的 TDD-driven 新代码；坦白承认。
-def test_classify_defaults_to_architecture_for_ambiguous_questions() -> None:
-    """问题不含任何已知关键词 → 兜底到 architecture（最通用的"是什么 / 怎么实现"视角）。
+def test_classify_defaults_to_chit_chat_for_ambiguous_questions() -> None:
+    """v1.2.1：问题不含任何业务关键词 → 兜底到 chit-chat（让 LLM 友好引导回业务能力）。
 
-    设计上 architecture 同时承担：
-      - 已知意图（"OwnerController 怎么实现"）
-      - 兜底（看不出意图的笼统问题）
-    这样路由器不会"识别失败"。
+    v1.2.1 设计转变：
+      - 之前兜底 architecture → 走 KG 查询（很可能查空 + 报错）
+      - 现在兜底 chit-chat → LLM 友好引导用户问得更具体
+    业务问题应该含明显关键词（调用 / 数据流 / 业务规则 / 写表）才进对应 skill。
     """
     router = SkillRouter()
-    # 显式 architecture 类问题（含"怎么实现"语义）
-    assert router.classify("OwnerController 怎么实现的？") == "architecture"
+    # 模糊业务问询（无具体关键词）→ chit-chat 兜底
+    assert router.classify("OwnerController 怎么实现的？") == "chit-chat"
     # 完全笼统、问什么也不像
-    assert router.classify("这是什么？") == "architecture"
+    assert router.classify("这是什么？") == "chit-chat"
     # 业务名词但没明确意图
-    assert router.classify("Owner") == "architecture"
+    assert router.classify("Owner") == "chit-chat"
 
 
 # ───────── RED 5: 升级返回值为 RouteDecision（含可解释字段）─────────
@@ -111,8 +111,9 @@ def test_route_returns_decision_with_matched_keywords() -> None:
     assert "业务规则" in d2.matched_keywords
 
     # 默认兜底：matched_keywords 是空列表（不是 None）
+    # v1.2.1: 兜底改为 chit-chat
     d3 = router.route("Owner")
-    assert d3.skill_id == "architecture"
+    assert d3.skill_id == "chit-chat"
     # `== []` 显式断言空列表；`is None` 会失败（因为返回的是 list 不是 None）
     assert d3.matched_keywords == []
 
@@ -177,8 +178,8 @@ async def test_route_async_keeps_keyword_decision_when_keyword_hits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_route_async_falls_back_to_architecture_when_llm_returns_garbage() -> None:
-    """LLM 返回不在 4 个 skill 范围内 → 兜底 architecture，不抛错。"""
+async def test_route_async_falls_back_to_chit_chat_when_llm_returns_garbage() -> None:
+    """v1.2.1：LLM 返回不在 5 个 skill 范围内 → 兜底 chit-chat（之前 architecture）。"""
     llm = AsyncMock()
     # LLM 偶尔会返回胡说八道的字符串；router 要稳健，不能让前端 5xx
     llm.complete = AsyncMock(return_value="🤷 我不知道选哪个")
@@ -186,13 +187,13 @@ async def test_route_async_falls_back_to_architecture_when_llm_returns_garbage()
     router = SkillRouter(llm_provider=llm)
     decision = await router.route_async("一个无法分类的问题")
 
-    assert decision.skill_id == "architecture"
+    assert decision.skill_id == "chit-chat"
     assert decision.source == "llm-fallback"
 
 
 @pytest.mark.asyncio
-async def test_route_async_falls_back_to_architecture_when_llm_raises() -> None:
-    """LLM 网络错 / 超时 / 限流 → 兜底 architecture，不抛错。"""
+async def test_route_async_falls_back_to_chit_chat_when_llm_raises() -> None:
+    """v1.2.1：LLM 网络错 / 超时 / 限流 → 兜底 chit-chat（之前 architecture）。"""
     llm = AsyncMock()
     # `side_effect` 是 mock 的"调用时引发异常"机制
     llm.complete = AsyncMock(side_effect=RuntimeError("LLM 超时"))
@@ -200,5 +201,5 @@ async def test_route_async_falls_back_to_architecture_when_llm_raises() -> None:
     router = SkillRouter(llm_provider=llm)
     decision = await router.route_async("一个无法分类的问题")
 
-    assert decision.skill_id == "architecture"
+    assert decision.skill_id == "chit-chat"
     assert decision.source == "llm-error"

@@ -280,3 +280,105 @@ async def test_synthesize_handles_nested_mermaid_fence():
     assert result.sections[0]["type"] == "overview"
     assert result.sections[1]["type"] == "call_chain"
     assert "mermaid" in result.sections[1]["content"]
+
+
+# ─── v1.2 chit-chat 分支测试 ─────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_synthesize_chit_chat_returns_single_section():
+    """skill_id='chit-chat' 时返回单段 chit-chat 类型，无 references。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.service.qa_engine.synthesizer import QASynthesizer
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    mock_llm = MagicMock()
+    mock_llm.complete = AsyncMock(return_value="你好！我是 KE 助手，有业务问题随时问我。")
+
+    synthesizer = QASynthesizer(llm_provider=mock_llm)
+    ctx = RetrievedContext(question="你好", project_id="p1", skill_id="chit-chat")
+
+    answer = await synthesizer.synthesize(ctx)
+
+    # 单段输出
+    assert len(answer.sections) == 1
+    section = answer.sections[0]
+    assert section["type"] == "chit-chat"
+    assert "KE" in section["content"]  # 含友好回复内容
+    assert section["references"] == []  # 无引用
+    # title 留空（前端不显示 h3 header）
+    assert section["title"] == ""
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chit_chat_uses_chitchat_system_prompt():
+    """chit-chat 路径用专属 _CHIT_CHAT_SYSTEM 而非 6 段式 SYSTEM_PROMPT。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.service.qa_engine.synthesizer import QASynthesizer
+    from src.service.qa_engine.retriever import RetrievedContext
+    from src.service.qa_engine.prompts import _CHIT_CHAT_SYSTEM, SYSTEM_PROMPT
+
+    mock_llm = MagicMock()
+    mock_llm.complete = AsyncMock(return_value="你好")
+
+    synthesizer = QASynthesizer(llm_provider=mock_llm)
+    ctx = RetrievedContext(question="你好", project_id="p1", skill_id="chit-chat")
+
+    await synthesizer.synthesize(ctx)
+
+    # 检查 LLM 被调用时用的是 chit-chat system prompt
+    call_kwargs = mock_llm.complete.call_args.kwargs
+    system_used = call_kwargs.get("system") or (
+        mock_llm.complete.call_args.args[0] if mock_llm.complete.call_args.args else ""
+    )
+    assert system_used == _CHIT_CHAT_SYSTEM
+    assert system_used != SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_synthesize_chit_chat_passes_user_question():
+    """chit-chat 把用户问题作为 user prompt 传给 LLM。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.service.qa_engine.synthesizer import QASynthesizer
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    mock_llm = MagicMock()
+    mock_llm.complete = AsyncMock(return_value="你好")
+    synthesizer = QASynthesizer(llm_provider=mock_llm)
+
+    ctx = RetrievedContext(question="你是谁", project_id="p1", skill_id="chit-chat")
+    await synthesizer.synthesize(ctx)
+
+    call_kwargs = mock_llm.complete.call_args.kwargs
+    assert call_kwargs.get("user") == "你是谁"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_chit_chat_emits_tokens():
+    """chit-chat 流式：边接 LLM token 边调 on_token 回调。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.service.qa_engine.synthesizer import QASynthesizer
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    # 模拟 LLM 流式返回 3 个 token
+    async def fake_stream(*, system, user, **kwargs):
+        for tok in ["你好", "！", "有什么可以帮你的？"]:
+            yield tok
+
+    mock_llm = MagicMock()
+    mock_llm.complete_stream = fake_stream  # async generator
+    synthesizer = QASynthesizer(llm_provider=mock_llm)
+
+    received_tokens: list[str] = []
+    async def on_token(t: str):
+        received_tokens.append(t)
+
+    ctx = RetrievedContext(question="你好", project_id="p1", skill_id="chit-chat")
+    answer = await synthesizer.synthesize_stream(ctx, on_token=on_token)
+
+    # 验证：3 个 token 都通过回调推过
+    assert received_tokens == ["你好", "！", "有什么可以帮你的？"]
+    # 验证：最终 answer 单段 chit-chat type，内容拼起来
+    assert len(answer.sections) == 1
+    assert answer.sections[0]["type"] == "chit-chat"
+    assert answer.sections[0]["content"] == "你好！有什么可以帮你的？"
+    assert answer.sections[0]["references"] == []

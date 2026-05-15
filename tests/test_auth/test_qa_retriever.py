@@ -252,3 +252,34 @@ async def test_retrieve_graph_failure_does_not_crash(mock_business_store):
     assert len(ctx.entry_candidates) == 2
     # callees 取不到，对应条目可以缺省或为空列表，不能让整个流程挂
     # （实现里要 try/except）
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chit_chat_short_circuits():
+    """skill_id='chit-chat' → 不查 KG，直接返回空 ctx。"""
+    # 准备 mock 的 business_store 和 graph_backend
+    # chit-chat 短路意味着这两个 mock 都不应被调用
+    business_store = MagicMock()
+    business_store.search_method_hits_by_text = MagicMock()  # 不应被 await
+    graph = MagicMock()
+
+    retriever = QARetriever(
+        business_store=business_store,
+        graph=graph,
+    )
+
+    ctx = await retriever.retrieve(
+        question="你好",
+        project_id="p1",
+        skill_id="chit-chat",
+    )
+
+    # 验证：返回空 ctx
+    assert isinstance(ctx, RetrievedContext)
+    assert ctx.question == "你好"
+    assert ctx.project_id == "p1"
+    assert ctx.skill_id == "chit-chat"
+    assert ctx.entry_candidates == []
+
+    # 验证：business_store 没被调用（短路了）
+    business_store.search_method_hits_by_text.assert_not_called()
