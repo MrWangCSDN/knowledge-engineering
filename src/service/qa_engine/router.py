@@ -107,15 +107,22 @@ class SkillRouter:
     def route(self, question: str) -> RouteDecision:
         """纯关键词路由。返回 RouteDecision，永不抛错。
 
+        v1.2.1：兜底从 architecture 改为 chit-chat。
+        理由：业务问题通常含明显关键词（调用 / 数据流 / 业务规则）；
+        关键词不命中说明大概率是社交语 / 模糊问询 / 用户措辞不精准 —
+        走 chit-chat 让 LLM 友好引导回业务能力，比强行走 architecture
+        KG 查询（很可能查空 + 报错）体验更好。
+
         :param question: 用户问题原文
-        :return: RouteDecision，source='keyword' 或兜底 architecture（source='keyword'，matched_keywords=[]）
+        :return: RouteDecision，source='keyword' 或兜底 chit-chat（matched_keywords=[]）
         """
         for skill_id, kws in self._keywords.items():
             hits = [kw for kw in kws if kw in question]
             if hits:
                 return RouteDecision(skill_id=skill_id, matched_keywords=hits, source="keyword")
-        # 兜底；source 仍然是 'keyword'（默认值），因为没用 LLM
-        return RouteDecision(skill_id="architecture")
+        # v1.2.1: 兜底 chit-chat（之前是 architecture）
+        # source 仍然是 'keyword'（默认值），因为没用 LLM
+        return RouteDecision(skill_id="chit-chat")
 
     def classify(self, question: str) -> str:
         """便捷壳：只要 skill_id 字符串时用这个。等价于 `self.route(question).skill_id`。"""
@@ -125,9 +132,10 @@ class SkillRouter:
 
     async def route_async(self, question: str) -> RouteDecision:
         """关键词命中 → 直接返回（同 route）；
-        关键词不命中 → 异步调 LLM 让它在 4 个 skill 里选 1 个。
+        关键词不命中 → 异步调 LLM 让它在 5 个 skill 里选 1 个。
 
-        异常 / 不合法返回都兜底到 architecture，永不抛错（chat 链路不能 5xx）。
+        v1.2.1：异常 / 不合法返回都兜底到 chit-chat（之前是 architecture）。
+        永不抛错（chat 链路不能 5xx）。
         """
         # 1. 先走关键词；命中就直接返回，省 LLM 钱
         keyword_decision = self.route(question)
@@ -146,7 +154,8 @@ class SkillRouter:
             raw = await self._llm.complete(system=_LLM_ROUTE_SYSTEM, user=question)
         except Exception:
             # 任何 LLM 异常都兜底；不暴露错误细节给前端
-            return RouteDecision(skill_id="architecture", source="llm-error")
+            # v1.2.1: 兜底 chit-chat（之前是 architecture）
+            return RouteDecision(skill_id="chit-chat", source="llm-error")
 
         # 4. 解析 + 兜底
         # 取 strip 后第一个 token，避免 LLM 啰嗦多说一句
@@ -154,5 +163,6 @@ class SkillRouter:
         # 在合法 skill 集合里 → 直接采用
         if candidate in _VALID_SKILL_IDS:
             return RouteDecision(skill_id=candidate, source="llm")
-        # 不合法 → 兜底 architecture，但 source 标记为 'llm-fallback' 便于排查"LLM 又胡说了"
-        return RouteDecision(skill_id="architecture", source="llm-fallback")
+        # 不合法 → 兜底 chit-chat（之前是 architecture），但 source 标记为
+        # 'llm-fallback' 便于排查"LLM 又胡说了"
+        return RouteDecision(skill_id="chit-chat", source="llm-fallback")

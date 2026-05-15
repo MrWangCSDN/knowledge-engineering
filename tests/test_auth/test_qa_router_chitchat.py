@@ -45,11 +45,15 @@ def test_business_keyword_overrides_chit_chat():
     assert d.skill_id == "dependency", f"业务词应优先，实际 skill_id = {d.skill_id}"
 
 
-def test_route_unknown_question_still_architecture():
-    """未命中任何关键词时仍兜底 architecture（不破坏现有 v1.1 行为）。"""
+def test_route_unknown_question_falls_back_to_chit_chat():
+    """v1.2.1：未命中任何关键词 → 兜底 chit-chat（之前是 architecture）。
+
+    "都走 chit-chat" 设计转变：业务问题应含明显关键词；不命中说明可能是
+    社交语 / 模糊问询，走 chit-chat 让 LLM 引导回业务能力。
+    """
     r = SkillRouter()
     d = r.route("abcdefgh")  # 不像问候也不像业务
-    assert d.skill_id == "architecture"
+    assert d.skill_id == "chit-chat"
 
 
 @pytest.mark.asyncio
