@@ -72,7 +72,7 @@ def test_qa_session_columns():
     cols = {c.name for c in QASession.__table__.columns}
     assert cols == {
         "id", "project_id", "user_id", "title",
-        "created_at", "updated_at", "message_count",
+        "created_at", "updated_at", "message_count", "archived_at",
     }
 
 

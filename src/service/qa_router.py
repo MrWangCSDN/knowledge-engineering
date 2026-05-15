@@ -171,6 +171,15 @@ async def explain(
     session_id = body.session_id
     is_new_session = session_id is None
 
+    # 检查已有会话是否已归档（仅当 session_id 被提供时）
+    if not is_new_session:
+        existing_session = await db.get(QASession, session_id)
+        if existing_session and existing_session.archived_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="该会话已归档，请先恢复后继续提问"
+            )
+
     if is_new_session:
         session_id = "sess_" + uuid.uuid4().hex[:12]
         sess = QASession(
@@ -309,6 +318,7 @@ async def list_sessions(
         .where(
             QASession.project_id == project_id,
             QASession.user_id == user.id,
+            QASession.archived_at.is_(None),  # 默认只返回活动 session（归档的从此接口看不见）
         )
         .order_by(QASession.updated_at.desc())
     )
@@ -402,6 +412,71 @@ async def delete_session(
 
     await db.delete(sess)
     await db.commit()
+
+
+# ─── 归档 / 恢复 ─────────────────────────────────────────────────────────────
+
+
+class ArchiveResponse(BaseModel):
+    """archive / unarchive 响应：仅返回 id + archived_at（恢复时为 null）。"""
+    id: str
+    archived_at: Optional[str] = None
+
+
+@router.post(
+    "/sessions/{session_id}/archive",
+    # 设计 §5.1：archive 需要 session owner + project reporter+
+    dependencies=[Depends(require_project_role("reporter"))],
+)
+async def archive_session(
+    project_id: str,
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ArchiveResponse:
+    """把 session 设为归档状态。幂等：已归档再调不更新时间戳。
+    设计：[[会话归档-设计]] §5.1, §5.4。"""
+    # owner 检查与 delete_session 同模式：保证只能动自己的 session
+    sess = await db.get(QASession, session_id)
+    if not sess or sess.project_id != project_id or sess.user_id != user.id:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    # 幂等性（§5.4）：已归档 → 不更新时间戳
+    if sess.archived_at is None:
+        from datetime import datetime as _dt
+        sess.archived_at = _dt.now(timezone.utc).replace(tzinfo=None)
+        await db.commit()
+        await db.refresh(sess)
+
+    return ArchiveResponse(
+        id=sess.id,
+        archived_at=_iso(sess.archived_at) if sess.archived_at else None,
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/unarchive",
+    # 设计 §5.1：unarchive 需要 session owner + project reporter+
+    dependencies=[Depends(require_project_role("reporter"))],
+)
+async def unarchive_session(
+    project_id: str,
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ArchiveResponse:
+    """把归档 session 恢复为活动状态。幂等：本来就是活动的直接返回 null。
+    设计：[[会话归档-设计]] §5.1, §5.4。"""
+    sess = await db.get(QASession, session_id)
+    if not sess or sess.project_id != project_id or sess.user_id != user.id:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    # 幂等：活动 session 不需要变更
+    if sess.archived_at is not None:
+        sess.archived_at = None
+        await db.commit()
+
+    return ArchiveResponse(id=sess.id, archived_at=None)
 
 
 # ─── 反馈 ───────────────────────────────────────────────────────────────────

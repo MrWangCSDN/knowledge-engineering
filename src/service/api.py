@@ -16,6 +16,7 @@ from src.service.auth_dependencies import get_current_user
 from src.service.auth_models import User
 from src.service.admin_router import router as admin_router
 from src.service.auth_router import router as auth_router
+from src.service.archived_router import router as archived_router  # Task 6：跨工程归档 session 汇总
 from src.service.credentials_router import router as credentials_router  # v2.0 user-scoped 凭证路由
 from src.service.group_router import router as group_router              # v2.0 Groups CRUD 路由
 from src.service.project_member_router import router as project_member_router  # v2.0 Project Members CRUD 路由
@@ -74,6 +75,7 @@ app = FastAPI(
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(auth_router)
+app.include_router(archived_router)  # Task 6：跨工程归档列表
 app.include_router(project_router)
 app.include_router(qa_router)
 app.include_router(admin_router)
