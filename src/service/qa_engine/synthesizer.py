@@ -18,6 +18,7 @@ from src.service.qa_engine.prompts import (
     _CHIT_CHAT_SYSTEM,  # v1.2 chit-chat 专属
     build_user_prompt,
     build_user_prompt_with_history,
+    with_memory_block,
 )
 from src.service.qa_engine.retriever import RetrievedContext
 
@@ -73,11 +74,13 @@ class QASynthesizer:
     def __init__(self, llm_provider: LLMProviderProto):
         self.llm = llm_provider
 
-    async def _synthesize_chit_chat(self, ctx: RetrievedContext) -> SynthesizedAnswer:
+    async def _synthesize_chit_chat(
+        self, ctx: RetrievedContext, *, memory_block: str | None = None
+    ) -> SynthesizedAnswer:
         """v1.2 chit-chat 闲聊路径：用专属 prompt 调 LLM，返回单段 chit-chat section。
-        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.4。"""
+        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.4；记忆注入见 [[记忆系统-设计]] §7。"""
         reply = await self.llm.complete(
-            system=_CHIT_CHAT_SYSTEM,
+            system=with_memory_block(_CHIT_CHAT_SYSTEM, memory_block),
             user=ctx.question,
         )
         return SynthesizedAnswer(
@@ -96,12 +99,14 @@ class QASynthesizer:
         self,
         ctx: RetrievedContext,
         on_token: Optional[Callable[[str], Awaitable[None]]] = None,
+        *,
+        memory_block: str | None = None,
     ) -> SynthesizedAnswer:
         """v1.2 chit-chat 流式版：边收 LLM token 边调 on_token。
-        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.6。"""
+        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.6；记忆注入见 [[记忆系统-设计]] §7。"""
         parts: list[str] = []
         async for tok in self.llm.complete_stream(
-            system=_CHIT_CHAT_SYSTEM,
+            system=with_memory_block(_CHIT_CHAT_SYSTEM, memory_block),
             user=ctx.question,
         ):
             parts.append(tok)
@@ -125,6 +130,7 @@ class QASynthesizer:
         ctx: RetrievedContext,
         *,
         history: list[dict] | None = None,
+        memory_block: str | None = None,
     ) -> SynthesizedAnswer:
         """主入口（同步式，v1 不流式）。
 
@@ -135,7 +141,7 @@ class QASynthesizer:
         """
         # v1.2: chit-chat 走专属分支，跳过 6 段式逻辑
         if ctx.skill_id == "chit-chat":
-            return await self._synthesize_chit_chat(ctx)
+            return await self._synthesize_chit_chat(ctx, memory_block=memory_block)
 
         ctx_dict = _ctx_to_dict(ctx)
         if history:
@@ -147,7 +153,10 @@ class QASynthesizer:
 
         # 1. 调 LLM
         try:
-            raw = await self.llm.complete(system=SYSTEM_PROMPT, user=user_prompt)
+            raw = await self.llm.complete(
+                system=with_memory_block(SYSTEM_PROMPT, memory_block),
+                user=user_prompt,
+            )
         except Exception as e:
             # LLM 调用本身失败 → 返回错误段（不抛错）
             return SynthesizedAnswer(
@@ -181,6 +190,8 @@ class QASynthesizer:
         ctx: RetrievedContext,
         history: list[dict] | None = None,
         on_token: Optional[Callable[[str], Awaitable[None]]] = None,
+        *,
+        memory_block: str | None = None,
     ) -> SynthesizedAnswer:
         """流式版本的 synthesize：边收 LLM token 边调 on_token 回调。
 
@@ -192,7 +203,9 @@ class QASynthesizer:
         """
         # v1.2: chit-chat 走专属流式分支
         if ctx.skill_id == "chit-chat":
-            return await self._synthesize_chit_chat_stream(ctx, on_token=on_token)
+            return await self._synthesize_chit_chat_stream(
+                ctx, on_token=on_token, memory_block=memory_block
+            )
 
         ctx_dict = _ctx_to_dict(ctx)
         if history:
@@ -207,7 +220,10 @@ class QASynthesizer:
         # 任何异常都在这里吃掉，转成 error 段
         try:
             # `complete_stream` 返回 async generator；用 async for 迭代
-            async for chunk in self.llm.complete_stream(system=SYSTEM_PROMPT, user=user_prompt):
+            async for chunk in self.llm.complete_stream(
+                system=with_memory_block(SYSTEM_PROMPT, memory_block),
+                user=user_prompt,
+            ):
                 buffer.append(chunk)
                 # 触发回调（让 SSE 立即把 token 推给前端）
                 if on_token is not None:
