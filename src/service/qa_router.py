@@ -37,6 +37,7 @@ from src.service.db_models_homepage import (
     QASession,
 )
 from src.service.qa_engine.docx_exporter import build_docx, build_docx_from_template
+from src.service.qa_engine.prompts import _TITLE_SUMMARY_SYSTEM
 from src.service.qa_engine.sse_emitter import stream_qa_answer
 
 # v2.0 Task 5：引入权限 dependency 工厂
@@ -270,6 +271,13 @@ async def explain(
             router=skill_router,  # 可能是 None，sse_emitter 内部处理
             history=body.history,
             on_complete=persist_messages,
+            on_title=_make_title_generator(
+                db=db,
+                session_id=session_id,
+                question=body.question,
+                llm=synthesizer.llm,
+                is_new_session=is_new_session,
+            ),
         ),
         media_type="text/event-stream",
         headers={
@@ -422,6 +430,44 @@ async def delete_session(
 
     await db.delete(sess)
     await db.commit()
+
+
+# ─── 异步标题总结 ───────────────────────────────────────────────────────────
+
+
+def _make_title_generator(*, db, session_id, question, llm, is_new_session):
+    """构造一个 on_title 回调（闭包）。
+
+    仅当 is_new_session 且 session.title_custom==False 时调 LLM 总结，
+    UPDATE+commit DB（先落库，DB 是 source of truth），返回新标题；
+    否则 / 失败 返回 None（静默降级）。
+    设计：[[会话标题-重命名与智能总结-设计]] §3.2
+    """
+    async def _gen():
+        if not is_new_session:
+            return None
+        try:
+            from src.service.db_models_homepage import QASession
+            sess = await db.get(QASession, session_id)
+            if sess is None or sess.title_custom:
+                return None
+            raw = await llm.complete(
+                system=_TITLE_SUMMARY_SYSTEM,
+                user=question,
+            )
+            title = (raw or "").strip().strip('"').strip("「」").strip()
+            if not title:
+                return None
+            if len(title) > 30:
+                title = title[:30]
+            sess.title = title
+            # title_custom 保持 False（系统生成）
+            await db.commit()
+            return title
+        except Exception:
+            return None  # 静默降级，绝不影响主流程
+
+    return _gen
 
 
 # ─── 重命名 ─────────────────────────────────────────────────────────────────
