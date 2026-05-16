@@ -54,3 +54,38 @@ async def test_memory_block_injected_in_chit_chat_path():
     syn = QASynthesizer(llm)
     await syn.synthesize(_ctx(skill_id="chit-chat"), memory_block="用户偏好：用 Java")
     assert "用户偏好：用 Java" in llm.last_system
+
+
+class _CapturingStreamLLM:
+    """记录最后一次调用的 system；同时支持 complete 与 complete_stream（async generator）。"""
+    def __init__(self):
+        self.last_system = None
+
+    async def complete(self, *, system: str, user: str, **kw) -> str:
+        self.last_system = system
+        return '```json\n{"sections":[{"type":"overview",' \
+               '"title":"t","content":"c","references":[]}]}\n```'
+
+    async def complete_stream(self, *, system: str, user: str, **kw):
+        self.last_system = system
+        yield '```json\n{"sections":[{"type":"overview",' \
+              '"title":"t","content":"c","references":[]}]}\n```'
+
+
+@pytest.mark.asyncio
+async def test_memory_block_injected_in_stream_path():
+    llm = _CapturingStreamLLM()
+    syn = QASynthesizer(llm)
+    await syn.synthesize_stream(_ctx(), memory_block="用户偏好：流式注入")
+    assert "用户偏好：流式注入" in llm.last_system
+    assert "企业代码知识分析师" in llm.last_system
+
+
+@pytest.mark.asyncio
+async def test_memory_block_injected_in_chit_chat_stream_path():
+    llm = _CapturingStreamLLM()
+    syn = QASynthesizer(llm)
+    await syn.synthesize_stream(
+        _ctx(skill_id="chit-chat"), memory_block="用户偏好：流式 chit"
+    )
+    assert "用户偏好：流式 chit" in llm.last_system

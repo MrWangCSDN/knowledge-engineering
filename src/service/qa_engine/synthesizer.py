@@ -175,6 +175,8 @@ class QASynthesizer:
         sections = self._parse_sections(raw)
 
         # 3. 估算 token usage（粗算，W8 后端再补真实值）
+        # 注：memory_block 未计入 token 估算（P1 有意为之；token_usage 本就是粗算，
+        # 见 [[记忆系统-设计]] P1）。后续接计费/配额时需显式补上。
         approx_tokens = _estimate_tokens(SYSTEM_PROMPT, user_prompt, raw)
 
         return SynthesizedAnswer(
@@ -246,6 +248,8 @@ class QASynthesizer:
 
         raw = "".join(buffer)
         sections = self._parse_sections(raw)
+        # 注：memory_block 未计入 token 估算（P1 有意为之；token_usage 本就是粗算，
+        # 见 [[记忆系统-设计]] P1）。后续接计费/配额时需显式补上。
         approx_tokens = _estimate_tokens(SYSTEM_PROMPT, user_prompt, raw)
         return SynthesizedAnswer(
             sections=sections,
