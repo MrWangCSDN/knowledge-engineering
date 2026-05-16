@@ -334,3 +334,26 @@ class TestRenameSession:
             headers=_auth(token),
         )
         assert r.status_code == 404
+
+    def test_rename_archived_session_409(self, client, seeded_session, session_maker):
+        token, _ = _login(client)
+
+        # 直接把 session 标记归档（沿用本文件 asyncio.run + session_maker 约定）
+        import asyncio
+        from datetime import datetime
+
+        async def _archive():
+            async with session_maker() as db:
+                s = (await db.execute(
+                    select(QASession).where(QASession.id == seeded_session)
+                )).scalar_one()
+                s.archived_at = datetime.utcnow()
+                await db.commit()
+        asyncio.run(_archive())
+
+        r = client.patch(
+            f"/projects/deposit/qa/sessions/{seeded_session}",
+            json={"title": "改个名"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 409
