@@ -262,3 +262,14 @@ async def test_compact_creates_summary_when_threshold_reached():
     assert row.session_id == "s1"
     assert "PaymentGateway" in row.working_summary
     assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_compact_skips_when_no_new_messages_since_last():
+    # turn_count == msg_count → 距上次压缩零新增，跳过（不调 LLM、不 commit）。
+    # 同时是 Important-1（过阈后每轮都压）的回归守卫。
+    sm = QASessionMemory(session_id="s1", working_summary="prev", turn_count=6)
+    db = _FakeMemDB(session_row=sm, msg_rows=[_FakeMsg() for _ in range(6)])
+    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
+    assert db.committed is False
+    assert db.added == []

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import select
@@ -13,9 +14,13 @@ from sqlalchemy import select
 from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage
 from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM
 
+_log = logging.getLogger(__name__)
+
 
 # 显式记忆触发词（关键词起步；spec §15 开放问题留 P1 用关键词）
 # 命中后剥掉触发词 + 紧随的冒号/空白，剩余即记忆内容。
+# ⚠️ 顺序约定：若将来新增触发词是已有词的「超串」（如「顺便记一下」含「记一下」），
+#    必须把更具体的放前面，否则被较短前缀先匹配（当前 5 个互不为前缀，安全）。
 _TRIGGERS = ("请记住", "记住", "记一下", "记下", "帮我记住")
 
 
@@ -39,6 +44,7 @@ async def recall_memory_block(db: Any, *, user_id: int, session_id: str) -> str:
 
     顺序（spec §7）：会话级在前（工作上下文，最高优先），用户级在后。
     全空 → 返回 ""（调用方据此跳过注入，零开销）。
+    注：本函数自身不吞异常（保持纯逻辑可测）。若调用方要求「记忆失败绝不影响主答」，须自行 try/except —— Task 7 的 router 调用点已这样包裹。
     """
     parts: list[str] = []
 
@@ -68,7 +74,9 @@ async def recall_memory_block(db: Any, *, user_id: int, session_id: str) -> str:
 async def write_explicit_memory(
     db: Any, *, user_id: int, session_id: str, content: str
 ) -> None:
-    """落一条用户级显式记忆（P1：显式只进用户级）。"""
+    """落一条用户级显式记忆（P1：显式只进用户级）。
+    注：自身不吞异常（同 recall_memory_block 契约）；Task 7 调用点已 try/except。
+    """
     db.add(
         QAUserMemory(
             user_id=user_id,
@@ -85,11 +93,12 @@ async def write_explicit_memory(
 async def maybe_compact_session(
     db: Any, llm: Any, *, session_id: str, every_n_messages: int = 6
 ) -> None:
-    """会话级压缩：消息数达到 every_n_messages 且自上次压缩后有增长时，
-    把该会话全部消息压成一段「工作状态」，覆盖式 upsert qa_session_memory。
+    """会话级压缩：每「自上次压缩以来新增 ≥ every_n_messages 条消息」压缩一次。
 
     设计：[[记忆系统-设计]] §4.3（P1 固定 N 轮，N=6 条≈3 轮问答）。
-    任何异常都吞掉（记忆是辅助）。
+    turn_count 记录上次压缩时的 message_count；用「增量 ≥ N」判定，
+    而非「过阈值后每轮都压」——否则消息每轮 +2，过阈后每轮都会调 LLM（成本 bug）。
+    任何异常都吞掉并 debug 记录（记忆是辅助，绝不影响主答）。
     """
     try:
         msg_res = await db.execute(
@@ -107,7 +116,9 @@ async def maybe_compact_session(
         )
         sm = sm_res.scalars().one_or_none()
 
-        if sm is not None and msg_count <= (sm.turn_count or 0):
+        # 距上次压缩的新增量不足 N → 跳过（实现「每 N 条压一次」而非「过阈后每轮压」）
+        prev = (sm.turn_count or 0) if sm is not None else 0
+        if msg_count - prev < every_n_messages:
             return
 
         convo = "\n".join(
@@ -131,4 +142,9 @@ async def maybe_compact_session(
             sm.turn_count = msg_count
         await db.commit()
     except Exception:
+        # 压缩失败绝不影响主流程（spec §4.3）；debug 留痕便于排查（不影响主答）
+        _log.debug(
+            "maybe_compact_session failed for session %s, silently ignored",
+            session_id, exc_info=True,
+        )
         return
