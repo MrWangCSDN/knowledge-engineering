@@ -30,6 +30,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -219,6 +220,14 @@ class QASession(Base):
     )
     """归档时间。NULL = 活动会话（默认）；非 NULL = 已归档（值即归档时刻，归档列表按此倒序）。
     设计：[[会话归档-设计]] §4.1。"""
+
+    title_custom: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("0"), nullable=False, default=False
+    )
+    """标题是否被用户手动重命名过。
+    False = 系统生成（截断 or 异步总结），可被异步总结覆盖；
+    True  = 用户手动 rename 过，异步总结跳过、永不覆盖。
+    设计：[[会话标题-重命名与智能总结-设计]] §2。"""
 
     __table_args__ = (
         # 主查询：左栏会话历史，按 project_id + user_id 过滤、按 updated_at 倒序
