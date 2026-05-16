@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from src.service.qa_engine.react_synthesizer import ReActSynthesizer
 from src.service.qa_engine.retriever import QARetriever
@@ -59,6 +59,14 @@ OnTitleCallback = Callable[
     Awaitable[str | None],
 ]
 
+# on_memory 回调：done + session_title 之后调用（镜像 on_title 模式）。
+# router 用它来：解析显式记忆意图 → 写 qa_user_memory + 视情况压缩会话记忆。
+# 返回 None；失败静默（记忆是辅助，绝不影响主答）。
+OnMemoryCallback = Callable[
+    [],
+    Awaitable[None],
+]
+
 
 # ─── 主生成器 ──────────────────────────────────────────────────────────────
 
@@ -73,6 +81,8 @@ async def stream_qa_answer(
     history: list[dict] | None = None,
     on_complete: OnCompleteCallback | None = None,
     on_title: OnTitleCallback | None = None,
+    memory_block: str | None = None,
+    on_memory: OnMemoryCallback | None = None,
 ) -> AsyncIterator[str]:
     """流式产出 SSE 事件文本。
 
@@ -195,6 +205,7 @@ async def stream_qa_answer(
             stream_kwargs: dict[str, Any] = {
                 "history": history,
                 "on_token": _on_token,
+                "memory_block": memory_block,
             }
             if is_react:
                 stream_kwargs["on_tool_call"] = _on_tool_call
@@ -228,13 +239,14 @@ async def stream_qa_answer(
         elif is_react:
             # ReAct 非流式兜底（v1.3 老路径，spec=['synthesize'] mock 走这里）
             answer = await synthesizer.synthesize(
-                ctx, history=history, on_tool_call=_on_tool_call
+                ctx, history=history, on_tool_call=_on_tool_call,
+                memory_block=memory_block,
             )
             for ev_type, ev_data in pending_tool_events:
                 yield format_sse(ev_type, ev_data)
         else:
             # 兜底：旧 QASynthesizer 仅有 synthesize
-            answer = await synthesizer.synthesize(ctx, history=history)
+            answer = await synthesizer.synthesize(ctx, history=history, memory_block=memory_block)
     except Exception as e:
         yield format_sse("error", {
             "code": "LLM_FAILED",
@@ -300,6 +312,15 @@ async def stream_qa_answer(
                 })
         except Exception:
             # 静默降级：标题总结是辅助功能，绝不影响主流程
+            pass
+
+    # 9. on_memory（记忆系统 P1，2026-05-16）：done + session_title 之后调。
+    # 设计：[[记忆系统-设计]] §6。回调内部自行 commit DB（DB 是 source of truth）；
+    # 这里失败（客户端断开 / 写库异常）静默——记忆是辅助功能，绝不影响主答。
+    if on_memory is not None:
+        try:
+            await on_memory()
+        except Exception:
             pass
 
 

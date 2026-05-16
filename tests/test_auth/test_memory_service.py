@@ -89,3 +89,54 @@ async def test_memory_block_injected_in_chit_chat_stream_path():
         _ctx(skill_id="chit-chat"), memory_block="用户偏好：流式 chit"
     )
     assert "用户偏好：流式 chit" in llm.last_system
+
+
+# ───────── stream_qa_answer 透传 memory_block + on_memory ─────────
+
+from src.service.qa_engine.sse_emitter import stream_qa_answer
+
+
+class _StubAnswer:
+    sections = [{"type": "overview", "title": "t", "content": "c", "references": []}]
+    token_usage = 1
+    cost_yuan = 0.0
+    raw_output = "c"
+
+
+class _SpySynth:
+    """记录 synthesize 收到的 memory_block。无 synthesize_stream → 走非流式兜底。"""
+    def __init__(self):
+        self.seen_memory_block = "UNSET"
+
+    async def synthesize(self, ctx, *, history=None, memory_block=None):
+        self.seen_memory_block = memory_block
+        return _StubAnswer()
+
+
+class _StubRetriever:
+    async def retrieve(self, **kw):
+        return RetrievedContext(
+            question="q", project_id="p1", entry_candidates=[], callees_by_entry={},
+            callers_by_entry={}, table_access_by_entry={}, skill_id="architecture",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stream_passes_memory_block_and_calls_on_memory():
+    synth = _SpySynth()
+    called = {"on_memory": False}
+
+    async def _on_memory():
+        called["on_memory"] = True
+
+    chunks = []
+    async for ev in stream_qa_answer(
+        question="q", project_id="p1", session_id="s1",
+        retriever=_StubRetriever(), synthesizer=synth, router=None,
+        memory_block="用户偏好：简短", on_memory=_on_memory,
+    ):
+        chunks.append(ev)
+
+    assert synth.seen_memory_block == "用户偏好：简短"
+    assert called["on_memory"] is True
+    assert any("event: done" in c for c in chunks)
