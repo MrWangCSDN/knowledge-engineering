@@ -52,6 +52,13 @@ OnCompleteCallback = Callable[
     Awaitable[None],
 ]
 
+# on_title 回调：done 之后调用，返回新标题（str）或 None（跳过/失败）。
+# router 用它来：判断是否首轮 + 未被手动改 → 调 LLM 总结 → UPDATE+commit DB → 返回标题。
+OnTitleCallback = Callable[
+    [],
+    Awaitable[str | None],
+]
+
 
 # ─── 主生成器 ──────────────────────────────────────────────────────────────
 
@@ -65,6 +72,7 @@ async def stream_qa_answer(
     router: SkillRouter | None = None,
     history: list[dict] | None = None,
     on_complete: OnCompleteCallback | None = None,
+    on_title: OnTitleCallback | None = None,
 ) -> AsyncIterator[str]:
     """流式产出 SSE 事件文本。
 
@@ -73,6 +81,7 @@ async def stream_qa_answer(
                 不传时 meta 不带 skill 字段（向后兼容旧调用方）。
         on_complete: 答案合成成功后的回调（router 用它来持久化消息到 DB）。
                      失败时不调用。
+        on_title: done 之后调用；返回非空 str 时额外 emit 一个 session_title 事件。
     """
     message_id = "msg_" + uuid.uuid4().hex[:12]
     start = time.monotonic()
@@ -276,6 +285,22 @@ async def stream_qa_answer(
         "cost_yuan": answer.cost_yuan,
         "latency_ms": latency_ms,
     })
+
+    # 8. session_title（v1，2026-05-16）：仅当 router 传了 on_title 且返回非空
+    # 设计：[[会话标题-重命名与智能总结-设计]] §3.2
+    # 注意：on_title 内部已先 commit DB（DB 是 source of truth），
+    # 这里 emit 失败（客户端断开）也无妨——下次进会话能看到新标题。
+    if on_title is not None:
+        try:
+            new_title = await on_title()
+            if new_title:
+                yield format_sse("session_title", {
+                    "session_id": session_id,
+                    "title": new_title,
+                })
+        except Exception:
+            # 静默降级：标题总结是辅助功能，绝不影响主流程
+            pass
 
 
 # ─── 工具 ───────────────────────────────────────────────────────────────────
