@@ -424,6 +424,49 @@ async def delete_session(
     await db.commit()
 
 
+# ─── 重命名 ─────────────────────────────────────────────────────────────────
+
+
+class RenameSessionBody(BaseModel):
+    """PATCH /sessions/{sid} body：仅含新标题。"""
+    title: str
+
+
+@router.patch(
+    "/sessions/{session_id}",
+    # 重命名：需要工程成员身份（reporter+）；内部再校验 session owner
+    dependencies=[Depends(require_project_role("reporter"))],
+)
+async def rename_session(
+    project_id: str,
+    session_id: str,
+    body: RenameSessionBody,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """重命名会话。置位 title_custom=True，异步总结将永不覆盖。
+
+    设计：[[会话标题-重命名与智能总结-设计]] §3.1
+    """
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="标题不能为空")
+    if len(title) > 100:
+        raise HTTPException(status_code=400, detail="标题不能超过 100 字")
+
+    sess = await db.get(QASession, session_id)
+    if not sess or sess.project_id != project_id or sess.user_id != user.id:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if sess.archived_at is not None:
+        raise HTTPException(status_code=409, detail="已归档会话不可重命名")
+
+    sess.title = title
+    sess.title_custom = True
+    await db.commit()
+
+    return {"id": sess.id, "title": sess.title, "title_custom": sess.title_custom}
+
+
 # ─── 归档 / 恢复 ─────────────────────────────────────────────────────────────
 
 

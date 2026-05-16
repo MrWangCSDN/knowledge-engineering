@@ -289,3 +289,48 @@ def test_post_feedback_validates_vote(client, seeded_session):
         json={"vote": "maybe"},  # 非法
     )
     assert r.status_code == 422
+
+
+# ───────── PATCH /sessions/{sid}（重命名）─────────
+
+class TestRenameSession:
+    """PATCH /projects/{pid}/qa/sessions/{sid} 重命名。"""
+
+    def test_rename_ok_sets_title_custom(self, client, seeded_session):
+        token, _ = _login(client)
+        r = client.patch(
+            f"/projects/deposit/qa/sessions/{seeded_session}",
+            json={"title": "我的自定义标题"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["title"] == "我的自定义标题"
+        assert body["title_custom"] is True
+
+    def test_rename_empty_title_400(self, client, seeded_session):
+        token, _ = _login(client)
+        r = client.patch(
+            f"/projects/deposit/qa/sessions/{seeded_session}",
+            json={"title": "   "},
+            headers=_auth(token),
+        )
+        assert r.status_code == 400
+
+    def test_rename_too_long_400(self, client, seeded_session):
+        token, _ = _login(client)
+        r = client.patch(
+            f"/projects/deposit/qa/sessions/{seeded_session}",
+            json={"title": "x" * 101},
+            headers=_auth(token),
+        )
+        assert r.status_code == 400
+
+    def test_rename_unknown_session_404(self, client, seeded_session):
+        token, _ = _login(client)
+        r = client.patch(
+            "/projects/deposit/qa/sessions/sess_doesnotexist",
+            json={"title": "x"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 404
