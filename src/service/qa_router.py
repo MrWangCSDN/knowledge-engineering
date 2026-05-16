@@ -39,6 +39,12 @@ from src.service.db_models_homepage import (
 from src.service.qa_engine.docx_exporter import build_docx, build_docx_from_template
 from src.service.qa_engine.prompts import _TITLE_SUMMARY_SYSTEM
 from src.service.qa_engine.sse_emitter import stream_qa_answer
+from src.service.memory.service import (
+    recall_memory_block,
+    detect_explicit_memory,
+    write_explicit_memory,
+    maybe_compact_session,
+)
 
 # v2.0 Task 5：引入权限 dependency 工厂
 # require_project_role(min_role) 返回一个 FastAPI dependency（async 闭包）：
@@ -260,7 +266,16 @@ async def explain(
                 sess.message_count = (sess.message_count or 0) + 2
         await db.commit()
 
-    # 5. 返回 SSE 流
+    # 5. 记忆召回（spec §7）：进流前查用户级+会话级，拼 memory_block。
+    # 失败静默 → 空串，不影响主答。
+    try:
+        memory_block = await recall_memory_block(
+            db, user_id=user.id, session_id=session_id
+        )
+    except Exception:
+        memory_block = ""
+
+    # 6. 返回 SSE 流
     return StreamingResponse(
         stream_qa_answer(
             question=body.question,
@@ -277,6 +292,14 @@ async def explain(
                 question=body.question,
                 llm=synthesizer.llm,
                 is_new_session=is_new_session,
+            ),
+            memory_block=memory_block,
+            on_memory=_make_memory_writer(
+                db=db,
+                llm=synthesizer.llm,
+                user_id=user.id,
+                session_id=session_id,
+                question=body.question,
             ),
         ),
         media_type="text/event-stream",
@@ -468,6 +491,34 @@ def _make_title_generator(*, db, session_id, question, llm, is_new_session):
             return None  # 静默降级，绝不影响主流程
 
     return _gen
+
+
+def _make_memory_writer(*, db, llm, user_id, session_id, question):
+    """构造 on_memory 回调（闭包）。done 之后异步执行：
+
+    1. 显式记忆意图（『记住…』）→ 写一条用户级记忆；
+    2. 会话消息达阈值 → 压缩会话工作状态（覆盖式 upsert）。
+
+    全程异常静默（记忆是辅助，绝不影响主答）。
+    设计：[[记忆系统-设计]] §6。
+    """
+    async def _writer() -> None:
+        # 1. 显式写入（高信任，同步生效）
+        try:
+            content = detect_explicit_memory(question)
+            if content:
+                await write_explicit_memory(
+                    db, user_id=user_id, session_id=session_id, content=content
+                )
+        except Exception:
+            pass
+        # 2. 会话压缩（固定 N 轮；service 内部已 try/except 兜底）
+        try:
+            await maybe_compact_session(db, llm, session_id=session_id)
+        except Exception:
+            pass
+
+    return _writer
 
 
 # ─── 重命名 ─────────────────────────────────────────────────────────────────
