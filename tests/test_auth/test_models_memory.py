@@ -27,9 +27,10 @@ def test_user_memory_pk_is_id():
 
 
 def test_user_memory_no_user_fk():
-    # 与 QASession.user_id 一致：故意不加 FK，保留已删用户的记忆
+    # 与 QASession.user_id 一致：故意不加 FK，保留已删用户的记忆。
+    # 强断言『零 FK』（QAUserMemory 设计上无任何外键），避免 all() 空集合真空通过。
     fks = list(QAUserMemory.__table__.foreign_keys)
-    assert all(fk.column.table.name != "users" for fk in fks)
+    assert fks == []
 
 
 def test_user_memory_has_lookup_index():

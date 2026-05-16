@@ -327,19 +327,20 @@ class QAUserMemory(Base):
     user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     """归属用户（对应 users.id）。与 QASession 一致不加 FK：保留已删用户的记忆。"""
 
-    kind: Mapped[str] = mapped_column(String(16), nullable=False)
-    """preference / identity / style_feedback（沿用代码库 String+约定，不用 sa.Enum）。"""
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    """preference / identity / style_feedback（沿用代码库 String+约定，不用 sa.Enum）。
+    String(32) 留余量：'style_feedback' 已 14 字，16 无余量，有数据后改 schema 昂贵。"""
 
     content: Mapped[str] = mapped_column(Text, nullable=False)
     """自然语言软笔记，如『回答尽量简短』。"""
 
-    source: Mapped[str] = mapped_column(String(16), nullable=False, default="explicit")
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="explicit")
     """explicit（用户显式『记住…』）/ extracted（P2 异步抽取，P1 不产出）。"""
 
     source_session_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     """来源会话 ID（可追溯，不加 FK 硬绑）。"""
 
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     """active / archived（软删；遵守工程宪法禁物理删）。"""
 
     created_at: Mapped[datetime] = mapped_column(
