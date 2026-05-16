@@ -24,7 +24,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.service.auth_dependencies import get_current_user
@@ -361,10 +361,20 @@ async def get_session_detail(
         raise HTTPException(status_code=404, detail="会话不存在")
 
     # 关联读消息（lazy load 用 await db.refresh 或显式 select）
+    #
+    # ⚠️ created_at tie-breaker（2026-05-16 修）：
+    # persist_messages 把 user + assistant 两条消息在同一个 db.commit() 里写入，
+    # created_at 用 server_default=func.now()（MySQL DATETIME 秒级精度）→ 两条
+    # 时间戳完全相同。id 是随机 UUID，不是自增，所以 ORDER BY created_at 遇到
+    # 并列时 tie-break 随机 → assistant 有时排到 user 前面（前端表现为"答在问之上"）。
+    # 修复：同一 created_at 时，强制 user(0) 排在 assistant(1) 前。
     msgs_stmt = (
         select(QAMessage)
         .where(QAMessage.session_id == session_id)
-        .order_by(QAMessage.created_at)
+        .order_by(
+            QAMessage.created_at,
+            case((QAMessage.role == "user", 0), else_=1),
+        )
     )
     msgs = (await db.execute(msgs_stmt)).scalars().all()
 
