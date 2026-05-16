@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import timezone
 from typing import Literal, Optional
@@ -56,6 +57,7 @@ from src.service.memory.service import (
 # FastAPI 的 dependencies 参数：不需要路由函数参数接收返回值，只需副作用（权限检查）时使用
 from src.service.permission_deps import require_project_role
 
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/projects/{project_id}/qa", tags=["qa"])
 
@@ -275,6 +277,10 @@ async def explain(
     except Exception:
         memory_block = ""
 
+    # ⚠️ db session 在整个 StreamingResponse 迭代期间保持打开：Starlette 在依赖
+    #    yield 退出后才迭代响应体，故所有流后回调（_make_title_generator /
+    #    _make_memory_writer）都依赖此点。若将来把 stream_qa_answer 挪到后台任务/
+    #    worker，必须为这些回调重新划定 db session 作用域，否则 session 已关闭。
     # 6. 返回 SSE 流
     return StreamingResponse(
         stream_qa_answer(
@@ -501,6 +507,8 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question):
 
     全程异常静默（记忆是辅助，绝不影响主答）。
     设计：[[记忆系统-设计]] §6。
+    注：会话压缩只统计已持久化的 QAMessage；若本轮 persist_messages 失败，
+    本轮消息不计入（下一轮自然纠正，非数据损坏）。
     """
     async def _writer() -> None:
         # 1. 显式写入（高信任，同步生效）
@@ -511,7 +519,10 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question):
                     db, user_id=user_id, session_id=session_id, content=content
                 )
         except Exception:
-            pass
+            _log.debug(
+                "explicit memory write failed for session %s, silently ignored",
+                session_id, exc_info=True,
+            )
         # 2. 会话压缩（固定 N 轮；service 内部已 try/except 兜底）
         try:
             await maybe_compact_session(db, llm, session_id=session_id)

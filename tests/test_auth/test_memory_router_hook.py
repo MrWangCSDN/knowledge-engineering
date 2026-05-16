@@ -93,3 +93,20 @@ async def test_writer_never_raises_on_llm_failure():
     )
     await writer()
     assert any(isinstance(o, QAUserMemory) for o in db.added)
+
+
+@pytest.mark.asyncio
+async def test_writer_compact_llm_failure_is_silent_and_noop():
+    # 无触发词（不写用户记忆）+ 达阈值但 LLM 压缩抛错 → 静默吞掉，无任何写入、不抛
+    class _BoomLLM:
+        async def complete(self, *, system, user, **kw):
+            raise RuntimeError("LLM down")
+
+    db = _FakeDB(msg_rows=[_FakeMsg() for _ in range(6)])
+    writer = _make_memory_writer(
+        db=db, llm=_BoomLLM(), user_id=9, session_id="s1",
+        question="下单流程怎么走",   # 无触发词
+    )
+    await writer()  # 必须不抛
+    assert db.added == []
+    assert db.committed is False
