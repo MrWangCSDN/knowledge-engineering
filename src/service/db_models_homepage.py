@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -311,4 +312,75 @@ class QAFeedback(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
+    )
+
+
+# ─── 6. qa_user_memory（记忆系统 P1：用户级软笔记）───────────────────────────
+# 设计：[[记忆系统-设计]] §4.1。跨工程，量小，召回时全量注入 system prompt。
+
+class QAUserMemory(Base):
+    """用户级记忆：偏好 / 身份 / 风格反馈。跨所有工程，纯软笔记。"""
+    __tablename__ = "qa_user_memory"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    """归属用户（对应 users.id）。与 QASession 一致不加 FK：保留已删用户的记忆。"""
+
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    """preference / identity / style_feedback（沿用代码库 String+约定，不用 sa.Enum）。"""
+
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    """自然语言软笔记，如『回答尽量简短』。"""
+
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="explicit")
+    """explicit（用户显式『记住…』）/ extracted（P2 异步抽取，P1 不产出）。"""
+
+    source_session_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    """来源会话 ID（可追溯，不加 FK 硬绑）。"""
+
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    """active / archived（软删；遵守工程宪法禁物理删）。"""
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # 召回主查询：where user_id + status='active'
+        Index("idx_qa_user_memory_user_active", "user_id", "status"),
+    )
+
+
+# ─── 7. qa_session_memory（记忆系统 P1：会话级工作状态）──────────────────────
+# 设计：[[记忆系统-设计]] §4.3。一会话一行，滚动覆盖压缩摘要。
+
+class QASessionMemory(Base):
+    """会话级记忆：压缩后的工作状态。一对一绑定 QASession，覆盖式更新。"""
+    __tablename__ = "qa_session_memory"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("qa_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    """绑定的会话。删会话级联删其记忆。unique 保证一会话一行。"""
+
+    working_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    """压缩后的工作状态（本次目标 / 已确认 / 已排除）。"""
+
+    focus_entity_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    """当前聚焦的 entity_id 列表（P1 可留空，为 P2/P3 预留）。"""
+
+    turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    """上次压缩时的 message_count（用于判断是否需要再压缩）。"""
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )
