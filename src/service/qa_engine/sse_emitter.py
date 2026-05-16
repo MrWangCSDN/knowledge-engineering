@@ -92,6 +92,10 @@ async def stream_qa_answer(
         on_complete: 答案合成成功后的回调（router 用它来持久化消息到 DB）。
                      失败时不调用。
         on_title: done 之后调用；返回非空 str 时额外 emit 一个 session_title 事件。
+        memory_block: 召回的记忆块（用户级 + 会话级）；非空时由 synthesizer
+                      注入到 system prompt 顶部。None/空 → 行为与改前完全一致。
+        on_memory: done + session_title 之后调用（镜像 on_title）；router 用它
+                   解析显式记忆意图写库 + 视情况压缩会话记忆。失败静默，不影响主答。
     """
     message_id = "msg_" + uuid.uuid4().hex[:12]
     start = time.monotonic()
