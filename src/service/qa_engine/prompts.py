@@ -309,3 +309,33 @@ _TITLE_SUMMARY_SYSTEM = (
     "直接输出标题本身：不要解释、不要引号、不要标点结尾、不要前缀。"
     "若问题是寒暄（你好/在吗等），输出「日常问候」。"
 )
+
+
+# ─── 记忆系统 P1（2026-05-16）──────────────────────────────────────────────
+# 设计：[[记忆系统-设计]] §7。记忆块注入 system prompt 顶部（优先级最高，
+# 早于角色与规则），让模型先读「人类真相」再按既有规则作答。
+
+_MEMORY_BLOCK_TEMPLATE = (
+    "═══════ 记忆（关于本用户 / 本次会话的已知事实，优先参考）═══════\n"
+    "{block}\n"
+    "═══════════════════════════════════════════════════════════════\n\n"
+)
+
+
+def with_memory_block(system: str, memory_block: str | None) -> str:
+    """把召回的记忆块拼到 system prompt 最前面。
+
+    memory_block 为 None / 全空白 → 原样返回 system（零开销、行为不变）。
+    """
+    if not memory_block or not memory_block.strip():
+        return system
+    return _MEMORY_BLOCK_TEMPLATE.format(block=memory_block.strip()) + system
+
+
+# 会话级压缩：把最近若干轮对话压成一段「工作状态」（本次目标/已确认/已排除）。
+# 设计：[[记忆系统-设计]] §4.3 会话级。
+_SESSION_COMPACT_SYSTEM = (
+    "你是会话工作状态压缩器。基于给定的多轮问答，用中文输出一段不超过 150 字的"
+    "「当前工作状态」概括，只保留对后续追问有用的信息：本次会话目标、已确认的结论、"
+    "已排除的方向、当前聚焦点。直接输出概括正文，不要前缀、不要解释、不要分点编号。"
+)
