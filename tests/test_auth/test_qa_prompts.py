@@ -181,3 +181,18 @@ def test_build_user_prompt_with_history_byte_identical_after_refactor():
     expected = f"【对话历史】\n[user] Q1\n[assistant] A1\n\n{base}"
     assert build_user_prompt_with_history("问题", ctx, history=h) == expected
     assert build_user_prompt_with_history("问题", ctx, history=None) == base
+
+
+# ───────── §21：_SESSION_COMPACT_SYSTEM 忠实对话摘要 characterization ─────────
+from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM
+
+
+def test_session_compact_system_is_faithful_digest_not_taskonly():
+    s = _SESSION_COMPACT_SYSTEM
+    assert "忠实保留" in s
+    assert "不得丢弃" in s and "【已有会话摘要】" in s
+    assert "时间线" in s
+    assert "300" in s
+    assert "会话工作状态压缩器" not in s
+    assert "本次会话目标" not in s
+    assert "150" not in s
