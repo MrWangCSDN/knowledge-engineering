@@ -4,7 +4,7 @@
 import pytest
 
 from src.service.qa_router import _make_memory_writer
-from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage
+from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
 
 
 class _FakeResult:
@@ -121,3 +121,41 @@ async def test_writer_force_compact_threads_to_maybe_compact():
     )
     await writer()
     assert any(isinstance(o, QASessionMemory) for o in db.added)
+
+
+@pytest.mark.asyncio
+async def test_writer_project_trigger_writes_project_not_user():
+    db = _FakeDB()
+    writer = _make_memory_writer(
+        db=db, llm=_FakeLLM(), user_id=3, session_id="s1",
+        question="记住这个工程：orders_v2 是现行表", project_id="deposit",
+    )
+    await writer()
+    proj = [o for o in db.added if isinstance(o, QAProjectMemory)]
+    usr = [o for o in db.added if isinstance(o, QAUserMemory)]
+    assert len(proj) == 1 and proj[0].content == "orders_v2 是现行表"
+    assert proj[0].project_id == "deposit"
+    assert usr == []
+
+
+@pytest.mark.asyncio
+async def test_writer_generic_trigger_still_user_level():
+    db = _FakeDB()
+    writer = _make_memory_writer(
+        db=db, llm=_FakeLLM(), user_id=3, session_id="s1",
+        question="记住我喜欢简短回答", project_id="deposit",
+    )
+    await writer()
+    assert any(isinstance(o, QAUserMemory) for o in db.added)
+    assert not any(isinstance(o, QAProjectMemory) for o in db.added)
+
+
+@pytest.mark.asyncio
+async def test_writer_project_id_none_no_crash():
+    db = _FakeDB()
+    writer = _make_memory_writer(
+        db=db, llm=_FakeLLM(), user_id=3, session_id="s1",
+        question="记住这个工程：X",
+    )
+    await writer()
+    assert not any(isinstance(o, QAProjectMemory) for o in db.added)

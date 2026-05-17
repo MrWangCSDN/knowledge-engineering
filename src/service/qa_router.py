@@ -45,6 +45,8 @@ from src.service.memory.service import (
     detect_explicit_memory,
     write_explicit_memory,
     maybe_compact_session,
+    detect_explicit_project_memory,
+    write_explicit_project_memory,
 )
 
 # v2.0 Task 5：引入权限 dependency 工厂
@@ -272,7 +274,7 @@ async def explain(
     # 失败静默 → 空串，不影响主答。
     try:
         memory_block = await recall_memory_block(
-            db, user_id=user.id, session_id=session_id
+            db, user_id=user.id, session_id=session_id, project_id=project_id
         )
     except Exception:
         memory_block = ""
@@ -331,6 +333,7 @@ async def explain(
                 user_id=user.id,
                 session_id=session_id,
                 question=body.question,
+                project_id=project_id,
                 force_compact=history_trimmed,
             ),
         ),
@@ -525,10 +528,10 @@ def _make_title_generator(*, db, session_id, question, llm, is_new_session):
     return _gen
 
 
-def _make_memory_writer(*, db, llm, user_id, session_id, question, force_compact: bool = False):
+def _make_memory_writer(*, db, llm, user_id, session_id, question, project_id=None, force_compact: bool = False):
     """构造 on_memory 回调（闭包）。done 之后异步执行：
 
-    1. 显式记忆意图（『记住…』）→ 写一条用户级记忆；
+    1. 显式记忆意图 → 工程级（「记住这个工程：…」，project_id 存在时优先）否则用户级（「记住…」）；
     2. 会话消息达阈值 → 压缩会话工作状态（覆盖式 upsert）。
 
     全程异常静默（记忆是辅助，绝不影响主答）。
@@ -537,13 +540,23 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question, force_compact
     本轮消息不计入（下一轮自然纠正，非数据损坏）。
     """
     async def _writer() -> None:
-        # 1. 显式写入（高信任，同步生效）
+        # 1. 显式写入（先工程后通用：工程触发词是「记住」超串，必须先判）
         try:
-            content = detect_explicit_memory(question)
-            if content:
-                await write_explicit_memory(
-                    db, user_id=user_id, session_id=session_id, content=content
+            proj_content = (
+                detect_explicit_project_memory(question)
+                if project_id is not None else None
+            )
+            if proj_content:
+                await write_explicit_project_memory(
+                    db, project_id=project_id, user_id=user_id,
+                    session_id=session_id, content=proj_content,
                 )
+            else:
+                content = detect_explicit_memory(question)
+                if content:
+                    await write_explicit_memory(
+                        db, user_id=user_id, session_id=session_id, content=content
+                    )
         except Exception:
             _log.debug(
                 "explicit memory write failed for session %s, silently ignored",
