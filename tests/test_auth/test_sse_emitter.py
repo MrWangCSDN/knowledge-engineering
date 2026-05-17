@@ -244,8 +244,10 @@ async def test_stream_emits_token_events_when_synthesizer_supports_stream() -> N
                  "references": []}]
     final_answer = SynthesizedAnswer(sections=sections, token_usage=10, cost_yuan=0.01)
 
-    async def fake_stream(ctx, history=None, on_token=None):
+    async def fake_stream(ctx, history=None, on_token=None, memory_block=None, **kwargs):
         # 模拟 4 个 chunk
+        # memory_block/**kwargs：吸收 P2② 起 stream_qa_answer 透传的新 kwarg
+        # （memory_block 等），防 fake 签名落后于真实 synthesize_stream 再致 TypeError
         for chunk in ["你好", "，", "世界", "！"]:
             if on_token:
                 await on_token(chunk)
@@ -332,7 +334,9 @@ async def test_stream_handles_react_synthesizer_with_token_and_tool_call_events(
     synth = MagicMock(spec=ReActSynthesizer)
 
     # synthesize_stream 模拟：先 emit 2 个 tool_call 事件，然后 5 个 token chunks
-    async def fake_stream(ctx, history=None, on_token=None, on_tool_call=None):
+    async def fake_stream(ctx, history=None, on_token=None, on_tool_call=None,
+                          memory_block=None, **kwargs):
+        # memory_block/**kwargs：吸收 P2② 起 stream_qa_answer 透传的新 kwarg
         if on_tool_call:
             call = _ToolCall(id="c1", name="ke_callees", arguments={"entity_id": "M"})
             await on_tool_call("starting", call)
