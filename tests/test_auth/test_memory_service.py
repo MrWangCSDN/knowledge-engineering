@@ -399,7 +399,7 @@ async def test_compact_non_force_unchanged_below_floor():
 @pytest.mark.asyncio
 async def test_stream_meta_carries_context_usage():
     synth = _SpySynth()
-    cu = {"used_tokens": 1234, "budget_tokens": 128000, "pct": 1.0,
+    cu = {"used_tokens": 1234, "window_tokens": 128000, "pct": 1.0,
           "history_trimmed": True}
     chunks = []
     async for ev in stream_qa_answer(
@@ -410,7 +410,7 @@ async def test_stream_meta_carries_context_usage():
         chunks.append(ev)
     meta = [c for c in chunks if c.startswith("event: meta")][0]
     assert '"context_usage"' in meta and '"history_trimmed":true' in meta
-    assert '"budget_tokens":128000' in meta
+    assert '"window_tokens":128000' in meta
 
 
 @pytest.mark.asyncio

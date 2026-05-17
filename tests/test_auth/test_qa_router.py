@@ -390,6 +390,74 @@ def test_explain_403_when_user_not_project_member(client, seed_ready_project, se
     assert r.status_code == 403, f"期望 403，实际 {r.status_code}: {r.text}"
 
 
+@pytest.mark.asyncio
+async def test_explain_meta_context_usage_when_history_trimmed(
+    session_maker, seed_ready_project, monkeypatch
+):
+    """端到端：router 压力块（trim_history_to_budget → context_usage → SSE meta）接线验证。
+
+    通过把 KE_MODEL_CONTEXT_WINDOW 设成极小值（200 token），确保 8 条 80 字的历史
+    消息超过预算，触发真实裁史，meta 事件携带 context_usage + history_trimmed:true +
+    window_tokens 字段。
+
+    Budget 算法（window=200）：
+      history_token_budget() = int(200 * (1 - 0.45)) = int(110) = 110 tokens
+      8 messages × ceil(80/1.5)=54 tokens = 432 tokens >> 110 → 裁史必触发
+
+    注：maybe_compact_session 被 patch 为 no-op，因为 SQLite 测试 DB 的 BigInteger
+    主键与 MySQL 行为有差异（RETURNING 在 SQLite 不支持 autoincrement BigInteger），
+    而本测试的目的是验证 router 压力块→meta 接线，不测试压缩回调本身（压缩逻辑由
+    test_memory_service.py 专项覆盖）。
+    """
+    import json as _json
+
+    monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "200")
+    # patch 掉压缩回调（避免 SQLite BigInteger RETURNING 限制）；
+    # qa_router.py 通过 `from ... import maybe_compact_session` 引入，
+    # 必须 patch 该模块命名空间里的引用，而非源模块。
+    # 压缩本身由 test_memory_service.py 单独测试。
+    monkeypatch.setattr(
+        "src.service.qa_router.maybe_compact_session",
+        AsyncMock(return_value=None),
+    )
+
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    # 8 条历史消息，每条内容 80 字（远超 110 token 预算）
+    long_content = "A" * 80
+    history = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": long_content}
+        for i in range(8)
+    ]
+
+    with client.stream(
+        "POST",
+        f"/projects/{seed_ready_project}/qa/explain",
+        headers=_auth(token),
+        json={"question": "存款开户流程？", "history": history},
+    ) as r:
+        body = "".join(r.iter_text())
+
+    assert "event: meta" in body, f"meta 事件未找到，body={body[:500]}"
+
+    lines = body.split("\n")
+    meta_line_idx = next(
+        (i for i, l in enumerate(lines) if l.strip() == "event: meta"), None
+    )
+    assert meta_line_idx is not None, "meta 事件行未找到"
+    data_line = lines[meta_line_idx + 1]
+    assert data_line.startswith("data: "), f"meta 后 data 行格式错误：{data_line!r}"
+    meta_payload = _json.loads(data_line[len("data: "):])
+
+    # 核心断言：context_usage 存在且携带裁史信息
+    assert "context_usage" in meta_payload, f"meta 缺 context_usage：{meta_payload}"
+    cu = meta_payload["context_usage"]
+    assert cu.get("history_trimmed") is True, f"history_trimmed 应为 true，实际：{cu}"
+    assert "window_tokens" in cu, f"context_usage 缺 window_tokens：{cu}"
+
+
 def test_explain_200_when_user_is_project_member(client, seed_ready_project, session_maker):
     """非 admin 用户 + user_project_access 加为 reporter → 应能正常问答（200）。
 

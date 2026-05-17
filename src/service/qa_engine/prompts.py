@@ -246,9 +246,11 @@ def build_user_prompt_with_history(
     context: dict[str, Any],
     history: list[dict] | None = None,
 ) -> str:
-    """v1 简版：把历史 N 轮直接拼到 question 前面，不做压缩。
+    """把历史轮直接拼到 question 前面（不在此压缩）。
 
-    超 5 轮时（10 条消息）由 router 截断，这里不再考虑长度。
+    P2②（[[记忆系统-设计]] §18）起：router 进流前已按模型窗口 token 预算裁过
+    body.history（更早轮由 system 记忆块 working_summary+focus 顶替），传入此处
+    的已是裁好的最近若干轮。此处的 history[-10:] 仅作冗余兜底硬上限，正常不会触发。
     """
     if not history:
         return build_user_prompt(question, context)

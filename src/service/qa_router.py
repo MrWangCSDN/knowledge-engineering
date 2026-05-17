@@ -292,7 +292,7 @@ async def explain(
         _used = estimate_tokens(memory_block) + estimate_tokens(body.question) + _hist_used
         context_usage = {
             "used_tokens": _used,
-            "budget_tokens": _window,
+            "window_tokens": _window,
             "pct": round(min(_used / _window, 1.0) * 100, 1) if _window else 0.0,
             "history_trimmed": history_trimmed,
         }
