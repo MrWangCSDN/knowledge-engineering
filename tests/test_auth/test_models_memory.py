@@ -62,3 +62,45 @@ def test_session_memory_has_session_cascade_fk():
     sess_fks = [fk for fk in fks if fk.column.table.name == "qa_sessions"]
     assert len(sess_fks) == 1
     assert sess_fks[0].ondelete == "CASCADE"
+
+
+# ───────── qa_project_memory（工程级 S1，spec §19）─────────
+from src.service.db_models_homepage import QAProjectMemory
+
+
+def test_project_memory_table_name():
+    assert QAProjectMemory.__tablename__ == "qa_project_memory"
+
+
+def test_project_memory_columns():
+    cols = {c.name for c in QAProjectMemory.__table__.columns}
+    assert cols == {
+        "id", "project_id", "user_id", "scope", "content",
+        "entity_id", "entity_kind", "grounding_status", "source",
+        "source_session_id", "confidence", "status",
+        "promoted_by", "promoted_at", "vector_synced", "last_verified_at",
+        "created_at", "updated_at",
+    }
+
+
+def test_project_memory_pk_is_id():
+    cols = {c.name: c for c in QAProjectMemory.__table__.columns}
+    assert cols["id"].primary_key is True
+
+
+def test_project_memory_project_id_fk_cascade():
+    fks = [fk for fk in QAProjectMemory.__table__.foreign_keys
+           if fk.column.table.name == "projects"]
+    assert len(fks) == 1
+    assert fks[0].ondelete == "CASCADE"
+
+
+def test_project_memory_user_id_no_fk():
+    fks = [fk for fk in QAProjectMemory.__table__.foreign_keys
+           if fk.column.table.name == "users"]
+    assert fks == []
+
+
+def test_project_memory_indexes():
+    idx = {i.name for i in QAProjectMemory.__table__.indexes}
+    assert {"idx_proj_scope", "idx_proj_user", "idx_entity"} <= idx

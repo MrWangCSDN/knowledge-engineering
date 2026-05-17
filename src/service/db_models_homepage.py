@@ -24,6 +24,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -384,4 +385,82 @@ class QASessionMemory(Base):
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+# ─── 8. qa_project_memory（记忆系统 P2-S1：工程级部落知识）──────────────────
+# 设计：[[记忆系统-设计]] §19 / §4.2 / §5。S1 纯 SQL；全列一次建全，
+# entity_*/grounding/confidence/promoted_*/vector_synced/last_verified_at
+# 留给 S2-S4，S1 不读写。project_id 用 String(64) FK（§5 BIGINT 是示意，
+# 实际对齐 Project.id / QASession.project_id 既有约定，同 P1 session_id）。
+
+class QAProjectMemory(Base):
+    """工程级记忆：某代码库的人类部落知识。A3 默认私有，可晋升 team（S4）。"""
+    __tablename__ = "qa_project_memory"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    """归属工程。删工程级联删其工程记忆（与 QASession.project_id 一致）。"""
+
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    """作者（对应 users.id）。与 QASession 一致不加 FK：保留已删用户的记忆。"""
+
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, default="private")
+    """private（A3 默认）/ team（S4 晋升后）。String(32) 留余量，不用 sa.Enum。"""
+
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    """部落知识软笔记，如『orders_v2 是现行表 orders 已废弃』。"""
+
+    entity_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    """C3 可选锚 canonical_v1 实体 ID（S4 用，S1 留空）。"""
+
+    entity_kind: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    """file / class / method（S4 失效复核归类，S1 留空）。"""
+
+    grounding_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="ungrounded"
+    )
+    """grounded / ungrounded / stale（S4 用；S1 恒 ungrounded）。"""
+
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="explicit")
+    """explicit（S1 显式『记住这个工程：』）/ extracted（S3 异步抽取）。"""
+
+    source_session_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    """来源会话 ID（可追溯，不加 FK 硬绑）。"""
+
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    """extracted 可调低（S3 用，召回排序）；S1 显式恒 1.0。"""
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    """active / archived（软删，宪法禁物理删）/ pending_review（S3 用）。"""
+
+    promoted_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    """晋升 team 的操作者 user.id（S4 审计，S1 留空）。"""
+
+    promoted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    vector_synced: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("0")
+    )
+    """是否已写入 Weaviate（S2 用，S1 恒 False）。"""
+
+    last_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    """老化告警基准（S4 用，S1 留空）。"""
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_proj_scope", "project_id", "scope", "status"),
+        Index("idx_proj_user", "project_id", "user_id", "status"),
+        Index("idx_entity", "project_id", "entity_id"),
     )
