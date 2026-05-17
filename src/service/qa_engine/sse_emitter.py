@@ -83,6 +83,7 @@ async def stream_qa_answer(
     on_title: OnTitleCallback | None = None,
     memory_block: str | None = None,
     on_memory: OnMemoryCallback | None = None,
+    context_usage: dict | None = None,
 ) -> AsyncIterator[str]:
     """流式产出 SSE 事件文本。
 
@@ -96,6 +97,7 @@ async def stream_qa_answer(
                       注入到 system prompt 顶部。None/空 → 行为与改前完全一致。
         on_memory: done + session_title 之后调用（镜像 on_title）；router 用它
                    解析显式记忆意图写库 + 视情况压缩会话记忆。失败静默，不影响主答。
+        context_usage: 可选；非空时并入 meta 事件（前端画上下文进度条，spec §18）。
     """
     message_id = "msg_" + uuid.uuid4().hex[:12]
     start = time.monotonic()
@@ -119,6 +121,9 @@ async def stream_qa_answer(
             meta_payload["matched_keywords"] = decision.matched_keywords
         # 后面 retriever.retrieve 调用要用
         skill_id_for_retriever = decision.skill_id
+
+    if context_usage is not None:
+        meta_payload["context_usage"] = context_usage
 
     # 1. meta
     yield format_sse("meta", meta_payload)

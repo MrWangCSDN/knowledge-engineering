@@ -394,3 +394,33 @@ async def test_compact_non_force_unchanged_below_floor():
     db = _FakeMemDB(session_row=None, msg_rows=[_FakeMsg(), _FakeMsg()])
     await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
     assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_stream_meta_carries_context_usage():
+    synth = _SpySynth()
+    cu = {"used_tokens": 1234, "budget_tokens": 128000, "pct": 1.0,
+          "history_trimmed": True}
+    chunks = []
+    async for ev in stream_qa_answer(
+        question="q", project_id="p1", session_id="s1",
+        retriever=_StubRetriever(), synthesizer=synth, router=None,
+        context_usage=cu,
+    ):
+        chunks.append(ev)
+    meta = [c for c in chunks if c.startswith("event: meta")][0]
+    assert '"context_usage"' in meta and '"history_trimmed":true' in meta
+    assert '"budget_tokens":128000' in meta
+
+
+@pytest.mark.asyncio
+async def test_stream_meta_no_context_usage_when_none():
+    synth = _SpySynth()
+    chunks = []
+    async for ev in stream_qa_answer(
+        question="q", project_id="p1", session_id="s1",
+        retriever=_StubRetriever(), synthesizer=synth, router=None,
+    ):
+        chunks.append(ev)
+    meta = [c for c in chunks if c.startswith("event: meta")][0]
+    assert "context_usage" not in meta

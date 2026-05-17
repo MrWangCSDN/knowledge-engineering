@@ -277,11 +277,35 @@ async def explain(
     except Exception:
         memory_block = ""
 
+    # 6. 会话上下文压力（spec §18）：按 token 预算裁 body.history 只留最近若干轮，
+    #    更早轮由 system 记忆块 working_summary+focus 顶替。失败退回原行为，不抛。
+    try:
+        from src.service.memory.context_budget import (
+            history_token_budget, trim_history_to_budget,
+            estimate_tokens, model_context_window,
+        )
+        _budget = history_token_budget()
+        eff_history, _hist_used = trim_history_to_budget(body.history, _budget)
+        _raw_n = len(body.history) if isinstance(body.history, list) else 0
+        history_trimmed = _raw_n > len(eff_history)
+        _window = model_context_window()
+        _used = estimate_tokens(memory_block) + estimate_tokens(body.question) + _hist_used
+        context_usage = {
+            "used_tokens": _used,
+            "budget_tokens": _window,
+            "pct": round(min(_used / _window, 1.0) * 100, 1) if _window else 0.0,
+            "history_trimmed": history_trimmed,
+        }
+    except Exception:
+        eff_history = body.history
+        history_trimmed = False
+        context_usage = None
+
     # ⚠️ db session 在整个 StreamingResponse 迭代期间保持打开：Starlette 在依赖
     #    yield 退出后才迭代响应体，故所有流后回调（_make_title_generator /
     #    _make_memory_writer）都依赖此点。若将来把 stream_qa_answer 挪到后台任务/
     #    worker，必须为这些回调重新划定 db session 作用域，否则 session 已关闭。
-    # 6. 返回 SSE 流
+    # 7. 返回 SSE 流
     return StreamingResponse(
         stream_qa_answer(
             question=body.question,
@@ -290,7 +314,7 @@ async def explain(
             retriever=retriever,
             synthesizer=synthesizer,
             router=skill_router,  # 可能是 None，sse_emitter 内部处理
-            history=body.history,
+            history=eff_history,
             on_complete=persist_messages,
             on_title=_make_title_generator(
                 db=db,
@@ -300,12 +324,14 @@ async def explain(
                 is_new_session=is_new_session,
             ),
             memory_block=memory_block,
+            context_usage=context_usage,
             on_memory=_make_memory_writer(
                 db=db,
                 llm=synthesizer.llm,
                 user_id=user.id,
                 session_id=session_id,
                 question=body.question,
+                force_compact=history_trimmed,
             ),
         ),
         media_type="text/event-stream",
@@ -499,7 +525,7 @@ def _make_title_generator(*, db, session_id, question, llm, is_new_session):
     return _gen
 
 
-def _make_memory_writer(*, db, llm, user_id, session_id, question):
+def _make_memory_writer(*, db, llm, user_id, session_id, question, force_compact: bool = False):
     """构造 on_memory 回调（闭包）。done 之后异步执行：
 
     1. 显式记忆意图（『记住…』）→ 写一条用户级记忆；
@@ -525,7 +551,7 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question):
             )
         # 2. 会话压缩（固定 N 轮；service 内部已 try/except 兜底）
         try:
-            await maybe_compact_session(db, llm, session_id=session_id)
+            await maybe_compact_session(db, llm, session_id=session_id, force=force_compact)
         except Exception:
             pass
 

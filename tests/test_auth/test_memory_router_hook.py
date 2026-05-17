@@ -110,3 +110,14 @@ async def test_writer_compact_llm_failure_is_silent_and_noop():
     await writer()  # 必须不抛
     assert db.added == []
     assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_writer_force_compact_threads_to_maybe_compact():
+    db = _FakeDB(msg_rows=[_FakeMsg(), _FakeMsg(role="assistant")])
+    writer = _make_memory_writer(
+        db=db, llm=_FakeLLM(), user_id=3, session_id="s1",
+        question="无触发词的普通问题", force_compact=True,
+    )
+    await writer()
+    assert any(isinstance(o, QASessionMemory) for o in db.added)
