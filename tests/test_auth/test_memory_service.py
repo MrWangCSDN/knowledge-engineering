@@ -546,3 +546,54 @@ async def test_recall_project_block_caps_at_limit_real_sqlite():
     # 工程块每条是 "- note-i" 一行；统计 "- note-" 出现次数
     assert block.count("- note-") == 20
     await eng.dispose()
+
+
+# ───────── chit-chat 会话级多轮：history 接入（spec §20）─────────
+
+class _CapUserLLM:
+    """记录最后一次 complete/complete_stream 的 user 入参。"""
+    def __init__(self):
+        self.last_user = None
+
+    async def complete(self, *, system, user, **kw):
+        self.last_user = user
+        return "ok"
+
+    async def complete_stream(self, *, system, user, **kw):
+        self.last_user = user
+        yield "ok"
+
+
+_HIST = [
+    {"role": "user", "content": "我喜欢吃西瓜"},
+    {"role": "assistant", "content": "西瓜解暑"},
+]
+
+
+@pytest.mark.asyncio
+async def test_chitchat_sync_includes_history():
+    llm = _CapUserLLM()
+    syn = QASynthesizer(llm)
+    await syn.synthesize(_ctx(skill_id="chit-chat"), history=_HIST)
+    assert "【对话历史】" in llm.last_user
+    assert "我喜欢吃西瓜" in llm.last_user
+    assert llm.last_user.endswith("下单流程怎么走")
+
+
+@pytest.mark.asyncio
+async def test_chitchat_stream_includes_history():
+    llm = _CapUserLLM()
+    syn = QASynthesizer(llm)
+    await syn.synthesize_stream(_ctx(skill_id="chit-chat"), history=_HIST)
+    assert "【对话历史】" in llm.last_user and "我喜欢吃西瓜" in llm.last_user
+
+
+@pytest.mark.asyncio
+async def test_chitchat_no_history_is_bare_question_backward_compat():
+    llm = _CapUserLLM()
+    syn = QASynthesizer(llm)
+    await syn.synthesize(_ctx(skill_id="chit-chat"))
+    assert llm.last_user == "下单流程怎么走"
+    llm2 = _CapUserLLM()
+    await QASynthesizer(llm2).synthesize_stream(_ctx(skill_id="chit-chat"))
+    assert llm2.last_user == "下单流程怎么走"

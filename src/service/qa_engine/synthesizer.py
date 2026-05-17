@@ -18,6 +18,7 @@ from src.service.qa_engine.prompts import (
     _CHIT_CHAT_SYSTEM,  # v1.2 chit-chat 专属
     build_user_prompt,
     build_user_prompt_with_history,
+    build_chitchat_user_prompt,
     with_memory_block,
 )
 from src.service.qa_engine.retriever import RetrievedContext
@@ -75,13 +76,15 @@ class QASynthesizer:
         self.llm = llm_provider
 
     async def _synthesize_chit_chat(
-        self, ctx: RetrievedContext, *, memory_block: str | None = None
+        self, ctx: RetrievedContext, *, memory_block: str | None = None,
+        history: list[dict] | None = None,
     ) -> SynthesizedAnswer:
         """v1.2 chit-chat 闲聊路径：用专属 prompt 调 LLM，返回单段 chit-chat section。
-        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.4；记忆注入见 [[记忆系统-设计]] §7。"""
+        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.4；记忆注入见 [[记忆系统-设计]] §7。
+        §20：带最近历史原文（旧轮由 memory_block 的 working_summary 覆盖）。"""
         reply = await self.llm.complete(
             system=with_memory_block(_CHIT_CHAT_SYSTEM, memory_block),
-            user=ctx.question,
+            user=build_chitchat_user_prompt(ctx.question, history),
         )
         return SynthesizedAnswer(
             sections=[{
@@ -101,13 +104,15 @@ class QASynthesizer:
         on_token: Optional[Callable[[str], Awaitable[None]]] = None,
         *,
         memory_block: str | None = None,
+        history: list[dict] | None = None,
     ) -> SynthesizedAnswer:
         """v1.2 chit-chat 流式版：边收 LLM token 边调 on_token。
-        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.6；记忆注入见 [[记忆系统-设计]] §7。"""
+        设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.6；记忆注入见 [[记忆系统-设计]] §7。
+        §20：带最近历史原文（旧轮由 memory_block 的 working_summary 覆盖）。"""
         parts: list[str] = []
         async for tok in self.llm.complete_stream(
             system=with_memory_block(_CHIT_CHAT_SYSTEM, memory_block),
-            user=ctx.question,
+            user=build_chitchat_user_prompt(ctx.question, history),
         ):
             parts.append(tok)
             if on_token is not None:
@@ -141,7 +146,9 @@ class QASynthesizer:
         """
         # v1.2: chit-chat 走专属分支，跳过 6 段式逻辑
         if ctx.skill_id == "chit-chat":
-            return await self._synthesize_chit_chat(ctx, memory_block=memory_block)
+            return await self._synthesize_chit_chat(
+                ctx, memory_block=memory_block, history=history
+            )
 
         ctx_dict = _ctx_to_dict(ctx)
         if history:
@@ -206,7 +213,7 @@ class QASynthesizer:
         # v1.2: chit-chat 走专属流式分支
         if ctx.skill_id == "chit-chat":
             return await self._synthesize_chit_chat_stream(
-                ctx, on_token=on_token, memory_block=memory_block
+                ctx, on_token=on_token, memory_block=memory_block, history=history
             )
 
         ctx_dict = _ctx_to_dict(ctx)
