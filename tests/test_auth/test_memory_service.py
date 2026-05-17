@@ -368,3 +368,29 @@ async def test_recall_no_focus_line_when_empty_or_none():
         db = _FakeMemDB(user_rows=[], session_row=sm)
         block = await recall_memory_block(db, user_id=1, session_id=sid)
         assert "【本次聚焦实体】" not in block
+
+
+@pytest.mark.asyncio
+async def test_compact_force_bypasses_n_floor():
+    db = _FakeMemDB(session_row=None, msg_rows=[_FakeMsg(), _FakeMsg(role="assistant")])
+    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1",
+                                every_n_messages=6, force=True)
+    assert any(isinstance(o, QASessionMemory) for o in db.added)
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_compact_force_still_skips_when_nothing_new():
+    sm = QASessionMemory(session_id="s1", working_summary="prev", turn_count=2)
+    db = _FakeMemDB(session_row=sm, msg_rows=[_FakeMsg(), _FakeMsg(role="assistant")])
+    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1",
+                                every_n_messages=6, force=True)
+    assert db.committed is False
+    assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_compact_non_force_unchanged_below_floor():
+    db = _FakeMemDB(session_row=None, msg_rows=[_FakeMsg(), _FakeMsg()])
+    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
+    assert db.added == []

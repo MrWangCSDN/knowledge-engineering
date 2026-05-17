@@ -127,7 +127,8 @@ def _extract_focus_entity_ids(messages: Any) -> list[str]:
 
 
 async def maybe_compact_session(
-    db: Any, llm: Any, *, session_id: str, every_n_messages: int = 6
+    db: Any, llm: Any, *, session_id: str, every_n_messages: int = 6,
+    force: bool = False,
 ) -> None:
     """会话级压缩：每「自上次压缩以来新增 ≥ every_n_messages 条消息」压缩一次。
 
@@ -135,6 +136,7 @@ async def maybe_compact_session(
     turn_count 记录上次压缩时的 message_count；用「增量 ≥ N」判定，
     而非「过阈值后每轮都压」——否则消息每轮 +2，过阈后每轮都会调 LLM（成本 bug）。
     任何异常都吞掉并 debug 记录（记忆是辅助，绝不影响主答）。
+    force=True（上下文压力，spec §18）：越过固定 N floor，但仍要求自上次压缩起 ≥1 条新增。
     """
     try:
         msg_res = await db.execute(
@@ -144,7 +146,8 @@ async def maybe_compact_session(
         )
         messages = msg_res.scalars().all()
         msg_count = len(messages)
-        if msg_count < every_n_messages:
+        floor = 2 if force else every_n_messages
+        if msg_count < floor:
             return
 
         sm_res = await db.execute(
@@ -154,7 +157,8 @@ async def maybe_compact_session(
 
         # 距上次压缩的新增量不足 N → 跳过（实现「每 N 条压一次」而非「过阈后每轮压」）
         prev = (sm.turn_count or 0) if sm is not None else 0
-        if msg_count - prev < every_n_messages:
+        min_delta = 1 if force else every_n_messages
+        if msg_count - prev < min_delta:
             return
 
         convo = "\n".join(
