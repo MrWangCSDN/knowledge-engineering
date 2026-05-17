@@ -12,7 +12,7 @@ from src.service.memory.service import (
     write_explicit_memory,
     maybe_compact_session,
 )
-from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage
+from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
 
 
 class _CapturingLLM:
@@ -186,10 +186,11 @@ class _FakeMsg:
 
 
 class _FakeMemDB:
-    def __init__(self, user_rows=None, session_row=None, msg_rows=None):
+    def __init__(self, user_rows=None, session_row=None, msg_rows=None, project_rows=None):
         self._user_rows = user_rows or []
         self._session_row = session_row
         self._msg_rows = msg_rows or []
+        self._project_rows = project_rows or []
         self.added = []
         self.committed = False
 
@@ -199,6 +200,8 @@ class _FakeMemDB:
             return _FakeResult(self._user_rows)
         if ent is QASessionMemory:
             return _FakeResult([self._session_row] if self._session_row else [])
+        if ent is QAProjectMemory:
+            return _FakeResult(self._project_rows)
         return _FakeResult(self._msg_rows)
 
     def add(self, obj): self.added.append(obj)
@@ -424,3 +427,60 @@ async def test_stream_meta_no_context_usage_when_none():
         chunks.append(ev)
     meta = [c for c in chunks if c.startswith("event: meta")][0]
     assert "context_usage" not in meta
+
+
+# ───────── 工程级 S1（spec §19）─────────
+from src.service.memory.service import (
+    detect_explicit_project_memory,
+    write_explicit_project_memory,
+)
+
+
+def test_detect_project_trigger_strips_prefix():
+    assert detect_explicit_project_memory("记住这个工程：orders_v2 是现行表") == "orders_v2 是现行表"
+    assert detect_explicit_project_memory("记住本工程 用 Java 21") == "用 Java 21"
+    assert detect_explicit_project_memory("工程记住：回调有重试") == "回调有重试"
+
+
+def test_detect_project_no_trigger_or_empty():
+    assert detect_explicit_project_memory("记住我喜欢简短") is None
+    assert detect_explicit_project_memory("下单流程怎么走") is None
+    assert detect_explicit_project_memory("记住这个工程：   ") is None
+
+
+@pytest.mark.asyncio
+async def test_write_explicit_project_adds_row():
+    db = _FakeMemDB()
+    await write_explicit_project_memory(
+        db, project_id="deposit", user_id=7, session_id="s1", content="orders_v2 现行表"
+    )
+    rows = [o for o in db.added if isinstance(o, QAProjectMemory)]
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.project_id == "deposit" and r.user_id == 7
+    assert r.content == "orders_v2 现行表"
+    assert r.scope == "private" and r.source == "explicit" and r.status == "active"
+    assert r.source_session_id == "s1"
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_recall_includes_project_block_after_user_block():
+    pm = QAProjectMemory(project_id="deposit", user_id=1, scope="private",
+                          content="orders_v2 是现行表", source="explicit", status="active")
+    um = QAUserMemory(user_id=1, kind="preference", content="回答简短",
+                       source="explicit", status="active")
+    db = _FakeMemDB(user_rows=[um], session_row=None, project_rows=[pm])
+    block = await recall_memory_block(db, user_id=1, session_id="s1", project_id="deposit")
+    assert "回答简短" in block and "orders_v2 是现行表" in block
+    assert "【工程记忆】" in block
+    assert block.index("回答简短") < block.index("orders_v2 是现行表")
+
+
+@pytest.mark.asyncio
+async def test_recall_no_project_block_when_project_id_none():
+    pm = QAProjectMemory(project_id="deposit", user_id=1, scope="private",
+                          content="X", source="explicit", status="active")
+    db = _FakeMemDB(user_rows=[], session_row=None, project_rows=[pm])
+    block = await recall_memory_block(db, user_id=1, session_id="s1")
+    assert "【工程记忆】" not in block

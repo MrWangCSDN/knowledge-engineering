@@ -9,9 +9,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
-from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage
+from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
 from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM
 
 _log = logging.getLogger(__name__)
@@ -39,10 +39,30 @@ def detect_explicit_memory(question: str) -> str | None:
     return None
 
 
-async def recall_memory_block(db: Any, *, user_id: int, session_id: str) -> str:
-    """召回当前用户 + 当前会话的记忆，拼成一个文本块。
+# 工程级显式触发词。不含冒号——靠 lstrip 容错「：/:/空格」分隔。
+# ⚠️ 这些是「记住」的超串，调用方（_make_memory_writer）必须先调本检测器、
+#    后调通用 detect_explicit_memory，否则「记住这个工程：X」会被误判为 user 级。
+_PROJECT_TRIGGERS = ("记住这个工程", "记住本工程", "记住该工程", "工程记住")
 
-    顺序（spec §7）：会话级在前（工作上下文，最高优先），用户级在后。
+
+def detect_explicit_project_memory(question: str) -> str | None:
+    """检测工程级显式记忆意图（「记住这个工程：…」）。
+
+    命中 → 剥前缀 + 起始冒号/空白，返回内容；未命中/空 → None。
+    """
+    q = (question or "").strip()
+    for trig in _PROJECT_TRIGGERS:
+        if q.startswith(trig):
+            rest = q[len(trig):].lstrip(" :：\t").strip()
+            return rest or None
+    return None
+
+
+async def recall_memory_block(db: Any, *, user_id: int, session_id: str, project_id: str | None = None) -> str:
+    """召回当前用户 + 当前会话 + 工程的记忆，拼成一个文本块。
+
+    顺序（spec §7）：会话级在前（工作上下文，最高优先），用户级次之，工程级末位。
+    project_id=None 不出工程块（向后兼容）。
     全空 → 返回 ""（调用方据此跳过注入，零开销）。
     注：本函数自身不吞异常（保持纯逻辑可测）。若调用方要求「记忆失败绝不影响主答」，须自行 try/except —— Task 7 的 router 调用点已这样包裹。
     """
@@ -74,6 +94,28 @@ async def recall_memory_block(db: Any, *, user_id: int, session_id: str) -> str:
         if lines:
             parts.append("【用户偏好 / 已知事实】\n" + lines)
 
+    if project_id is not None:
+        pm_res = await db.execute(
+            select(QAProjectMemory)
+            .where(
+                QAProjectMemory.project_id == project_id,
+                QAProjectMemory.status == "active",
+                or_(
+                    QAProjectMemory.scope == "team",
+                    QAProjectMemory.user_id == user_id,
+                ),
+            )
+            .order_by(QAProjectMemory.created_at)
+            .limit(20)
+        )
+        proj_rows = pm_res.scalars().all()
+        if proj_rows:
+            lines = "\n".join(
+                f"- {r.content}" for r in proj_rows if (r.content or "").strip()
+            )
+            if lines:
+                parts.append("【工程记忆】\n" + lines)
+
     return "\n\n".join(parts)
 
 
@@ -87,6 +129,26 @@ async def write_explicit_memory(
         QAUserMemory(
             user_id=user_id,
             kind="preference",
+            content=content,
+            source="explicit",
+            source_session_id=session_id,
+            status="active",
+        )
+    )
+    await db.commit()
+
+
+async def write_explicit_project_memory(
+    db: Any, *, project_id: str, user_id: int, session_id: str, content: str
+) -> None:
+    """落一条工程级显式记忆（S1：scope=private，source=explicit，status=active）。
+    注：自身不吞异常（同 recall/user-write 契约）；调用点 try/except。
+    """
+    db.add(
+        QAProjectMemory(
+            project_id=project_id,
+            user_id=user_id,
+            scope="private",
             content=content,
             source="explicit",
             source_session_id=session_id,
