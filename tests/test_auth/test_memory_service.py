@@ -11,6 +11,8 @@ from src.service.memory.service import (
     recall_memory_block,
     write_explicit_memory,
     maybe_compact_session,
+    detect_explicit_project_memory,
+    write_explicit_project_memory,
 )
 from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
 
@@ -430,10 +432,6 @@ async def test_stream_meta_no_context_usage_when_none():
 
 
 # ───────── 工程级 S1（spec §19）─────────
-from src.service.memory.service import (
-    detect_explicit_project_memory,
-    write_explicit_project_memory,
-)
 
 
 def test_detect_project_trigger_strips_prefix():
@@ -484,3 +482,40 @@ async def test_recall_no_project_block_when_project_id_none():
     db = _FakeMemDB(user_rows=[], session_row=None, project_rows=[pm])
     block = await recall_memory_block(db, user_id=1, session_id="s1")
     assert "【工程记忆】" not in block
+
+
+@pytest.mark.asyncio
+async def test_recall_project_tenant_filter_real_sqlite():
+    """真 SQLite 验证多租户隔离 SQL（_FakeMemDB 绕过 WHERE，安全属性须真查）。
+    4 条隔离轴：跨工程 / 他人 private 不可见 / team 可见 / archived 排除。"""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from src.service.db import Base
+
+    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    SM = async_sessionmaker(eng, expire_on_commit=False)
+    async with SM() as s:
+        s.add_all([
+            QAProjectMemory(id=1, project_id="A", user_id=1, scope="private",
+                            content="A-own-private", source="explicit", status="active"),
+            QAProjectMemory(id=2, project_id="A", user_id=2, scope="private",
+                            content="A-other-private", source="explicit", status="active"),
+            QAProjectMemory(id=3, project_id="A", user_id=2, scope="team",
+                            content="A-team", source="explicit", status="active"),
+            QAProjectMemory(id=4, project_id="B", user_id=1, scope="private",
+                            content="B-own-private", source="explicit", status="active"),
+            QAProjectMemory(id=5, project_id="A", user_id=1, scope="private",
+                            content="A-own-archived", source="explicit", status="archived"),
+        ])
+        await s.commit()
+    async with SM() as s:
+        block = await recall_memory_block(s, user_id=1, session_id="x", project_id="A")
+    # 可见：自己在 A 的 active private + A 的 team
+    assert "A-own-private" in block
+    assert "A-team" in block
+    # 不可见：他人 A private / 跨工程 B / 自己 archived
+    assert "A-other-private" not in block
+    assert "B-own-private" not in block
+    assert "A-own-archived" not in block
+    await eng.dispose()

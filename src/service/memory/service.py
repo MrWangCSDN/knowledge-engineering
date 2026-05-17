@@ -49,6 +49,10 @@ def detect_explicit_project_memory(question: str) -> str | None:
     """检测工程级显式记忆意图（「记住这个工程：…」）。
 
     命中 → 剥前缀 + 起始冒号/空白，返回内容；未命中/空 → None。
+
+    ⚠️ 调用契约：必须先于 detect_explicit_memory 调用。三个触发词
+    「记住这个工程/记住本工程/记住该工程」都是「记住」的超串——若先调通用
+    detect_explicit_memory，会把工程输入误判为 user 级写入（内容还带「这个工程：」垃圾前缀）。
     """
     q = (question or "").strip()
     for trig in _PROJECT_TRIGGERS:
@@ -106,7 +110,7 @@ async def recall_memory_block(db: Any, *, user_id: int, session_id: str, project
                 ),
             )
             .order_by(QAProjectMemory.created_at)
-            .limit(20)
+            .limit(_PROJECT_MEMORY_LIMIT)
         )
         proj_rows = pm_res.scalars().all()
         if proj_rows:
@@ -159,6 +163,7 @@ async def write_explicit_project_memory(
 
 
 _FOCUS_MAX = 10  # 聚焦实体上限，控 prompt 体积
+_PROJECT_MEMORY_LIMIT = 20    # 工程记忆 S1 单次 recall 上限（spec §19）
 
 
 def _extract_focus_entity_ids(messages: Any) -> list[str]:
