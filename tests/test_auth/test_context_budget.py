@@ -15,18 +15,18 @@ def test_estimate_tokens_ceil_and_empty():
 
 def test_window_env_override(monkeypatch):
     monkeypatch.delenv("KE_MODEL_CONTEXT_WINDOW", raising=False)
-    assert model_context_window() == 128000
+    assert model_context_window() == 1000000  # 缺省/非法/低于 floor → 默认 1M
     monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "1000000")
     assert model_context_window() == 1000000
     monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "garbage")
-    assert model_context_window() == 128000
+    assert model_context_window() == 1000000  # 缺省/非法/低于 floor → 默认 1M
     monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "-5")
-    assert model_context_window() == 128000
-    # M2：低于 _MIN_WINDOW(1000) 的值视为运维误配，回退保守默认
+    assert model_context_window() == 1000000  # 缺省/非法/低于 floor → 默认 1M
+    # M2：低于 _MIN_WINDOW(1000) 的值视为运维误配，回退默认 1M
     monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "100")
-    assert model_context_window() == 128000   # 远低于 floor → 默认
+    assert model_context_window() == 1000000  # 远低于 floor → 默认 1M
     monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "999")
-    assert model_context_window() == 128000   # 恰好低于 floor → 默认
+    assert model_context_window() == 1000000  # 恰好低于 floor → 默认 1M
     monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "1000")
     assert model_context_window() == 1000     # 恰好等于 floor → 接受
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 import os
 
-_DEFAULT_WINDOW = 128000          # 保守默认（Fork B；env KE_MODEL_CONTEXT_WINDOW 覆盖）
+_DEFAULT_WINDOW = 1_000_000        # 默认 1M（Fork B；env KE_MODEL_CONTEXT_WINDOW 覆盖）
 _MIN_WINDOW = 1000                # 低于此视为运维误配，回退保守默认（防静默丢上下文）
 _DEFAULT_RESERVE_PCT = 0.45       # 预留 system+记忆块+KG context+本轮问题+回答
 
@@ -22,7 +22,7 @@ def estimate_tokens(text: str | None) -> int:
 
 def model_context_window() -> int:
     """模型上下文窗口（token）。env `KE_MODEL_CONTEXT_WINDOW` 覆盖；
-    缺失/非法/低于 _MIN_WINDOW(1000) → 保守默认 128000。"""
+    缺失/非法/低于 _MIN_WINDOW(1000) → 默认 1000000（1M）。"""
     raw = os.getenv("KE_MODEL_CONTEXT_WINDOW", "").strip()
     try:
         v = int(raw)
