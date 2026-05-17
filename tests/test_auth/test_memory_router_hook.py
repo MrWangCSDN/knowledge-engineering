@@ -159,3 +159,33 @@ async def test_writer_project_id_none_no_crash():
     )
     await writer()
     assert not any(isinstance(o, QAProjectMemory) for o in db.added)
+
+
+@pytest.mark.asyncio
+async def test_writer_project_write_failure_is_silent():
+    # 工程写抛错 → 静默吞（_log.debug），_writer 不抛、绝不断答
+    class _BoomDB:
+        def __init__(self):
+            self.added = []
+        def add(self, obj):
+            self.added.append(obj)
+        async def commit(self):
+            raise RuntimeError("db down")
+        async def execute(self, stmt):
+            class _R:
+                def scalars(self_):
+                    return self_
+                def all(self_):
+                    return []
+                def one_or_none(self_):
+                    return None
+            return _R()
+        async def get(self, *a, **k):
+            return None
+
+    db = _BoomDB()
+    writer = _make_memory_writer(
+        db=db, llm=_FakeLLM(), user_id=3, session_id="s1",
+        question="记住这个工程：会崩的内容", project_id="deposit",
+    )
+    await writer()  # 必须不抛

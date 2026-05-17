@@ -531,7 +531,7 @@ def _make_title_generator(*, db, session_id, question, llm, is_new_session):
 def _make_memory_writer(*, db, llm, user_id, session_id, question, project_id=None, force_compact: bool = False):
     """构造 on_memory 回调（闭包）。done 之后异步执行：
 
-    1. 显式记忆意图 → 工程级（「记住这个工程：…」，project_id 存在时优先）否则用户级（「记住…」）；
+    1. 显式记忆意图 → 工程级（「记住这个工程：…」，project_id 存在时优先）否则用户级（「记住…」）；project_id=None 为向后兼容/非 router 调用点路径
     2. 会话消息达阈值 → 压缩会话工作状态（覆盖式 upsert）。
 
     全程异常静默（记忆是辅助，绝不影响主答）。
@@ -541,6 +541,7 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question, project_id=No
     """
     async def _writer() -> None:
         # 1. 显式写入（先工程后通用：工程触发词是「记住」超串，必须先判）
+        proj_content = None
         try:
             proj_content = (
                 detect_explicit_project_memory(question)
@@ -558,9 +559,10 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question, project_id=No
                         db, user_id=user_id, session_id=session_id, content=content
                     )
         except Exception:
+            write_kind = "project" if proj_content else "user"
             _log.debug(
-                "explicit memory write failed for session %s, silently ignored",
-                session_id, exc_info=True,
+                "explicit %s memory write failed for session %s, silently ignored",
+                write_kind, session_id, exc_info=True,
             )
         # 2. 会话压缩（固定 N 轮；service 内部已 try/except 兜底）
         try:
