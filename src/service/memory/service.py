@@ -233,17 +233,19 @@ async def maybe_compact_session(
         # 输入恒有界（旧摘要 ≤ 摘要上限 + 新增量有界），无 token 膨胀。
         prev_summary = (sm.working_summary or "").strip() if sm is not None else ""
         new_msgs = messages[prev:]
-        _segs: list[str] = []
+        parts: list[str] = []
         if prev_summary:
-            _segs.append("【已有会话摘要】\n" + prev_summary)
+            parts.append("【已有会话摘要】\n" + prev_summary)
+        # 守卫已保证 msg_count - prev >= min_delta >= 1 → new_msgs 必非空；
+        # 仍以 if 守一层，与 prev_summary 段对称且对未来阈值改动稳健（记忆辅助路径绝不抛）。
         if new_msgs:
-            _segs.append(
+            parts.append(
                 "【新增对话】\n"
                 + "\n".join(
                     f"[{m.role}] {(m.content or '')[:200]}" for m in new_msgs
                 )
             )
-        convo = "\n\n".join(_segs)
+        convo = "\n\n".join(parts)
         summary = await llm.complete(system=_SESSION_COMPACT_SYSTEM, user=convo)
         summary = (summary or "").strip()
         if not summary:

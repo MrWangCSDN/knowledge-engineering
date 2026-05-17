@@ -663,7 +663,8 @@ async def test_compact_first_time_no_prior_summary_segment():
 @pytest.mark.asyncio
 async def test_compact_recursive_folds_prior_summary_and_only_new_msgs():
     # 二次压缩：sm 已有 working_summary（含"哈密瓜"）+ turn_count=4（水位线）
-    # 8 条消息：前 4 条是"老原始消息"，messages[4:] 是新增
+    # 10 条消息：前 4 条是"老原始消息"，messages[4:] 是 6 条新增；
+    # 增量 6 == every_n_messages(6) → 正常触发，无需 force（与 force 语义解耦）
     sm = QASessionMemory(session_id="s1",
                           working_summary="用户最早喜欢哈密瓜", turn_count=4)
     msgs = [_FakeMsg(role="user", content=f"OLD-{i}") for i in range(4)] + [
@@ -671,12 +672,12 @@ async def test_compact_recursive_folds_prior_summary_and_only_new_msgs():
         _FakeMsg(role="assistant", content="好的西瓜"),
         _FakeMsg(role="user", content="夏天到了"),
         _FakeMsg(role="assistant", content="确实"),
+        _FakeMsg(role="user", content="再聊聊"),
+        _FakeMsg(role="assistant", content="嗯"),
     ]
     llm = _CapCompactLLM()
     db = _FakeMemDB(session_row=sm, msg_rows=msgs)
-    # force=True 让守卫放行（msg_count=8, prev=4, 增量4≥1）以验证递归输入
-    await maybe_compact_session(db, llm, session_id="s1",
-                                every_n_messages=6, force=True)
+    await maybe_compact_session(db, llm, session_id="s1", every_n_messages=6)
     u = llm.last_user
     # 递归：含【已有会话摘要】+ 旧摘要内容（哈密瓜经此被保留，非靠老原始消息）
     assert "【已有会话摘要】\n用户最早喜欢哈密瓜" in u
@@ -684,7 +685,7 @@ async def test_compact_recursive_folds_prior_summary_and_only_new_msgs():
     assert "【新增对话】" in u
     assert "现在喜欢西瓜" in u and "夏天到了" in u
     assert "OLD-0" not in u and "OLD-3" not in u
-    assert sm.working_summary == "更新后的摘要" and sm.turn_count == 8
+    assert sm.working_summary == "更新后的摘要" and sm.turn_count == 10
 
 
 @pytest.mark.asyncio
