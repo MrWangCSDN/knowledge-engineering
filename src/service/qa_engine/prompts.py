@@ -264,6 +264,7 @@ def build_chitchat_user_prompt(
 
     history 空/None → 仅 question（保持 chit-chat 无历史时旧行为，逐字节一致）。
     设计：[[记忆系统-设计]] §20。
+    传入的 history 通常已由 router 按 §18 token 预算裁过；此处 _format_history 的 [-10:] 仅冗余兜底。
     """
     h = _format_history(history)
     if not h:

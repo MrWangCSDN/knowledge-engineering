@@ -197,9 +197,9 @@ class QASynthesizer:
     async def synthesize_stream(
         self,
         ctx: RetrievedContext,
-        history: list[dict] | None = None,
         on_token: Optional[Callable[[str], Awaitable[None]]] = None,
         *,
+        history: list[dict] | None = None,
         memory_block: str | None = None,
     ) -> SynthesizedAnswer:
         """流式版本的 synthesize：边收 LLM token 边调 on_token 回调。

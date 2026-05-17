@@ -586,6 +586,7 @@ async def test_chitchat_stream_includes_history():
     syn = QASynthesizer(llm)
     await syn.synthesize_stream(_ctx(skill_id="chit-chat"), history=_HIST)
     assert "【对话历史】" in llm.last_user and "我喜欢吃西瓜" in llm.last_user
+    assert llm.last_user.endswith("下单流程怎么走")
 
 
 @pytest.mark.asyncio
@@ -597,3 +598,34 @@ async def test_chitchat_no_history_is_bare_question_backward_compat():
     llm2 = _CapUserLLM()
     await QASynthesizer(llm2).synthesize_stream(_ctx(skill_id="chit-chat"))
     assert llm2.last_user == "下单流程怎么走"
+
+
+class _CapBothLLM:
+    def __init__(self):
+        self.last_system = None
+        self.last_user = None
+
+    async def complete(self, *, system, user, **kw):
+        self.last_system = system
+        self.last_user = user
+        return "ok"
+
+    async def complete_stream(self, *, system, user, **kw):
+        self.last_system = system
+        self.last_user = user
+        yield "ok"
+
+
+@pytest.mark.asyncio
+async def test_chitchat_composes_history_and_memory_block():
+    llm = _CapBothLLM()
+    syn = QASynthesizer(llm)
+    await syn.synthesize(
+        _ctx(skill_id="chit-chat"),
+        history=_HIST,
+        memory_block="用户偏好：只看支付域",
+    )
+    # 近轮原文进 user prompt
+    assert "【对话历史】" in llm.last_user and "我喜欢吃西瓜" in llm.last_user
+    # 旧轮/记忆经 memory_block 进 system prompt（§7/§20 两层并存）
+    assert "用户偏好：只看支付域" in llm.last_system
