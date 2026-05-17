@@ -344,3 +344,27 @@ async def test_compact_updates_focus_entity_ids_existing_row():
     await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
     assert sm.focus_entity_ids == ["method://new"]
     assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_recall_includes_focus_entities_in_session_block():
+    sm = QASessionMemory(session_id="s1", working_summary="已确认瓶颈在网关",
+                         turn_count=6, focus_entity_ids=["method://pay", "table://orders"])
+    db = _FakeMemDB(user_rows=[], session_row=sm)
+    block = await recall_memory_block(db, user_id=1, session_id="s1")
+    assert "已确认瓶颈在网关" in block
+    assert "【本次聚焦实体】" in block
+    assert "method://pay" in block and "table://orders" in block
+    assert block.index("已确认瓶颈在网关") < block.index("【本次聚焦实体】")
+
+
+@pytest.mark.asyncio
+async def test_recall_no_focus_line_when_empty_or_none():
+    sm1 = QASessionMemory(session_id="s1", working_summary="x", turn_count=6,
+                          focus_entity_ids=[])
+    sm2 = QASessionMemory(session_id="s2", working_summary="y", turn_count=6,
+                          focus_entity_ids=None)
+    for sid, sm in (("s1", sm1), ("s2", sm2)):
+        db = _FakeMemDB(user_rows=[], session_row=sm)
+        block = await recall_memory_block(db, user_id=1, session_id=sid)
+        assert "【本次聚焦实体】" not in block

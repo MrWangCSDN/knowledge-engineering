@@ -53,7 +53,13 @@ async def recall_memory_block(db: Any, *, user_id: int, session_id: str) -> str:
     )
     sm = sm_res.scalars().one_or_none()
     if sm is not None and (sm.working_summary or "").strip():
-        parts.append("【本次会话工作状态】\n" + sm.working_summary.strip())
+        session_block = "【本次会话工作状态】\n" + sm.working_summary.strip()
+        focus = sm.focus_entity_ids
+        if isinstance(focus, list):
+            ids = [x for x in focus if isinstance(x, str) and x]
+            if ids:
+                session_block += "\n【本次聚焦实体】" + ", ".join(ids)
+        parts.append(session_block)
 
     um_res = await db.execute(
         select(QAUserMemory)
