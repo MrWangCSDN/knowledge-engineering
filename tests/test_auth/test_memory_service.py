@@ -519,3 +519,30 @@ async def test_recall_project_tenant_filter_real_sqlite():
     assert "B-own-private" not in block
     assert "A-own-archived" not in block
     await eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recall_project_block_caps_at_limit_real_sqlite():
+    """真 SQLite：>20 条 active 工程记忆，recall 只取 _PROJECT_MEMORY_LIMIT(20) 条
+    （回归守护 .limit()，防被误删导致 prompt 膨胀/成本失控）。"""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from src.service.db import Base
+
+    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    SM = async_sessionmaker(eng, expire_on_commit=False)
+    async with SM() as s:
+        s.add_all([
+            QAProjectMemory(
+                id=i, project_id="A", user_id=1, scope="private",
+                content=f"note-{i}", source="explicit", status="active",
+            )
+            for i in range(1, 26)  # 25 条
+        ])
+        await s.commit()
+    async with SM() as s:
+        block = await recall_memory_block(s, user_id=1, session_id="x", project_id="A")
+    # 工程块每条是 "- note-i" 一行；统计 "- note-" 出现次数
+    assert block.count("- note-") == 20
+    await eng.dispose()

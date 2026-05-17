@@ -43,6 +43,7 @@ def detect_explicit_memory(question: str) -> str | None:
 # ⚠️ 这些是「记住」的超串，调用方（_make_memory_writer）必须先调本检测器、
 #    后调通用 detect_explicit_memory，否则「记住这个工程：X」会被误判为 user 级。
 _PROJECT_TRIGGERS = ("记住这个工程", "记住本工程", "记住该工程", "工程记住")
+_PROJECT_MEMORY_LIMIT = 20    # 工程记忆 S1 单次 recall 上限（spec §19）
 
 
 def detect_explicit_project_memory(question: str) -> str | None:
@@ -163,7 +164,6 @@ async def write_explicit_project_memory(
 
 
 _FOCUS_MAX = 10  # 聚焦实体上限，控 prompt 体积
-_PROJECT_MEMORY_LIMIT = 20    # 工程记忆 S1 单次 recall 上限（spec §19）
 
 
 def _extract_focus_entity_ids(messages: Any) -> list[str]:

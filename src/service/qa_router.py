@@ -541,7 +541,7 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question, project_id=No
     """
     async def _writer() -> None:
         # 1. 显式写入（先工程后通用：工程触发词是「记住」超串，必须先判）
-        proj_content = None
+        write_kind = "project"  # 默认归因 project（含项目检测阶段）
         try:
             proj_content = (
                 detect_explicit_project_memory(question)
@@ -553,13 +553,13 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question, project_id=No
                     session_id=session_id, content=proj_content,
                 )
             else:
+                write_kind = "user"
                 content = detect_explicit_memory(question)
                 if content:
                     await write_explicit_memory(
                         db, user_id=user_id, session_id=session_id, content=content
                     )
         except Exception:
-            write_kind = "project" if proj_content else "user"
             _log.debug(
                 "explicit %s memory write failed for session %s, silently ignored",
                 write_kind, session_id, exc_info=True,
