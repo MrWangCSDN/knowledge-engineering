@@ -71,13 +71,23 @@ def _build_app(session_maker, *, retriever=None, synthesizer=None):
             entry_candidates=[{"entity_id": "method://m1"}],
         ))
     if synthesizer is None:
-        # spec=['synthesize']：限制 mock 只有这一个属性；防止 sse_emitter 误判"支持流式"
-        synthesizer = MagicMock(spec=['synthesize'])
+        # spec=['synthesize', 'llm']：限制 mock 属性集。
+        #  - 'synthesize'：答案合成（保留）
+        #  - 'llm'：_make_title_generator（会话标题特性）与 _make_memory_writer
+        #    （记忆特性）都从 synthesizer.llm 取 LLM provider；缺它会 AttributeError
+        # 仍不含 synthesize_stream，故 sse_emitter 不会误判"支持流式"。
+        synthesizer = MagicMock(spec=['synthesize', 'llm'])
         synthesizer.synthesize = AsyncMock(return_value=SynthesizedAnswer(
             sections=[{"type": "overview", "title": "概述", "content": "答案", "references": []}],
             token_usage=100,
             cost_yuan=0.05,
         ))
+        # 标题/记忆旁路用的 LLM。会话标题特性后，新会话标题由 _make_title_generator
+        # 调 llm.complete 对“问题”做总结生成（不再截取问题前 N 字）。
+        # 这里返回一个与测试问题相关的总结串，使 test_explain_persists_* 的
+        # “标题含问题关键词”断言在新行为下仍有效（compaction 因消息数未达阈值不触发）。
+        synthesizer.llm = AsyncMock()
+        synthesizer.llm.complete = AsyncMock(return_value="存款开户设计逻辑")
     app.state.qa_retriever = retriever
     app.state.qa_synthesizer = synthesizer
     # 真实 SkillRouter（关键词路径无依赖，注入零成本）

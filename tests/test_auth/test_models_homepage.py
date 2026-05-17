@@ -73,6 +73,9 @@ def test_qa_session_columns():
     assert cols == {
         "id", "project_id", "user_id", "title",
         "created_at", "updated_at", "message_count", "archived_at",
+        # 会话标题特性新增（[[会话标题-重命名与智能总结-设计]] §2）：
+        # 是否被用户手动重命名过，异步总结据此决定是否覆盖
+        "title_custom",
     }
 
 
