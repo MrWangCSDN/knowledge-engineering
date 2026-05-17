@@ -396,13 +396,13 @@ async def test_explain_meta_context_usage_when_history_trimmed(
 ):
     """端到端：router 压力块（trim_history_to_budget → context_usage → SSE meta）接线验证。
 
-    通过把 KE_MODEL_CONTEXT_WINDOW 设成极小值（200 token），确保 8 条 80 字的历史
-    消息超过预算，触发真实裁史，meta 事件携带 context_usage + history_trimmed:true +
-    window_tokens 字段。
+    通过把 KE_MODEL_CONTEXT_WINDOW 设成刚好到达 _MIN_WINDOW 下限的值（1000 token），
+    确保 8 条 200 字的历史消息超过预算，触发真实裁史，meta 事件携带 context_usage +
+    history_trimmed:true + window_tokens 字段。
 
-    Budget 算法（window=200）：
-      history_token_budget() = int(200 * (1 - 0.45)) = int(110) = 110 tokens
-      8 messages × ceil(80/1.5)=54 tokens = 432 tokens >> 110 → 裁史必触发
+    Budget 算法（window=1000）：
+      history_token_budget() = int(1000 * (1 - 0.45)) = int(550) = 550 tokens
+      8 messages × ceil(200/1.5)=134 tokens = 1072 tokens >> 550 → 裁史必触发
 
     注：maybe_compact_session 被 patch 为 no-op，因为 SQLite 测试 DB 的 BigInteger
     主键与 MySQL 行为有差异（RETURNING 在 SQLite 不支持 autoincrement BigInteger），
@@ -411,7 +411,7 @@ async def test_explain_meta_context_usage_when_history_trimmed(
     """
     import json as _json
 
-    monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "200")
+    monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "1000")
     # patch 掉压缩回调（避免 SQLite BigInteger RETURNING 限制）；
     # qa_router.py 通过 `from ... import maybe_compact_session` 引入，
     # 必须 patch 该模块命名空间里的引用，而非源模块。
@@ -425,8 +425,11 @@ async def test_explain_meta_context_usage_when_history_trimmed(
     client = TestClient(app)
     token = _login(client)
 
-    # 8 条历史消息，每条内容 80 字（远超 110 token 预算）
-    long_content = "A" * 80
+    # 8 条历史消息，每条内容 200 字：
+    #   history_token_budget = int(1000 * (1 - 0.45)) = 550 tokens
+    #   每条估算 = ceil(200/1.5) = 134 tokens
+    #   8 × 134 = 1072 tokens >> 550 → 裁史必触发
+    long_content = "A" * 200
     history = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": long_content}
         for i in range(8)

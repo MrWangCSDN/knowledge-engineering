@@ -9,6 +9,8 @@ def test_estimate_tokens_ceil_and_empty():
     assert estimate_tokens("") == 0
     assert estimate_tokens("123") == 2          # ceil(3/1.5)=2
     assert estimate_tokens("a" * 150) == 100
+    # M1：注解改为 str | None；None 已由 if not text 安全处理，行为不变
+    assert estimate_tokens(None) == 0
 
 
 def test_window_env_override(monkeypatch):
@@ -20,6 +22,13 @@ def test_window_env_override(monkeypatch):
     assert model_context_window() == 128000
     monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "-5")
     assert model_context_window() == 128000
+    # M2：低于 _MIN_WINDOW(1000) 的值视为运维误配，回退保守默认
+    monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "100")
+    assert model_context_window() == 128000   # 远低于 floor → 默认
+    monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "999")
+    assert model_context_window() == 128000   # 恰好低于 floor → 默认
+    monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "1000")
+    assert model_context_window() == 1000     # 恰好等于 floor → 接受
 
 
 def test_history_budget_is_window_minus_reserve(monkeypatch):

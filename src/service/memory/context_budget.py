@@ -9,10 +9,11 @@ import math
 import os
 
 _DEFAULT_WINDOW = 128000          # 保守默认（Fork B；env KE_MODEL_CONTEXT_WINDOW 覆盖）
+_MIN_WINDOW = 1000                # 低于此视为运维误配，回退保守默认（防静默丢上下文）
 _DEFAULT_RESERVE_PCT = 0.45       # 预留 system+记忆块+KG context+本轮问题+回答
 
 
-def estimate_tokens(text: str) -> int:
+def estimate_tokens(text: str | None) -> int:
     """粗算：1 token ≈ 1.5 字符（中英混合），向上取整，保守偏大（Fork A）。"""
     if not text:
         return 0
@@ -21,11 +22,11 @@ def estimate_tokens(text: str) -> int:
 
 def model_context_window() -> int:
     """模型上下文窗口（token）。env `KE_MODEL_CONTEXT_WINDOW` 覆盖；
-    缺失/非法/非正 → 保守默认 128000。"""
+    缺失/非法/低于 _MIN_WINDOW(1000) → 保守默认 128000。"""
     raw = os.getenv("KE_MODEL_CONTEXT_WINDOW", "").strip()
     try:
         v = int(raw)
-        if v > 0:
+        if v >= _MIN_WINDOW:
             return v
     except (TypeError, ValueError):
         pass
