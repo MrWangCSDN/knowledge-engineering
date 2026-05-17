@@ -228,9 +228,22 @@ async def maybe_compact_session(
         if msg_count - prev < min_delta:
             return
 
-        convo = "\n".join(
-            f"[{m.role}] {(m.content or '')[:200]}" for m in messages[-12:]
-        )
+        # §21 递归累积：输入 = 上一版摘要 + 仅自水位线(prev)以来的新增消息。
+        # 早期事实进早期摘要后被永久滚动保留（对齐 Claude Code 携带摘要再摘要）；
+        # 输入恒有界（旧摘要 ≤ 摘要上限 + 新增量有界），无 token 膨胀。
+        prev_summary = (sm.working_summary or "").strip() if sm is not None else ""
+        new_msgs = messages[prev:]
+        _segs: list[str] = []
+        if prev_summary:
+            _segs.append("【已有会话摘要】\n" + prev_summary)
+        if new_msgs:
+            _segs.append(
+                "【新增对话】\n"
+                + "\n".join(
+                    f"[{m.role}] {(m.content or '')[:200]}" for m in new_msgs
+                )
+            )
+        convo = "\n\n".join(_segs)
         summary = await llm.complete(system=_SESSION_COMPACT_SYSTEM, user=convo)
         summary = (summary or "").strip()
         if not summary:
