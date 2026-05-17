@@ -5,6 +5,8 @@ prompt 是字符串，没法用单测保证 LLM 输出质量；
 """
 from src.service.qa_engine.prompts import (
     SYSTEM_PROMPT,
+    _format_history,
+    build_chitchat_user_prompt,
     build_user_prompt,
     build_user_prompt_with_history,
 )
@@ -138,13 +140,6 @@ def test_history_prompt_truncates_to_last_10_messages():
 
 
 # ───────── 会话级多轮：_format_history / build_chitchat_user_prompt（spec §20）─────────
-from src.service.qa_engine.prompts import (
-    _format_history,
-    build_chitchat_user_prompt,
-    build_user_prompt_with_history,
-    build_user_prompt,
-)
-
 
 def test_format_history_basic_and_truncation():
     h = [{"role": "user", "content": "x" * 250}, {"role": "assistant", "content": "好的"}]
