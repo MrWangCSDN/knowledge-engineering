@@ -241,6 +241,36 @@ HISTORY_SUMMARIZE_PROMPT = """以下是用户之前的对话历史。请用 1-2 
 概括："""
 
 
+def _format_history(history: list[dict] | None) -> str:
+    """把最近 ≤10 轮历史格式化为多行 `[role] content(≤200字)`。
+
+    KG 与 chit-chat 共用单一来源（DRY）。防御：history 非 list/None/空 → ""；
+    非 dict 项跳过（正常全 dict 时输出与既有逐字节一致）。
+    """
+    if not isinstance(history, list) or not history:
+        return ""
+    lines: list[str] = []
+    for m in history[-10:]:
+        if not isinstance(m, dict):
+            continue
+        lines.append(f"[{m.get('role', '?')}] {m.get('content', '')[:200]}")
+    return "\n".join(lines)
+
+
+def build_chitchat_user_prompt(
+    question: str, history: list[dict] | None = None
+) -> str:
+    """chit-chat 专属 user prompt：带最近历史（无 KG 6 段脚手架）。
+
+    history 空/None → 仅 question（保持 chit-chat 无历史时旧行为，逐字节一致）。
+    设计：[[记忆系统-设计]] §20。
+    """
+    h = _format_history(history)
+    if not h:
+        return question
+    return f"【对话历史】\n{h}\n\n{question}"
+
+
 def build_user_prompt_with_history(
     question: str,
     context: dict[str, Any],
@@ -256,10 +286,7 @@ def build_user_prompt_with_history(
         return build_user_prompt(question, context)
 
     base = build_user_prompt(question, context)
-    history_text = "\n".join(
-        f"[{m.get('role', '?')}] {m.get('content', '')[:200]}" for m in history[-10:]
-    )
-    return f"【对话历史】\n{history_text}\n\n{base}"
+    return f"【对话历史】\n{_format_history(history)}\n\n{base}"
 
 
 # ─── 便利函数（单测/开发期用）──────────────────────────────────────────────

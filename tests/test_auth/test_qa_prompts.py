@@ -135,3 +135,54 @@ def test_history_prompt_truncates_to_last_10_messages():
     p = build_user_prompt_with_history("x", ctx, history=history)
     assert "msg-14" in p   # 最新的在
     assert "msg-0" not in p  # 最早的被截断
+
+
+# ───────── 会话级多轮：_format_history / build_chitchat_user_prompt（spec §20）─────────
+from src.service.qa_engine.prompts import (
+    _format_history,
+    build_chitchat_user_prompt,
+    build_user_prompt_with_history,
+    build_user_prompt,
+)
+
+
+def test_format_history_basic_and_truncation():
+    h = [{"role": "user", "content": "x" * 250}, {"role": "assistant", "content": "好的"}]
+    out = _format_history(h)
+    assert out == f"[user] {'x' * 200}\n[assistant] 好的"
+
+
+def test_format_history_keeps_last_10():
+    h = [{"role": "user", "content": f"m{i}"} for i in range(15)]
+    out = _format_history(h)
+    assert out.count("\n") == 9
+    assert "[user] m5" in out and "[user] m14" in out
+    assert "[user] m4" not in out
+
+
+def test_format_history_defensive():
+    assert _format_history(None) == ""
+    assert _format_history([]) == ""
+    assert _format_history("notlist") == ""
+    assert _format_history([{"role": "user", "content": "ok"}, 123, None]) == "[user] ok"
+    assert _format_history([{}]) == "[?] "
+
+
+def test_build_chitchat_user_prompt_with_history():
+    h = [{"role": "user", "content": "我喜欢吃西瓜"}, {"role": "assistant", "content": "西瓜解暑"}]
+    out = build_chitchat_user_prompt("我喜欢什么水果", h)
+    assert out == "【对话历史】\n[user] 我喜欢吃西瓜\n[assistant] 西瓜解暑\n\n我喜欢什么水果"
+
+
+def test_build_chitchat_user_prompt_no_history_is_bare_question():
+    assert build_chitchat_user_prompt("你好", None) == "你好"
+    assert build_chitchat_user_prompt("你好", []) == "你好"
+
+
+def test_build_user_prompt_with_history_byte_identical_after_refactor():
+    ctx = {"entry_candidates": [], "skill_id": "architecture"}
+    h = [{"role": "user", "content": "Q1"}, {"role": "assistant", "content": "A1"}]
+    base = build_user_prompt("问题", ctx)
+    expected = f"【对话历史】\n[user] Q1\n[assistant] A1\n\n{base}"
+    assert build_user_prompt_with_history("问题", ctx, history=h) == expected
+    assert build_user_prompt_with_history("问题", ctx, history=None) == base
