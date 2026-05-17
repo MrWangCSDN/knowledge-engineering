@@ -90,6 +90,36 @@ async def write_explicit_memory(
     await db.commit()
 
 
+_FOCUS_MAX = 10  # 聚焦实体上限，控 prompt 体积
+
+
+def _extract_focus_entity_ids(messages: Any) -> list[str]:
+    """从一组消息的 msg_metadata 聚合本次会话聚焦的 entity_id。
+
+    来源：assistant 消息 msg_metadata 里的 cited_entities + entry_points
+    （回答时已落库，复用零额外 LLM 成本）。按首见序去重，截 _FOCUS_MAX。
+    全程防御：缺属性 / None / 非 dict / 字段非 list / 非字符串项 一律安全跳过。
+    设计：[[记忆系统-设计]] §17。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in messages:
+        meta = getattr(m, "msg_metadata", None)
+        if not isinstance(meta, dict):
+            continue
+        for key in ("cited_entities", "entry_points"):
+            vals = meta.get(key)
+            if not isinstance(vals, list):
+                continue
+            for v in vals:
+                if isinstance(v, str) and v and v not in seen:
+                    seen.add(v)
+                    out.append(v)
+                    if len(out) >= _FOCUS_MAX:
+                        return out
+    return out
+
+
 async def maybe_compact_session(
     db: Any, llm: Any, *, session_id: str, every_n_messages: int = 6
 ) -> None:
@@ -129,17 +159,21 @@ async def maybe_compact_session(
         if not summary:
             return
 
+        focus = _extract_focus_entity_ids(messages[-12:])
+
         if sm is None:
             db.add(
                 QASessionMemory(
                     session_id=session_id,
                     working_summary=summary,
                     turn_count=msg_count,
+                    focus_entity_ids=focus,
                 )
             )
         else:
             sm.working_summary = summary
             sm.turn_count = msg_count
+            sm.focus_entity_ids = focus
         await db.commit()
     except Exception:
         # 压缩失败绝不影响主流程（spec §4.3）；debug 留痕便于排查（不影响主答）

@@ -179,9 +179,10 @@ class _FakeResult:
 
 
 class _FakeMsg:
-    def __init__(self, role="user", content="问题"):
+    def __init__(self, role="user", content="问题", msg_metadata=None):
         self.role = role
         self.content = content
+        self.msg_metadata = msg_metadata
 
 
 class _FakeMemDB:
@@ -273,3 +274,73 @@ async def test_compact_skips_when_no_new_messages_since_last():
     await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
     assert db.committed is False
     assert db.added == []
+
+
+# ───────── 会话级 focus_entity_ids 抽取（spec §17）─────────
+
+from src.service.memory.service import _extract_focus_entity_ids
+
+
+class _FakeMsgMeta:
+    """带 msg_metadata 的 fake 消息（assistant 轮）。"""
+    def __init__(self, role="assistant", content="答", msg_metadata=None):
+        self.role = role
+        self.content = content
+        self.msg_metadata = msg_metadata
+
+
+def test_extract_focus_dedup_and_order_and_cap():
+    msgs = [
+        _FakeMsgMeta(msg_metadata={"cited_entities": ["method://a", "class://b"]}),
+        _FakeMsgMeta(msg_metadata={"cited_entities": ["method://a"],
+                                   "entry_points": ["method://c"]}),
+        _FakeMsgMeta(msg_metadata={"cited_entities": [f"method://x{i}" for i in range(20)]}),
+    ]
+    out = _extract_focus_entity_ids(msgs)
+    assert out[:3] == ["method://a", "class://b", "method://c"]
+    assert len(out) == 10
+
+
+def test_extract_focus_defensive_on_missing_or_bad_metadata():
+    class _Bare:
+        role = "user"; content = "q"
+    msgs = [
+        _Bare(),
+        _FakeMsgMeta(role="user", content="q", msg_metadata=None),
+        _FakeMsgMeta(msg_metadata="not-a-dict"),
+        _FakeMsgMeta(msg_metadata={"cited_entities": "not-a-list"}),
+        _FakeMsgMeta(msg_metadata={"entry_points": None}),
+    ]
+    assert _extract_focus_entity_ids(msgs) == []
+
+
+def test_extract_focus_filters_empty_and_nonstr():
+    msgs = [_FakeMsgMeta(msg_metadata={"cited_entities": ["method://ok", "", None, 123]})]
+    assert _extract_focus_entity_ids(msgs) == ["method://ok"]
+
+
+@pytest.mark.asyncio
+async def test_compact_persists_focus_entity_ids_new_row():
+    msgs = [_FakeMsg() for _ in range(5)] + [
+        _FakeMsg(role="assistant", content="答",
+                 msg_metadata={"cited_entities": ["method://pay", "table://orders"]}),
+    ]
+    db = _FakeMemDB(session_row=None, msg_rows=msgs)
+    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
+    row = [o for o in db.added if isinstance(o, QASessionMemory)][0]
+    assert row.focus_entity_ids == ["method://pay", "table://orders"]
+    assert row.working_summary
+
+
+@pytest.mark.asyncio
+async def test_compact_updates_focus_entity_ids_existing_row():
+    sm = QASessionMemory(session_id="s1", working_summary="old",
+                         turn_count=0, focus_entity_ids=["method://old"])
+    msgs = [_FakeMsg() for _ in range(5)] + [
+        _FakeMsg(role="assistant",
+                 msg_metadata={"cited_entities": ["method://new"]}),
+    ]
+    db = _FakeMemDB(session_row=sm, msg_rows=msgs)
+    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
+    assert sm.focus_entity_ids == ["method://new"]
+    assert db.committed is True
