@@ -214,3 +214,21 @@ def test_session_compact_system_is_faithful_digest_not_taskonly():
     assert "会话工作状态压缩器" not in s
     assert "本次会话目标" not in s
     assert "150" not in s
+
+
+# ───────── §22.4：_USER_MEM_INTENT_SYSTEM 意图解析 prompt characterization ─────────
+from src.service.qa_engine.prompts import _USER_MEM_INTENT_SYSTEM
+
+
+def test_user_mem_intent_system_contract():
+    s = _USER_MEM_INTENT_SYSTEM
+    # 四类判定
+    assert "identity" in s and "preference" in s and "style_feedback" in s and "skip" in s
+    # 严格 JSON 输出 + 四字段
+    assert "JSON" in s
+    for k in ("tier", "kind", "content", "supersedes_kind"):
+        assert k in s
+    # 规范化为单句陈述事实 + identity 必带取代信号 + CC「先更新不重复」同款
+    assert "单句" in s or "一句" in s
+    assert "supersedes_kind" in s
+    assert "只输出" in s and ("不要解释" in s or "无解释" in s)

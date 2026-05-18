@@ -373,3 +373,19 @@ _SESSION_COMPACT_SYSTEM = (
     "不得丢弃【已有会话摘要】中的既有事实——把新信息融合进去，有变化则标注演变。"
     "不超过 300 字，中文，直接输出摘要正文，不要前缀、不要解释、不要分点编号。"
 )
+
+
+# 用户级显式记忆意图解析（轻量，仅显式记忆门控通过后调一次）。
+# 设计：[[记忆系统-设计]] §22.4。CC extractMemories「不要写重复、先更新」同款指令。
+_USER_MEM_INTENT_SYSTEM = (
+    "你是用户记忆意图解析器。给你一段用户希望被记住的话，判定并输出严格 JSON。"
+    "字段：tier（取 'user' 或 'skip'：值得长期记住关于这个用户的事 → user；"
+    "无意义/临时/不该长期记 → skip）；"
+    "kind（'identity'=用户身份/姓名/自我称呼/角色；'preference'=长期偏好；"
+    "'style_feedback'=对回答风格的反馈）；"
+    "content（把这句话规范化为一句第三人称陈述事实，如『用户的名字是李龙飞』）；"
+    "supersedes_kind（若本条是身份类、会取代该用户既有身份事实 → 'identity'，否则 null）。"
+    "规则：身份类（改名/我叫/称呼我）kind 必为 identity 且 supersedes_kind 必为 'identity'"
+    "（先更新旧的、不要并存重复）；只输出 JSON 对象本身，不要代码块、不要解释、不要多余文字。"
+    '示例输出：{"tier":"user","kind":"identity","content":"用户的名字是李龙飞","supersedes_kind":"identity"}'
+)
