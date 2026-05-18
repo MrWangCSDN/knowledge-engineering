@@ -6,13 +6,14 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from sqlalchemy import select, or_
 
 from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
-from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM
+from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM, _USER_MEM_INTENT_SYSTEM
 
 _log = logging.getLogger(__name__)
 
@@ -151,6 +152,51 @@ async def recall_memory_block(db: Any, *, user_id: int, session_id: str, project
                 parts.append("【工程记忆】\n" + lines)
 
     return "\n\n".join(parts)
+
+
+_VALID_KINDS = ("identity", "preference", "style_feedback")
+
+
+async def parse_user_memory_intent(llm: Any, content: str) -> dict:
+    """轻量 LLM 解析显式记忆意图（§22.4）。返回
+    {tier:'user'|'skip', kind:'identity'|'preference'|'style_feedback',
+     content:str, supersedes_kind:'identity'|None}。
+    任何异常/非法 JSON/字段非法 → 兜底 {user, preference, 原 content, None}（绝不丢、绝不抛）。
+    """
+    fallback = {
+        "tier": "user", "kind": "preference",
+        "content": content, "supersedes_kind": None,
+    }
+    try:
+        raw = await llm.complete(system=_USER_MEM_INTENT_SYSTEM, user=content)
+    except Exception:
+        return fallback
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        # 去 ```json ... ``` 围栏
+        s = s.split("```")[1] if "```" in s[3:] else s.lstrip("`")
+        if s.startswith("json"):
+            s = s[4:]
+        s = s.strip().strip("`").strip()
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return fallback
+    if not isinstance(obj, dict):
+        return fallback
+    tier = obj.get("tier")
+    kind = obj.get("kind")
+    c = obj.get("content")
+    sk = obj.get("supersedes_kind")
+    if tier not in ("user", "skip"):
+        return fallback
+    if kind not in _VALID_KINDS:
+        return fallback
+    if not isinstance(c, str) or not c.strip():
+        return fallback
+    if sk not in ("identity", None):
+        sk = None
+    return {"tier": tier, "kind": kind, "content": c.strip(), "supersedes_kind": sk}
 
 
 async def write_explicit_memory(

@@ -754,3 +754,64 @@ def test_detect_suffix_semicolon_punct():
     # Minor：；; 也应作尾部标点剥掉
     assert detect_explicit_memory("我叫李龙飞；请记住；") == "我叫李龙飞"
     assert detect_explicit_memory("我用 Java; 记住;") == "我用 Java"
+
+
+# ───────── §22.4：parse_user_memory_intent 解析 + 兜底 ─────────
+from src.service.memory.service import parse_user_memory_intent
+
+
+class _JsonLLM:
+    def __init__(self, reply): self._reply = reply
+    async def complete(self, *, system, user, **kw): return self._reply
+
+
+class _RaiseLLM:
+    async def complete(self, *, system, user, **kw): raise RuntimeError("llm down")
+
+
+@pytest.mark.asyncio
+async def test_parse_valid_json():
+    llm = _JsonLLM('{"tier":"user","kind":"identity",'
+                    '"content":"用户的名字是李龙飞","supersedes_kind":"identity"}')
+    r = await parse_user_memory_intent(llm, "我改名叫李龙飞")
+    assert r == {"tier": "user", "kind": "identity",
+                 "content": "用户的名字是李龙飞", "supersedes_kind": "identity"}
+
+
+@pytest.mark.asyncio
+async def test_parse_strips_code_fence():
+    llm = _JsonLLM('```json\n{"tier":"user","kind":"preference",'
+                   '"content":"用户偏好简短回答","supersedes_kind":null}\n```')
+    r = await parse_user_memory_intent(llm, "我喜欢简短回答")
+    assert r["kind"] == "preference" and r["supersedes_kind"] is None
+
+
+@pytest.mark.asyncio
+async def test_parse_skip():
+    llm = _JsonLLM('{"tier":"skip","kind":"preference","content":"x","supersedes_kind":null}')
+    r = await parse_user_memory_intent(llm, "嗯嗯")
+    assert r["tier"] == "skip"
+
+
+@pytest.mark.asyncio
+async def test_parse_invalid_json_falls_back():
+    # 非 JSON → 兜底：原样 content 当 preference，不丢意图
+    llm = _JsonLLM("好的我记住了")
+    r = await parse_user_memory_intent(llm, "我喜欢简短回答")
+    assert r == {"tier": "user", "kind": "preference",
+                 "content": "我喜欢简短回答", "supersedes_kind": None}
+
+
+@pytest.mark.asyncio
+async def test_parse_llm_raises_falls_back():
+    r = await parse_user_memory_intent(_RaiseLLM(), "我用 Java")
+    assert r == {"tier": "user", "kind": "preference",
+                 "content": "我用 Java", "supersedes_kind": None}
+
+
+@pytest.mark.asyncio
+async def test_parse_bad_enum_or_missing_keys_falls_back():
+    llm = _JsonLLM('{"tier":"weird","kind":"nope"}')   # 非法枚举/缺字段
+    r = await parse_user_memory_intent(llm, "我用 Java")
+    assert r == {"tier": "user", "kind": "preference",
+                 "content": "我用 Java", "supersedes_kind": None}
