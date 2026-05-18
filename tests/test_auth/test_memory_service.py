@@ -896,3 +896,64 @@ async def test_recall_only_current_identity_after_supersede():
     db = _FakeMemDB(user_rows=[_um("identity", "用户的名字是李龙飞")])
     block = await recall_memory_block(db, user_id=7, session_id="sX")
     assert "李龙飞" in block and "王山河" not in block
+
+
+# ───────── §22.5 review 收尾：锁 SQL WHERE + 零/多旧 identity ─────────
+
+class _CapSelectDB(_FakeMemDB):
+    """记录传给 execute 的 QAUserMemory 查询语句，用于断言 WHERE 子句存在
+    （_FakeMemDB 本身不套 WHERE；这层捕获让 WHERE 回归可被测试发现）。"""
+    def __init__(self, user_rows=None):
+        super().__init__(user_rows=user_rows)
+        self.last_user_select = None
+
+    async def execute(self, stmt):
+        ent = stmt.column_descriptions[0]["entity"]
+        if ent is QAUserMemory:
+            self.last_user_select = stmt
+        return await super().execute(stmt)
+
+
+@pytest.mark.asyncio
+async def test_write_identity_select_has_where_filter():
+    # 锁生产 SQL：身份写必须按 user_id + kind='identity' + status='active' 过滤；
+    # 若 WHERE 被误删，此测试失败（_FakeMemDB 的 Python guard 兜不住这条断言）
+    old_id = _um("identity", "用户的名字是王山河")
+    db = _CapSelectDB(user_rows=[old_id])
+    await write_explicit_memory(
+        db, user_id=7, session_id="s9", content="用户的名字是李龙飞",
+        kind="identity", supersedes_kind="identity",
+    )
+    assert db.last_user_select is not None
+    sql = str(db.last_user_select).lower()
+    assert "where" in sql
+    assert "user_id" in sql and "kind" in sql and "status" in sql
+    assert old_id.status == "archived"
+
+
+@pytest.mark.asyncio
+async def test_write_identity_no_prior_just_inserts():
+    db = _FakeMemDB(user_rows=[])
+    await write_explicit_memory(
+        db, user_id=7, session_id="s10", content="用户的名字是李龙飞",
+        kind="identity", supersedes_kind="identity",
+    )
+    rows = [o for o in db.added if isinstance(o, QAUserMemory)]
+    assert len(rows) == 1 and rows[0].kind == "identity"
+    assert rows[0].content == "用户的名字是李龙飞" and rows[0].status == "active"
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_write_identity_archives_all_prior_actives():
+    # 生产 bug 场景：历史遗留 2 条 active identity → 新身份写必须全部归档
+    a = _um("identity", "名字A")
+    b = _um("identity", "名字B")
+    db = _FakeMemDB(user_rows=[a, b])
+    await write_explicit_memory(
+        db, user_id=7, session_id="s11", content="用户的名字是李龙飞",
+        kind="identity", supersedes_kind="identity",
+    )
+    assert a.status == "archived" and b.status == "archived"
+    new = [o for o in db.added if isinstance(o, QAUserMemory)]
+    assert len(new) == 1 and new[0].kind == "identity" and new[0].status == "active"

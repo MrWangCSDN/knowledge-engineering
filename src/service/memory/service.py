@@ -212,6 +212,13 @@ async def write_explicit_memory(
     再 INSERT 新行 —— identity 单例，新名字取代旧名字。
     kind in ('preference','style_feedback')：仅追加（多条并存）。
     归档+插入同一次 commit。kind 默认 'preference'（旧调用零改动，不破坏）。
+
+    入参契约：supersedes_kind=='identity' 的 OR 分支是前向兼容位；当前 §22.4 解析器
+    对身份事实总是同时置 kind='identity' 与 supersedes_kind='identity'。调用方若要触发
+    身份取代，**必须**令 kind='identity'（勿用 kind='preference'+supersedes_kind='identity'，
+    那会归档旧 identity 却插入一条 preference，导致 0 条 active identity）。
+    并发：本函数在 post-turn 单会话后台回调内调用，同 user 并发写竞争窗口可忽略，
+    不加锁（记忆为辅助路径，瞬时重复下一次身份写自愈）。
     自身不吞异常（同 recall_memory_block 契约）；router 调用点已 try/except。
     """
     if kind == "identity" or supersedes_kind == "identity":
@@ -223,7 +230,9 @@ async def write_explicit_memory(
             )
         )
         for r in res.scalars().all():
-            # real SQL 已被 WHERE 限定；fake 不套 WHERE → Python 再 guard 一层
+            # guard 仅对测试 _FakeMemDB 生效（它不解析/套用 WHERE，返回全部 user_rows）；
+            # 真实 ORM 行 kind/status 是 NOT NULL 映射列、且已被上面的 WHERE 限定，
+            # 不需要 getattr。WHERE 子句的回归由 test_write_identity_select_has_where_filter 锁定。
             if getattr(r, "kind", None) == "identity" and getattr(r, "status", None) == "active":
                 r.status = "archived"
     db.add(
