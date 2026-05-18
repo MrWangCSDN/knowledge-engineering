@@ -189,3 +189,76 @@ async def test_writer_project_write_failure_is_silent():
         question="记住这个工程：会崩的内容", project_id="deposit",
     )
     await writer()  # 必须不抛
+
+
+# ───────── §22：端到端 用户级 detect→parse→write ─────────
+from src.service.db_models_homepage import QAUserMemory as _QUM
+
+
+class _SeedDB(_FakeDB):
+    """在 _FakeDB 基础上让 QAUserMemory 查询返回种子行（验证 identity 归档）。"""
+    def __init__(self, user_rows=None, msg_rows=None):
+        super().__init__(msg_rows=msg_rows)
+        self._user_rows = user_rows or []
+
+    async def execute(self, stmt):
+        ent = stmt.column_descriptions[0]["entity"]
+        if ent is _QUM:
+            return _FakeResult(self._user_rows)
+        return await super().execute(stmt)
+
+
+class _IntentLLM:
+    """complete：意图解析调用（system 含『意图解析器』）时返回预设；否则返回压缩占位。"""
+    def __init__(self, intent_json): self._j = intent_json
+    async def complete(self, *, system, user, **kw):
+        if "意图解析器" in system:
+            return self._j
+        return "本次目标：x"
+
+
+def _seed_identity(content="用户的名字是王山河"):
+    return _QUM(user_id=3, kind="identity", content=content,
+                source="explicit", source_session_id="s0", status="active")
+
+
+@pytest.mark.asyncio
+async def test_writer_suffix_identity_supersedes_end_to_end():
+    old = _seed_identity()
+    db = _SeedDB(user_rows=[old])
+    llm = _IntentLLM('{"tier":"user","kind":"identity",'
+                     '"content":"用户的名字是李龙飞","supersedes_kind":"identity"}')
+    writer = _make_memory_writer(
+        db=db, llm=llm, user_id=3, session_id="s1",
+        question="我改名叫李龙飞 请记住",          # 句尾触发词
+    )
+    await writer()
+    assert old.status == "archived"
+    new = [o for o in db.added if isinstance(o, _QUM)]
+    assert len(new) == 1 and new[0].kind == "identity"
+    assert new[0].content == "用户的名字是李龙飞" and new[0].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_writer_skip_writes_nothing():
+    db = _SeedDB()
+    llm = _IntentLLM('{"tier":"skip","kind":"preference","content":"x","supersedes_kind":null}')
+    writer = _make_memory_writer(
+        db=db, llm=llm, user_id=3, session_id="s1", question="记住 嗯嗯",
+    )
+    await writer()
+    assert [o for o in db.added if isinstance(o, _QUM)] == []
+
+
+@pytest.mark.asyncio
+async def test_writer_parse_failure_falls_back_preference():
+    db = _SeedDB()
+    # 意图解析返回非 JSON → parse 兜底 preference 原样写
+    writer = _make_memory_writer(
+        db=db, llm=_IntentLLM("好的"), user_id=3, session_id="s1",
+        question="记住我喜欢简短回答",
+    )
+    await writer()
+    rows = [o for o in db.added if isinstance(o, _QUM)]
+    assert len(rows) == 1
+    assert rows[0].kind == "preference" and rows[0].content == "我喜欢简短回答"

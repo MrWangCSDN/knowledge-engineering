@@ -44,6 +44,7 @@ from src.service.memory.service import (
     recall_memory_block,
     detect_explicit_memory,
     write_explicit_memory,
+    parse_user_memory_intent,
     maybe_compact_session,
     detect_explicit_project_memory,
     write_explicit_project_memory,
@@ -556,9 +557,14 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question, project_id=No
                 write_kind = "user"
                 content = detect_explicit_memory(question)
                 if content:
-                    await write_explicit_memory(
-                        db, user_id=user_id, session_id=session_id, content=content
-                    )
+                    intent = await parse_user_memory_intent(llm, content)
+                    if intent.get("tier") == "user":
+                        await write_explicit_memory(
+                            db, user_id=user_id, session_id=session_id,
+                            content=intent["content"],
+                            kind=intent["kind"],
+                            supersedes_kind=intent.get("supersedes_kind"),
+                        )
         except Exception:
             _log.debug(
                 "explicit %s memory write failed for session %s, silently ignored",
