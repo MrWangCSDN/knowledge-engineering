@@ -13,6 +13,7 @@ from src.service.memory.service import (
     maybe_compact_session,
     detect_explicit_project_memory,
     write_explicit_project_memory,
+    parse_user_memory_intent,
 )
 from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
 
@@ -757,7 +758,6 @@ def test_detect_suffix_semicolon_punct():
 
 
 # ───────── §22.4：parse_user_memory_intent 解析 + 兜底 ─────────
-from src.service.memory.service import parse_user_memory_intent
 
 
 class _JsonLLM:
@@ -815,3 +815,29 @@ async def test_parse_bad_enum_or_missing_keys_falls_back():
     r = await parse_user_memory_intent(llm, "我用 Java")
     assert r == {"tier": "user", "kind": "preference",
                  "content": "我用 Java", "supersedes_kind": None}
+
+
+@pytest.mark.asyncio
+async def test_parse_non_dict_json_falls_back():
+    # 合法 JSON 但非 dict（list / 裸字符串 / 数字）→ 兜底
+    for reply in ('[1, 2, 3]', '"juststr"', '42'):
+        r = await parse_user_memory_intent(_JsonLLM(reply), "我用 Go")
+        assert r == {"tier": "user", "kind": "preference",
+                     "content": "我用 Go", "supersedes_kind": None}
+
+
+@pytest.mark.asyncio
+async def test_parse_weird_supersedes_kind_coerced_none():
+    llm = _JsonLLM('{"tier":"user","kind":"preference",'
+                   '"content":"用户偏好简短","supersedes_kind":"weird"}')
+    r = await parse_user_memory_intent(llm, "我喜欢简短")
+    assert r["supersedes_kind"] is None and r["kind"] == "preference"
+
+
+@pytest.mark.asyncio
+async def test_parse_whitespace_content_falls_back():
+    llm = _JsonLLM('{"tier":"user","kind":"preference",'
+                   '"content":"   ","supersedes_kind":null}')
+    r = await parse_user_memory_intent(llm, "原始话")
+    assert r == {"tier": "user", "kind": "preference",
+                 "content": "原始话", "supersedes_kind": None}

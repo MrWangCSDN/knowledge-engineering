@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import select, or_
@@ -154,6 +155,10 @@ async def recall_memory_block(db: Any, *, user_id: int, session_id: str, project
     return "\n\n".join(parts)
 
 
+# 去 LLM 输出的 ```json … ``` / ``` … ``` / ````json … ```` 围栏（1~4 反引号、可选 json 标签）
+_CODE_FENCE_RE = re.compile(r"^`{1,4}(?:json)?\s*(.*?)\s*`{1,4}$", re.DOTALL)
+
+
 _VALID_KINDS = ("identity", "preference", "style_feedback")
 
 
@@ -172,12 +177,9 @@ async def parse_user_memory_intent(llm: Any, content: str) -> dict:
     except Exception:
         return fallback
     s = (raw or "").strip()
-    if s.startswith("```"):
-        # 去 ```json ... ``` 围栏
-        s = s.split("```")[1] if "```" in s[3:] else s.lstrip("`")
-        if s.startswith("json"):
-            s = s[4:]
-        s = s.strip().strip("`").strip()
+    _m = _CODE_FENCE_RE.match(s)
+    if _m:
+        s = _m.group(1).strip()
     try:
         obj = json.loads(s)
     except Exception:
