@@ -699,3 +699,34 @@ async def test_compact_existing_fixed_fake_still_works_regression():
     assert sm.working_summary  # 被更新
     assert sm.turn_count == 6
     assert db.committed is True
+
+
+# ───────── §22.3：detect_explicit_memory 前缀或句尾后缀 ─────────
+
+def test_detect_prefix_still_works_no_regression():
+    assert detect_explicit_memory("记住我喜欢简短回答") == "我喜欢简短回答"
+    assert detect_explicit_memory("请记住：我用 Java") == "我用 Java"
+
+
+def test_detect_suffix_trailing_trigger():
+    # 用户实测说法：触发词在句尾
+    assert detect_explicit_memory("我改名叫李龙飞 请记住") == "我改名叫李龙飞"
+    assert detect_explicit_memory("以后叫我李龙飞 记住") == "以后叫我李龙飞"
+
+
+def test_detect_suffix_strips_trailing_punctuation():
+    assert detect_explicit_memory("我改名叫李龙飞，请记住。") == "我改名叫李龙飞"
+    assert detect_explicit_memory("我喜欢简短回答！记一下！") == "我喜欢简短回答"
+
+
+def test_detect_prefix_priority_when_both():
+    # 前缀优先：句首是触发词则按前缀剥
+    assert detect_explicit_memory("记住我改名叫李龙飞 请记住") == "我改名叫李龙飞"
+
+
+def test_detect_none_and_empty():
+    assert detect_explicit_memory("今天天气不错") is None
+    assert detect_explicit_memory("请记住") is None        # 只有触发词无内容
+    assert detect_explicit_memory("请记住。") is None       # 触发词+标点无内容
+    assert detect_explicit_memory("") is None
+    assert detect_explicit_memory("我不需要你记住这个东西") is None  # 触发词在中间不算

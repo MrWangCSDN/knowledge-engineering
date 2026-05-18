@@ -24,17 +24,37 @@ _log = logging.getLogger(__name__)
 _TRIGGERS = ("请记住", "记住", "记一下", "记下", "帮我记住")
 
 
-def detect_explicit_memory(question: str) -> str | None:
-    """从用户问题里检测显式记忆意图。
+# 句尾后缀判定前先剥掉的尾部空白与中英文标点（不影响前缀分支）
+_TRAILING_PUNCT = " 　\t。，、！？.!?,"
 
-    命中触发词 → 返回剥离触发词后的内容（去首尾空白与起始的中英文冒号）。
-    未命中 / 内容为空 → None。
+
+def detect_explicit_memory(question: str) -> str | None:
+    """从用户问题里检测显式记忆意图（§22.3：句首前缀 或 句尾后缀）。
+
+    前缀命中：content = 触发词之后（沿用旧行为）。
+    句尾后缀命中：q 去右侧空白与中文标点后 endswith(触发词) → content = 其之前部分。
+    两侧 content 再 lstrip(" :：\\t").strip()；空 → None。前缀优先（都命中按前缀）。
+    未命中 → None。"任意位置包含"不算（"我不需要你记住" 不误判）。
     """
     q = (question or "").strip()
+    if not q:
+        return None
     for trig in _TRIGGERS:
         if q.startswith(trig):
-            rest = q[len(trig):]
-            rest = rest.lstrip(" :：\t").strip()
+            rest = q[len(trig):].lstrip(" :：\t").strip()
+            # 前缀命中后剥掉 rest 自身末尾多余的触发词（如「记住A 请记住」→「A」）
+            rest_tail = rest.rstrip(_TRAILING_PUNCT)
+            for t2 in _TRIGGERS:
+                if rest_tail.endswith(t2):
+                    rest = rest_tail[: -len(t2)].rstrip(" :：\t，、," + _TRAILING_PUNCT).strip()
+                    break
+            else:
+                rest = rest_tail.strip()
+            return rest or None
+    q_tail = q.rstrip(_TRAILING_PUNCT)
+    for trig in _TRIGGERS:
+        if q_tail.endswith(trig) and len(q_tail) > len(trig):
+            rest = q_tail[: -len(trig)].rstrip(" :：\t，、," + _TRAILING_PUNCT).strip()
             return rest or None
     return None
 
