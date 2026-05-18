@@ -565,6 +565,13 @@ def _make_memory_writer(*, db, llm, user_id, session_id, question, project_id=No
                             kind=intent["kind"],
                             supersedes_kind=intent.get("supersedes_kind"),
                         )
+                    else:
+                        # tier=='skip'：解析判定不值得长期记 → 不写。留 debug 痕便于
+                        # 排查"用户说了记住却没记住"（区分 skip / detect-None / 写失败）。
+                        _log.debug(
+                            "user memory intent tier=%s, skip write for session %s",
+                            intent.get("tier"), session_id,
+                        )
         except Exception:
             _log.debug(
                 "explicit %s memory write failed for session %s, silently ignored",

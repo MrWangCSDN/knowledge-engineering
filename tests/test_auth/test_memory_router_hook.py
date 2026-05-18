@@ -262,3 +262,21 @@ async def test_writer_parse_failure_falls_back_preference():
     rows = [o for o in db.added if isinstance(o, _QUM)]
     assert len(rows) == 1
     assert rows[0].kind == "preference" and rows[0].content == "我喜欢简短回答"
+
+
+@pytest.mark.asyncio
+async def test_writer_valid_json_preference_structured_path():
+    # 结构化路径（非兜底）：parse 成功返回 kind=preference → 按解析结果写，
+    # 区别于 test_writer_parse_failure_falls_back_preference（那条走兜底）。
+    db = _SeedDB()
+    llm = _IntentLLM('{"tier":"user","kind":"preference",'
+                     '"content":"用户偏好简短回答","supersedes_kind":null}')
+    writer = _make_memory_writer(
+        db=db, llm=llm, user_id=3, session_id="s1",
+        question="记住我喜欢啰嗦冗长的解释",   # 原话与解析后 content 不同 → 证明走的是解析结果而非兜底/原文
+    )
+    await writer()
+    rows = [o for o in db.added if isinstance(o, _QUM)]
+    assert len(rows) == 1
+    assert rows[0].kind == "preference"
+    assert rows[0].content == "用户偏好简短回答"   # = 解析结果，非原话/兜底
