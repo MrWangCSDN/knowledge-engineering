@@ -174,6 +174,24 @@ def test_build_chitchat_user_prompt_no_history_is_bare_question():
     assert build_chitchat_user_prompt("你好", []) == "你好"
 
 
+def test_format_history_none_content_or_role_no_crash():
+    # 真缺陷回归（用户实测 "LLM 调用失败：'NoneType' object is not subscriptable"）：
+    # history 项是 dict 但 content/role 值为 None（键存在、值为 None，非键缺失）——
+    # dict.get(k, default) 仅在键缺失时用 default，值为 None 时返回 None，
+    # 旧代码 None[:200] 抛 TypeError。content=null 的消息很常见（出错/结构化回答）。
+    assert _format_history([{"role": "assistant", "content": None}]) == "[assistant] "
+    assert _format_history([{"role": None, "content": None}]) == "[?] "
+    assert _format_history(
+        [{"role": "user", "content": "hi"}, {"role": "assistant", "content": None}]
+    ) == "[user] hi\n[assistant] "
+
+
+def test_build_chitchat_user_prompt_history_with_none_content_no_crash():
+    h = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": None}]
+    out = build_chitchat_user_prompt("你好", h)
+    assert out == "【对话历史】\n[user] hi\n[assistant] \n\n你好"
+
+
 def test_build_user_prompt_with_history_byte_identical_after_refactor():
     ctx = {"entry_candidates": [], "skill_id": "architecture"}
     h = [{"role": "user", "content": "Q1"}, {"role": "assistant", "content": "A1"}]

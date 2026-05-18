@@ -245,7 +245,9 @@ def _format_history(history: list[dict] | None) -> str:
     """把最近 ≤10 轮历史格式化为多行 `[role] content(≤200字)`。
 
     KG 与 chit-chat 共用单一来源（DRY）。防御：history 非 list/None/空 → ""；
-    非 dict 项跳过（正常全 dict 时输出与既有逐字节一致）。
+    非 dict 项跳过；dict 但 role/content 值为 None（键在、值 None，dict.get 默认
+    不生效）→ 用 '?' / '' 兜底——否则 None[:200] 抛 TypeError（content=null 的
+    出错/结构化消息很常见）。正常全 dict 时输出与既有逐字节一致。
     """
     if not isinstance(history, list) or not history:
         return ""
@@ -253,7 +255,7 @@ def _format_history(history: list[dict] | None) -> str:
     for m in history[-10:]:
         if not isinstance(m, dict):
             continue
-        lines.append(f"[{m.get('role', '?')}] {m.get('content', '')[:200]}")
+        lines.append(f"[{m.get('role') or '?'}] {(m.get('content') or '')[:200]}")
     return "\n".join(lines)
 
 
