@@ -841,3 +841,58 @@ async def test_parse_whitespace_content_falls_back():
     r = await parse_user_memory_intent(llm, "原始话")
     assert r == {"tier": "user", "kind": "preference",
                  "content": "原始话", "supersedes_kind": None}
+
+
+# ───────── §22.5：write_explicit_memory identity 单例取代 / preference 累加 ─────────
+
+def _um(kind, content, status="active"):
+    return QAUserMemory(user_id=7, kind=kind, content=content,
+                        source="explicit", source_session_id="s0", status=status)
+
+
+@pytest.mark.asyncio
+async def test_write_default_still_preference_no_regression():
+    # 既有调用（不传 kind）行为不变：追加一条 preference
+    db = _FakeMemDB()
+    await write_explicit_memory(db, user_id=7, session_id="s1", content="我用 Java")
+    assert len(db.added) == 1
+    assert db.added[0].kind == "preference" and db.added[0].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_write_identity_supersedes_old_identity_only():
+    old_id = _um("identity", "用户的名字是王山河")
+    pref = _um("preference", "用户偏好简短回答")
+    db = _FakeMemDB(user_rows=[old_id, pref])
+    await write_explicit_memory(
+        db, user_id=7, session_id="s2", content="用户的名字是李龙飞",
+        kind="identity", supersedes_kind="identity",
+    )
+    assert old_id.status == "archived"          # 旧 identity 归档
+    assert pref.status == "active"              # preference 不受影响
+    new_rows = [o for o in db.added if isinstance(o, QAUserMemory)]
+    assert len(new_rows) == 1
+    assert new_rows[0].kind == "identity"
+    assert new_rows[0].content == "用户的名字是李龙飞"
+    assert new_rows[0].status == "active"
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_write_preference_appends_no_archive():
+    old_pref = _um("preference", "用户偏好简短回答")
+    db = _FakeMemDB(user_rows=[old_pref])
+    await write_explicit_memory(
+        db, user_id=7, session_id="s3", content="用户只看支付域",
+        kind="preference", supersedes_kind=None,
+    )
+    assert old_pref.status == "active"          # 旧 preference 不归档（累加）
+    assert len([o for o in db.added if isinstance(o, QAUserMemory)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_recall_only_current_identity_after_supersede():
+    # 取代后召回只剩李龙飞（模拟旧行已 archived，DB 过滤后只返回 active）
+    db = _FakeMemDB(user_rows=[_um("identity", "用户的名字是李龙飞")])
+    block = await recall_memory_block(db, user_id=7, session_id="sX")
+    assert "李龙飞" in block and "王山河" not in block

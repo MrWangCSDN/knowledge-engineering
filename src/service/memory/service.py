@@ -202,15 +202,34 @@ async def parse_user_memory_intent(llm: Any, content: str) -> dict:
 
 
 async def write_explicit_memory(
-    db: Any, *, user_id: int, session_id: str, content: str
+    db: Any, *, user_id: int, session_id: str, content: str,
+    kind: str = "preference", supersedes_kind: str | None = None,
 ) -> None:
-    """落一条用户级显式记忆（P1：显式只进用户级）。
-    注：自身不吞异常（同 recall_memory_block 契约）；Task 7 调用点已 try/except。
+    """落一条用户级显式记忆（§22.5）。
+
+    kind=='identity' 或 supersedes_kind=='identity'：先把该 user 所有
+    kind='identity' AND status='active' 行 status→'archived'（软删，宪法禁永久删），
+    再 INSERT 新行 —— identity 单例，新名字取代旧名字。
+    kind in ('preference','style_feedback')：仅追加（多条并存）。
+    归档+插入同一次 commit。kind 默认 'preference'（旧调用零改动，不破坏）。
+    自身不吞异常（同 recall_memory_block 契约）；router 调用点已 try/except。
     """
+    if kind == "identity" or supersedes_kind == "identity":
+        res = await db.execute(
+            select(QAUserMemory).where(
+                QAUserMemory.user_id == user_id,
+                QAUserMemory.kind == "identity",
+                QAUserMemory.status == "active",
+            )
+        )
+        for r in res.scalars().all():
+            # real SQL 已被 WHERE 限定；fake 不套 WHERE → Python 再 guard 一层
+            if getattr(r, "kind", None) == "identity" and getattr(r, "status", None) == "active":
+                r.status = "archived"
     db.add(
         QAUserMemory(
             user_id=user_id,
-            kind="preference",
+            kind=kind,
             content=content,
             source="explicit",
             source_session_id=session_id,
