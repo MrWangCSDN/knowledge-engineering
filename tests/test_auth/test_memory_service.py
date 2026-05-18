@@ -730,3 +730,27 @@ def test_detect_none_and_empty():
     assert detect_explicit_memory("请记住。") is None       # 触发词+标点无内容
     assert detect_explicit_memory("") is None
     assert detect_explicit_memory("我不需要你记住这个东西") is None  # 触发词在中间不算
+
+
+# ───────── §22.3 review 收尾：endswith 最长优先 + content==trigger 不过剥 + ；; ─────────
+
+def test_detect_suffix_bangwo_jizhu_longest_first():
+    # Critical：「帮我记住」是「记住」的超后缀；顺序匹配会误剥成「…帮我」
+    assert detect_explicit_memory("我喜欢直接回答 帮我记住") == "我喜欢直接回答"
+    assert detect_explicit_memory("以后回答都简短点，帮我记住。") == "以后回答都简短点"
+
+
+def test_detect_prefix_bangwo_jizhu():
+    assert detect_explicit_memory("帮我记住我用 Python") == "我用 Python"
+
+
+def test_detect_content_equals_trigger_not_overstripped():
+    # Important：内容本身就是触发词，不能被尾部触发词剥空（回归旧行为）
+    assert detect_explicit_memory("请记住记住") == "记住"
+    assert detect_explicit_memory("记住 记住") == "记住"
+
+
+def test_detect_suffix_semicolon_punct():
+    # Minor：；; 也应作尾部标点剥掉
+    assert detect_explicit_memory("我叫李龙飞；请记住；") == "我叫李龙飞"
+    assert detect_explicit_memory("我用 Java; 记住;") == "我用 Java"

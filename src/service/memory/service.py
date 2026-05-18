@@ -24,16 +24,24 @@ _log = logging.getLogger(__name__)
 _TRIGGERS = ("请记住", "记住", "记一下", "记下", "帮我记住")
 
 
-# 句尾后缀判定前先剥掉的尾部空白与中英文标点（不影响前缀分支）
-_TRAILING_PUNCT = " 　\t。，、！？.!?,"
+# 句尾后缀判定前先剥掉的尾部空白与中英文标点（不影响前缀分支）。含中英文分号。
+_TRAILING_PUNCT = " 　\t。，、！？.!?,；;"
+# 内容右侧清理集（冒号分隔约定残留 + 尾部标点）；DRY：前缀/后缀两分支复用。
+_CONTENT_RSTRIP = " :：\t，、," + _TRAILING_PUNCT
+# endswith 匹配必须最长触发词优先：「记住」是「请记住」「帮我记住」的后缀，
+# 按 _TRIGGERS 原序匹配会把「帮我记住」误剥成「帮我」+「记住」。
+# startswith 分支不受影响（5 个触发词互不为前缀，原序安全）。
+_TRIGGERS_BY_LEN = tuple(sorted(_TRIGGERS, key=len, reverse=True))
 
 
 def detect_explicit_memory(question: str) -> str | None:
     """从用户问题里检测显式记忆意图（§22.3：句首前缀 或 句尾后缀）。
 
-    前缀命中：content = 触发词之后（沿用旧行为）。
-    句尾后缀命中：q 去右侧空白与中文标点后 endswith(触发词) → content = 其之前部分。
-    两侧 content 再 lstrip(" :：\\t").strip()；空 → None。前缀优先（都命中按前缀）。
+    前缀命中：content = 触发词之后；再剥 rest 末尾多余触发词（如「记住A 请记住」→「A」），
+    但内容恰为触发词本身时不剥空（len 守卫，保旧行为「请记住记住」→「记住」）。
+    句尾后缀命中：q 去右侧空白与中英文标点后 endswith(触发词) → content = 其之前部分。
+    endswith 匹配按触发词长度降序（_TRIGGERS_BY_LEN），避免「帮我记住」被「记住」抢匹配。
+    两侧 content 再清理；空 → None。前缀优先（都命中按前缀）。
     未命中 → None。"任意位置包含"不算（"我不需要你记住" 不误判）。
     """
     q = (question or "").strip()
@@ -42,19 +50,20 @@ def detect_explicit_memory(question: str) -> str | None:
     for trig in _TRIGGERS:
         if q.startswith(trig):
             rest = q[len(trig):].lstrip(" :：\t").strip()
-            # 前缀命中后剥掉 rest 自身末尾多余的触发词（如「记住A 请记住」→「A」）
+            # 前缀命中后剥掉 rest 自身末尾多余的触发词（如「记住A 请记住」→「A」）；
+            # 内容恰为触发词本身（len 不大于触发词）则不剥（「请记住记住」→「记住」）。
             rest_tail = rest.rstrip(_TRAILING_PUNCT)
-            for t2 in _TRIGGERS:
-                if rest_tail.endswith(t2):
-                    rest = rest_tail[: -len(t2)].rstrip(" :：\t，、," + _TRAILING_PUNCT).strip()
+            for t2 in _TRIGGERS_BY_LEN:
+                if rest_tail.endswith(t2) and len(rest_tail) > len(t2):
+                    rest = rest_tail[: -len(t2)].rstrip(_CONTENT_RSTRIP).strip()
                     break
             else:
                 rest = rest_tail.strip()
             return rest or None
     q_tail = q.rstrip(_TRAILING_PUNCT)
-    for trig in _TRIGGERS:
+    for trig in _TRIGGERS_BY_LEN:
         if q_tail.endswith(trig) and len(q_tail) > len(trig):
-            rest = q_tail[: -len(trig)].rstrip(" :：\t，、," + _TRAILING_PUNCT).strip()
+            rest = q_tail[: -len(trig)].rstrip(_CONTENT_RSTRIP).strip()
             return rest or None
     return None
 
