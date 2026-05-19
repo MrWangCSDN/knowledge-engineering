@@ -10,8 +10,6 @@ import asyncio
 import logging
 import os
 import re
-import shutil
-import tempfile
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -36,7 +34,9 @@ def mem_root() -> str:
 
 # 单段合法字符：字母数字 . _ -（含前导点文件名如 .abstract.md）
 _SEG_RE = re.compile(r"[A-Za-z0-9._-]+")
-_UID_RE = re.compile(r"[0-9]+")
+# user_id 为规范化正整数（KE DB Integer 自增、从 1 起）；拒 0 与前导零，
+# 避免 "07" 与 "7" 解析到不同物理目录的租户一致性隐患
+_UID_RE = re.compile(r"[1-9][0-9]*")
 _URI_PREFIX = "ke://u/"
 
 
@@ -48,28 +48,38 @@ class MemoryFS:
     """
 
     def __init__(self, root: str | None = None) -> None:
+        if root is not None and not root:
+            raise ValueError("root must be non-empty if provided")
         self._root = os.path.realpath(root if root is not None else mem_root())
         self._locks: dict[str, asyncio.Lock] = {}
+
+    @staticmethod
+    def _parse_uri(uri: str) -> tuple[str, list[str]]:
+        """解析 ke://u/{uid}/seg... → (uid, 原始段列表)；非法抛 MemoryPathError。
+
+        resolve 与 _uid_of 共用此解析，杜绝两处 URI 解析分歧
+        （分歧会让"路由到的 uid"与"跨租户校验的 uid"不一致 = 安全缺陷）。
+        """
+        if not isinstance(uri, str) or not uri.startswith(_URI_PREFIX):
+            raise MemoryPathError(f"bad uri: {uri!r}")
+        parts = uri[len("ke://"):].split("/")            # ["u","{uid}", ...segs]
+        if len(parts) < 2 or parts[0] != "u" or not _UID_RE.fullmatch(parts[1]):
+            raise MemoryPathError(f"bad uri: {uri!r}")
+        return parts[1], parts[2:]
 
     def _user_base(self, user_id: str) -> str:
         return os.path.realpath(os.path.join(self._root, "u", user_id))
 
     def resolve(self, uri: str) -> str:
         """ke://u/{uid}/{seg/...} → 绝对物理路径；非法/越界抛 MemoryPathError。"""
-        if not isinstance(uri, str) or not uri.startswith(_URI_PREFIX):
-            raise MemoryPathError(f"bad uri scheme: {uri!r}")
-        rest = uri[len("ke://"):]                       # "u/{uid}/...."
-        parts = rest.split("/")                          # ["u","{uid}", ...segs]
-        if len(parts) < 2 or parts[0] != "u":
-            raise MemoryPathError(f"bad uri: {uri!r}")
-        uid = parts[1]
-        if not _UID_RE.fullmatch(uid):
-            raise MemoryPathError(f"bad user_id: {uid!r}")
+        uid, segs = self._parse_uri(uri)
         # 末尾 "/" 产生空段；其余位置空段非法
-        segs = parts[2:]
         if segs and segs[-1] == "":
             segs = segs[:-1]
         for s in segs:
+            # 仅精确 "." / ".." 是穿越段；"..." 等是合法 POSIX 文件名
+            # （realpath 不当穿越处理），故只精确等值拒；穿越最终防线是
+            # 下方 realpath 前缀断言
             if (s == "" or s in (".", "..") or "\x00" in s
                     or not _SEG_RE.fullmatch(s)):
                 raise MemoryPathError(f"bad segment {s!r} in {uri!r}")
@@ -81,15 +91,16 @@ class MemoryFS:
 
     @staticmethod
     def _uid_of(uri: str) -> str:
-        """取 uri 的 user_id 段（供跨租户校验）；非法 uri 抛 MemoryPathError。"""
-        if not isinstance(uri, str) or not uri.startswith(_URI_PREFIX):
-            raise MemoryPathError(f"bad uri: {uri!r}")
-        parts = uri[len("ke://"):].split("/")
-        if len(parts) < 2 or parts[0] != "u" or not _UID_RE.fullmatch(parts[1]):
-            raise MemoryPathError(f"bad uri: {uri!r}")
-        return parts[1]
+        """取 uri 的 user_id 段（供跨租户校验）；非法抛 MemoryPathError。"""
+        uid, _ = MemoryFS._parse_uri(uri)
+        return uid
 
     def _lock_for(self, path: str) -> asyncio.Lock:
+        """取/建该物理路径的进程内锁（write/rm/mv 串行化）。
+
+        注：字典随不同路径增长、不淘汰；单实例 + 有界用户量下可接受
+        （跨实例锁见 NAS 阶段，非 S1 范围）。
+        """
         lk = self._locks.get(path)
         if lk is None:
             lk = asyncio.Lock()

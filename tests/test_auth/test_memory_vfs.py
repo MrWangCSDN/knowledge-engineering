@@ -77,3 +77,27 @@ def test_resolve_tenant_isolation(tmp_path):
     p1 = fs.resolve("ke://u/1/global/a.md")
     p2 = fs.resolve("ke://u/2/global/a.md")
     assert "/u/1/" in p1 and "/u/2/" in p2 and p1 != p2
+
+
+@pytest.mark.parametrize("bad", [
+    "ke://u/7//x", "ke://u/7/a//b", "", "ke://u/0/x", "ke://u/07/x",
+])
+def test_resolve_rejects_more_bad_uris(tmp_path, bad):
+    fs = _fs(tmp_path)
+    with pytest.raises(MemoryPathError):
+        fs.resolve(bad)
+
+
+def test_memoryfs_empty_root_rejected():
+    with pytest.raises(ValueError):
+        MemoryFS(root="")
+
+
+def test_uid_of_and_resolve_share_parsing(tmp_path):
+    fs = _fs(tmp_path)
+    assert fs._uid_of("ke://u/7/global/a.md") == "7"
+    # 同一非法输入,两条路径错误类型一致(共享解析)
+    with pytest.raises(MemoryPathError):
+        fs._uid_of("ke://u/0/x")
+    with pytest.raises(MemoryPathError):
+        fs.resolve("ke://u/0/x")
