@@ -109,7 +109,12 @@ class MemoryFS:
         return lk
 
     async def write(self, uri: str, content: str) -> None:
-        """原子写：同目录 tmp + os.replace；自动 mkdir -p 父目录。"""
+        """原子写：同目录 tmp + os.replace；自动 mkdir -p 父目录。
+
+        刻意不做 fsync(文件/父目录)：os.replace 保证并发读者只见旧或新完整内容
+        (内容崩溃一致),但不保证掉电持久。记忆是辅助层(设计 §4.3,失败不影响主答、
+        下一轮可重新派生),为此免去每写一次 fsync 的延迟;持久性留 NAS/后续阶段。
+        """
         path = self.resolve(uri)
         parent = os.path.dirname(path)
         async with self._lock_for(path):
@@ -118,8 +123,10 @@ class MemoryFS:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(content)
-                os.replace(tmp, path)                  # POSIX 原子 rename
+                os.replace(tmp, path)                  # POSIX 原子 rename(同目录同 fs)
             except BaseException:
+                # 清理半成品 tmp 后透传(含 KeyboardInterrupt/SystemExit)；
+                # replace 成功后 tmp 已不存在 → 内层 OSError 兜住 FileNotFound
                 try:
                     os.unlink(tmp)
                 except OSError:
