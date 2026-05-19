@@ -100,3 +100,65 @@ class MemoryGen:
     def __init__(self, llm) -> None:
         # 仅持有 llm；fs 走 regenerate 形参（§3.1）
         self._llm = llm
+
+    # ── 公开唯一 API ───────────────────────────────────────────────
+    async def regenerate(self, fs: MemoryFS, changed_uris: list[str]) -> None:
+        """对去重后的变更记忆文件：① 各生成其 ``{slug}.abstract.md``；
+        ② 收集祖先目录、按深度降序逐级生成 ``.abstract.md``(L0)+
+        ``.overview.md``(L1)（Task 3 实现）。单条目失败 ``_log.debug``
+        跳过、不连累整批（下一轮按哈希补齐 = 自愈，§3.5）。
+        """
+        # 去重并保持稳定序；仅取记忆文件（.md 且非 .abstract.md/.overview.md）
+        files: list[str] = []
+        seen: set[str] = set()
+        for uri in changed_uris:
+            if uri in seen:                    # set 去重，O(1) 命中判断
+                continue
+            seen.add(uri)
+            if self._is_memory_file(uri):
+                files.append(uri)
+            else:
+                _log.debug("regenerate: skip non-memory-file uri %r", uri)
+
+        # ① 记忆文件 L0：逐个 try，失败隔离（§3.5）
+        for uri in files:
+            try:
+                await self._gen_file_l0(fs, uri)
+            except Exception as exc:           # noqa: BLE001 单条目隔离
+                _log.debug("regenerate: file L0 failed %r: %r", uri, exc)
+
+        # ② 目录 L0/L1：Task 3 实现
+        pass
+
+    # ── 分类辅助 ──────────────────────────────────────────────────
+    @staticmethod
+    def _is_memory_file(uri: str) -> bool:
+        """记忆文件 = 以 .md 结尾，且不是 .abstract.md / .overview.md。"""
+        return (
+            uri.endswith(_MD_SUFFIX)
+            and not uri.endswith(_ABSTRACT_SUFFIX)
+            and not uri.endswith(_OVERVIEW_NAME)
+        )
+
+    # ── 步骤①：记忆文件 L0 ────────────────────────────────────────
+    async def _gen_file_l0(self, fs: MemoryFS, file_uri: str) -> None:
+        """读 ``{slug}.md`` 正文 → LLM 压成一句 → 写同目录
+        ``{slug}.abstract.md``，frontmatter 存 ``src_hash``（正文 SHA-256）。
+        正文哈希命中已存在 .abstract → 跳过（零 LLM，§3.3）。
+        """
+        raw = await fs.read(file_uri)                 # 不存在→MemoryNotFound（上层捕获）
+        _meta, body = _split_frontmatter(raw)         # src_hash 只认正文（§3.3）
+        src_hash = _sha256_hex(body)
+        # {slug}.md → {slug}.abstract.md（file_uri 必以 .md 结尾，调用前已 _is_memory_file）
+        abs_uri = file_uri[: -len(_MD_SUFFIX)] + _ABSTRACT_SUFFIX
+        if await fs.exists(abs_uri):
+            old_meta, _ = _split_frontmatter(await fs.read(abs_uri))
+            # str() 防御：SHA-256 全数字（极罕见）会被 YAML 解析成 int
+            if str(old_meta.get("src_hash")) == src_hash:
+                _log.debug("file L0 hash hit, skip %r", abs_uri)
+                return
+        summary = await self._llm.complete(system=_MEM_L0_SYSTEM, user=body)
+        await fs.write(
+            abs_uri,
+            _render_frontmatter({"src_hash": src_hash}, summary.strip() + "\n"),
+        )
