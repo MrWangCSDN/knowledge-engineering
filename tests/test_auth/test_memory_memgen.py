@@ -53,3 +53,13 @@ def test_split_frontmatter_unicode_preserved():
     assert "中文正文" in text
     meta, body = _split_frontmatter(text)
     assert meta == {"k": "v"} and body == "中文正文\n"
+
+
+def test_split_frontmatter_crlf_normalized():
+    # CRLF 源（S4/S6 迁移/外部撰写可能产生）：frontmatter 仍被正确探测，
+    # 且返回正文行尾归一为 \n（保证 Task 2 的 src_hash 跨行尾稳定）
+    crlf = "---\r\nsrc_hash: deadbeef\r\n---\r\n用户的名字是李龙飞\r\n"
+    meta, body = _split_frontmatter(crlf)
+    assert meta == {"src_hash": "deadbeef"}
+    assert body == "用户的名字是李龙飞\n"
+    assert "\r" not in body

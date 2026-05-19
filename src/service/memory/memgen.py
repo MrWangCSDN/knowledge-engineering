@@ -45,9 +45,18 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     YAML 段为空或非 dict → ``({}, 正文)``。用 PyYAML 安全解析
     （``yaml.safe_load`` 只认基本类型，杜绝任意对象构造）。
 
-    约定（§3.2）：frontmatter 为简单 ``key: value``，不含裸 ``\\n---`` 行；
-    S2 生成文件满足此约定，S4/S6 记忆文件须遵循 §3.2 schema。
+    入口自动将 CRLF/CR 归一为 LF，故 S4/S6 迁移或外部撰写的 ``\\r\\n``
+    文件仍能正确探测 frontmatter，Task 2 的 ``src_hash`` 跨行尾恒同（§3.3）。
+    约定（§3.2）：frontmatter 为简单 ``key: value``；S2 生成文件天然满足，
+    S4/S6 记忆正文使用 ``## `` 节标题，不会产生裸 ``\\n---`` 行，无冲突。
+    ``body`` 末尾换行由调用方约定（传入 ``summary.strip() + "\\n"``），
+    本函数不增减。
     """
+    # CRLF/CR → LF 归一（置于最前）：S4/S6 迁移/外部撰写的 .md 可能是 \r\n，
+    # 不归一则 frontmatter 探测失败、Task 2 会把 frontmatter+正文一起算进
+    # src_hash，破坏 §3.3「src_hash 仅覆盖正文」的幂等不变量。归一后正文
+    # 行尾也稳定（同一逻辑内容跨行尾恒同哈希）。
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     # 没有起始分隔符 → 视为纯正文
     if not text.startswith("---\n"):
         return {}, text
