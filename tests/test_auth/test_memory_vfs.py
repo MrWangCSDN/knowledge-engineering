@@ -101,3 +101,53 @@ def test_uid_of_and_resolve_share_parsing(tmp_path):
         fs._uid_of("ke://u/0/x")
     with pytest.raises(MemoryPathError):
         fs.resolve("ke://u/0/x")
+
+
+@pytest.mark.asyncio
+async def test_write_then_read_roundtrip(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/global/a.md", "你好\nworld")
+    assert await fs.read("ke://u/7/global/a.md") == "你好\nworld"
+
+
+@pytest.mark.asyncio
+async def test_write_creates_parent_dirs(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/project/deposit-system/notes/x.md", "c")
+    assert os.path.isfile(
+        os.path.join(str(tmp_path), "u", "7", "project",
+                     "deposit-system", "notes", "x.md"))
+
+
+@pytest.mark.asyncio
+async def test_write_is_atomic_no_tmp_left(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/global/a.md", "v1")
+    await fs.write("ke://u/7/global/a.md", "v2")
+    d = os.path.join(str(tmp_path), "u", "7", "global")
+    assert sorted(os.listdir(d)) == ["a.md"]          # 无 .tmp 残留
+    assert await fs.read("ke://u/7/global/a.md") == "v2"
+
+
+@pytest.mark.asyncio
+async def test_read_missing_raises_not_found(tmp_path):
+    fs = _fs(tmp_path)
+    with pytest.raises(MemoryNotFound):
+        await fs.read("ke://u/7/global/nope.md")
+
+
+@pytest.mark.asyncio
+async def test_read_on_dir_raises_path_error(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/global/a.md", "c")
+    with pytest.raises(MemoryPathError):
+        await fs.read("ke://u/7/global")
+
+
+@pytest.mark.asyncio
+async def test_exists(tmp_path):
+    fs = _fs(tmp_path)
+    assert await fs.exists("ke://u/7/global/a.md") is False
+    await fs.write("ke://u/7/global/a.md", "c")
+    assert await fs.exists("ke://u/7/global/a.md") is True
+    assert await fs.exists("ke://u/7/global") is True   # 目录也算存在

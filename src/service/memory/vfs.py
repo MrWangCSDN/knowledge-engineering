@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -106,3 +107,34 @@ class MemoryFS:
             lk = asyncio.Lock()
             self._locks[path] = lk
         return lk
+
+    async def write(self, uri: str, content: str) -> None:
+        """原子写：同目录 tmp + os.replace；自动 mkdir -p 父目录。"""
+        path = self.resolve(uri)
+        parent = os.path.dirname(path)
+        async with self._lock_for(path):
+            os.makedirs(parent, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp, path)                  # POSIX 原子 rename
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+
+    async def read(self, uri: str) -> str:
+        path = self.resolve(uri)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            raise MemoryNotFound(uri)
+        except IsADirectoryError:
+            raise MemoryPathError(f"not a file: {uri!r}")
+
+    async def exists(self, uri: str) -> bool:
+        return os.path.exists(self.resolve(uri))
