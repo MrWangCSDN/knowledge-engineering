@@ -249,3 +249,31 @@ async def test_ls_empty_dir_returns_empty_list(tmp_path):
     await fs.write("ke://u/7/global/a.md", "c")
     await fs.rm("ke://u/7/global/a.md")                   # global 变空目录
     assert await fs.ls("ke://u/7/global") == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_path_writes_serialized_consistent(tmp_path):
+    fs = _fs(tmp_path)
+    uri = "ke://u/7/global/c.md"
+
+    async def w(v: str) -> None:
+        await fs.write(uri, v)
+
+    await asyncio.gather(*[w(f"val-{i}") for i in range(20)])
+    # 经 per-path asyncio.Lock 串行：最终内容必是某一次完整写入，非交错半文件
+    final = await fs.read(uri)
+    assert final in {f"val-{i}" for i in range(20)}
+    d = os.path.join(str(tmp_path), "u", "7", "global")
+    assert os.listdir(d) == ["c.md"]                   # 无 .tmp 残留
+
+
+@pytest.mark.asyncio
+async def test_concurrent_distinct_paths_all_written(tmp_path):
+    fs = _fs(tmp_path)
+
+    async def w(i: int) -> None:
+        await fs.write(f"ke://u/7/global/f{i}.md", str(i))
+
+    await asyncio.gather(*[w(i) for i in range(15)])
+    for i in range(15):
+        assert await fs.read(f"ke://u/7/global/f{i}.md") == str(i)
