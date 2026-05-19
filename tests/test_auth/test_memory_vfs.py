@@ -151,3 +151,61 @@ async def test_exists(tmp_path):
     await fs.write("ke://u/7/global/a.md", "c")
     assert await fs.exists("ke://u/7/global/a.md") is True
     assert await fs.exists("ke://u/7/global") is True   # 目录也算存在
+
+
+@pytest.mark.asyncio
+async def test_ls_three_states(tmp_path):
+    fs = _fs(tmp_path)
+    with pytest.raises(MemoryNotFound):
+        await fs.ls("ke://u/7/global")                 # 不存在
+    await fs.write("ke://u/7/global/a.md", "c")
+    assert await fs.ls("ke://u/7/global") == ["a.md"]  # 有内容
+    await fs.write("ke://u/7/global/b.md", "c")
+    assert await fs.ls("ke://u/7/global") == ["a.md", "b.md"]  # 排序
+    with pytest.raises(MemoryPathError):
+        await fs.ls("ke://u/7/global/a.md")            # 非目录
+
+
+@pytest.mark.asyncio
+async def test_rm_file_and_missing(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/global/a.md", "c")
+    await fs.rm("ke://u/7/global/a.md")
+    assert await fs.exists("ke://u/7/global/a.md") is False
+    with pytest.raises(MemoryNotFound):
+        await fs.rm("ke://u/7/global/a.md")
+
+
+@pytest.mark.asyncio
+async def test_rm_dir_needs_recursive(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/project/p1/x.md", "c")
+    with pytest.raises(MemoryPathError):
+        await fs.rm("ke://u/7/project/p1")             # 目录但未 recursive
+    await fs.rm("ke://u/7/project/p1", recursive=True)
+    assert await fs.exists("ke://u/7/project/p1") is False
+
+
+@pytest.mark.asyncio
+async def test_mv_within_user(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/global/a.md", "hello")
+    await fs.mv("ke://u/7/global/a.md", "ke://u/7/project/p1/a.md")
+    assert await fs.exists("ke://u/7/global/a.md") is False
+    assert await fs.read("ke://u/7/project/p1/a.md") == "hello"
+
+
+@pytest.mark.asyncio
+async def test_mv_cross_user_rejected(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/global/a.md", "hello")
+    with pytest.raises(MemoryPathError):
+        await fs.mv("ke://u/7/global/a.md", "ke://u/8/global/a.md")
+    assert await fs.exists("ke://u/7/global/a.md") is True  # 源未动
+
+
+@pytest.mark.asyncio
+async def test_mv_missing_src_not_found(tmp_path):
+    fs = _fs(tmp_path)
+    with pytest.raises(MemoryNotFound):
+        await fs.mv("ke://u/7/global/nope.md", "ke://u/7/global/b.md")

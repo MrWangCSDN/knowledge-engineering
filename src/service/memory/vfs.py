@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -145,3 +146,36 @@ class MemoryFS:
 
     async def exists(self, uri: str) -> bool:
         return os.path.exists(self.resolve(uri))
+
+    async def ls(self, uri: str) -> list[str]:
+        path = self.resolve(uri)
+        if not os.path.exists(path):
+            raise MemoryNotFound(uri)
+        if not os.path.isdir(path):
+            raise MemoryPathError(f"not a directory: {uri!r}")
+        return sorted(os.listdir(path))
+
+    async def rm(self, uri: str, *, recursive: bool = False) -> None:
+        path = self.resolve(uri)
+        async with self._lock_for(path):
+            if not os.path.exists(path):
+                raise MemoryNotFound(uri)
+            if os.path.isdir(path):
+                if not recursive:
+                    raise MemoryPathError(
+                        f"is a directory (need recursive=True): {uri!r}")
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+
+    async def mv(self, src_uri: str, dst_uri: str) -> None:
+        if self._uid_of(src_uri) != self._uid_of(dst_uri):
+            raise MemoryPathError(
+                f"cross-user mv forbidden: {src_uri!r} -> {dst_uri!r}")
+        src = self.resolve(src_uri)
+        dst = self.resolve(dst_uri)
+        async with self._lock_for(src):
+            if not os.path.exists(src):
+                raise MemoryNotFound(src_uri)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(src, dst)
