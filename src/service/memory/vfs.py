@@ -7,6 +7,7 @@ URI 形如 ke://u/{user_id}/{rest}，物理映射到 <MEM_ROOT>/u/{user_id}/{res
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -148,14 +149,28 @@ class MemoryFS:
         return os.path.exists(self.resolve(uri))
 
     async def ls(self, uri: str) -> list[str]:
+        """列目录条目（已排序）。不存在→MemoryNotFound；非目录→MemoryPathError；空→[]。
+
+        无锁读：与并发 rm 交错时 os.isdir/listdir 可能竞态抛裸 FileNotFoundError，
+        统一映射为 MemoryNotFound，守住"只抛 MemoryNotFound/MemoryPathError"公开契约。
+        """
         path = self.resolve(uri)
-        if not os.path.exists(path):
+        try:
+            if not os.path.isdir(path):
+                if not os.path.exists(path):
+                    raise MemoryNotFound(uri)
+                raise MemoryPathError(f"not a directory: {uri!r}")
+            return sorted(os.listdir(path))
+        except FileNotFoundError:
             raise MemoryNotFound(uri)
-        if not os.path.isdir(path):
-            raise MemoryPathError(f"not a directory: {uri!r}")
-        return sorted(os.listdir(path))
 
     async def rm(self, uri: str, *, recursive: bool = False) -> None:
+        """删文件/子树（仅 FS，不涉索引——索引联动是 S3）。
+
+        不存在→MemoryNotFound；目录须 recursive=True（即使空目录亦然）否则
+        MemoryPathError；文件 os.remove、目录 shutil.rmtree。per-path 锁内、
+        check→op 间无 await，故对同 path 原子。
+        """
         path = self.resolve(uri)
         async with self._lock_for(path):
             if not os.path.exists(path):
@@ -169,13 +184,24 @@ class MemoryFS:
                 os.remove(path)
 
     async def mv(self, src_uri: str, dst_uri: str) -> None:
+        """同 user 内移动（跨 user 前缀→MemoryPathError，IO 前即拒、源不动）。
+
+        dst 已存在→MemoryPathError（不静默覆盖文件/不并入目录，行为可预期）；
+        源不存在→MemoryNotFound；同 fs 用 os.replace 原子 rename（无 copytree
+        回退）。src/dst 双锁、按 path 排序去重获取（防与反向 mv 死锁、防与
+        write(dst)/rm(dst) 跨协程竞态；src==dst 时只取一把不自死锁）。
+        """
         if self._uid_of(src_uri) != self._uid_of(dst_uri):
             raise MemoryPathError(
                 f"cross-user mv forbidden: {src_uri!r} -> {dst_uri!r}")
         src = self.resolve(src_uri)
         dst = self.resolve(dst_uri)
-        async with self._lock_for(src):
+        async with contextlib.AsyncExitStack() as stack:
+            for p in sorted({src, dst}):          # set 去重(src==dst)、sorted 全局序防死锁
+                await stack.enter_async_context(self._lock_for(p))
             if not os.path.exists(src):
                 raise MemoryNotFound(src_uri)
+            if os.path.exists(dst):
+                raise MemoryPathError(f"mv destination exists: {dst_uri!r}")
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.move(src, dst)
+            os.replace(src, dst)               # 同 <root>/u/{uid} 同 fs → 原子 rename

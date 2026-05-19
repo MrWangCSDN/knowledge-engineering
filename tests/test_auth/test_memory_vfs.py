@@ -209,3 +209,43 @@ async def test_mv_missing_src_not_found(tmp_path):
     fs = _fs(tmp_path)
     with pytest.raises(MemoryNotFound):
         await fs.mv("ke://u/7/global/nope.md", "ke://u/7/global/b.md")
+
+
+@pytest.mark.asyncio
+async def test_mv_dst_exists_file_rejected(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/global/a.md", "A")
+    await fs.write("ke://u/7/global/b.md", "B")
+    with pytest.raises(MemoryPathError):
+        await fs.mv("ke://u/7/global/a.md", "ke://u/7/global/b.md")
+    assert await fs.read("ke://u/7/global/a.md") == "A"   # 源未动
+    assert await fs.read("ke://u/7/global/b.md") == "B"   # dst 未被覆盖
+
+
+@pytest.mark.asyncio
+async def test_mv_dst_exists_dir_rejected(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/global/a.md", "A")
+    await fs.write("ke://u/7/project/p1/x.md", "X")       # 使 project/p1 成已存在目录
+    with pytest.raises(MemoryPathError):
+        await fs.mv("ke://u/7/global/a.md", "ke://u/7/project/p1")
+    assert await fs.read("ke://u/7/global/a.md") == "A"   # 不静默并入目录
+
+
+@pytest.mark.asyncio
+async def test_rm_empty_dir_still_needs_recursive(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/project/p1/x.md", "c")
+    await fs.rm("ke://u/7/project/p1/x.md")               # 删文件 → p1 空目录
+    with pytest.raises(MemoryPathError):
+        await fs.rm("ke://u/7/project/p1")                # 空目录仍需 recursive
+    await fs.rm("ke://u/7/project/p1", recursive=True)
+    assert await fs.exists("ke://u/7/project/p1") is False
+
+
+@pytest.mark.asyncio
+async def test_ls_empty_dir_returns_empty_list(tmp_path):
+    fs = _fs(tmp_path)
+    await fs.write("ke://u/7/global/a.md", "c")
+    await fs.rm("ke://u/7/global/a.md")                   # global 变空目录
+    assert await fs.ls("ke://u/7/global") == []
