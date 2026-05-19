@@ -151,14 +151,25 @@ class MemoryGen:
         src_hash = _sha256_hex(body)
         # {slug}.md → {slug}.abstract.md（file_uri 必以 .md 结尾，调用前已 _is_memory_file）
         abs_uri = file_uri[: -len(_MD_SUFFIX)] + _ABSTRACT_SUFFIX
-        if await fs.exists(abs_uri):
-            old_meta, _ = _split_frontmatter(await fs.read(abs_uri))
-            # str() 防御：SHA-256 全数字（极罕见）会被 YAML 解析成 int
+        # 单次 read 取代 exists()+read()：去掉 await 间隙的 TOCTOU、少一次 syscall；
+        # 缺失即 MemoryNotFound → 视作无旧 L0（首次生成）
+        try:
+            old_raw = await fs.read(abs_uri)
+        except MemoryNotFound:
+            old_raw = None
+        if old_raw is not None:
+            old_meta, _ = _split_frontmatter(old_raw)
+            # str() 防御：SHA-256 全数字（极罕见）/ S6 迁移未加引号会被 YAML 解析成 int
             if str(old_meta.get("src_hash")) == src_hash:
                 _log.debug("file L0 hash hit, skip %r", abs_uri)
                 return
         summary = await self._llm.complete(system=_MEM_L0_SYSTEM, user=body)
+        # 空/纯空白响应不得固化：否则其 src_hash 命中源正文 → 此后永久跳过
+        # （粘滞坏态，破坏 §3.3/§3.5 自愈）。抛错 → 上层隔离记 debug、下轮重试。
+        clean = summary.strip()
+        if not clean:
+            raise ValueError(f"empty L0 summary for {file_uri!r}")
         await fs.write(
             abs_uri,
-            _render_frontmatter({"src_hash": src_hash}, summary.strip() + "\n"),
+            _render_frontmatter({"src_hash": src_hash}, clean + "\n"),
         )

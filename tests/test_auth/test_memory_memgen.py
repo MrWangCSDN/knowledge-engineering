@@ -190,3 +190,38 @@ async def test_regenerate_skips_non_memory_file_uris(tmp_path):
         "ke://u/7/global/identity/notes.txt",
     ])
     assert llm.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_file_l0_empty_llm_response_not_persisted(tmp_path, caplog):
+    fs = _fs(tmp_path)
+    gen = MemoryGen(_FixedLLM("   \n  "))             # 纯空白 LLM 响应
+    uri = "ke://u/7/global/identity/user-name.md"
+    await fs.write(uri, _MEM_FM)
+
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="src.service.memory.memgen"):
+        await gen.regenerate(fs, [uri])
+    # 空响应不得固化为空 .abstract.md（否则 src_hash 命中源正文→永久跳过=粘滞坏态）
+    assert not await fs.exists("ke://u/7/global/identity/user-name.abstract.md")
+    # 经单条目失败隔离记 debug、不抛出（下轮可重试自愈）
+    assert any("file L0 failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_file_l0_legacy_unquoted_numeric_src_hash_no_crash_regenerates(tmp_path):
+    fs = _fs(tmp_path)
+    llm = _FixedLLM("新摘要")
+    gen = MemoryGen(llm)
+    uri = "ke://u/7/global/identity/user-name.md"
+    abs_uri = "ke://u/7/global/identity/user-name.abstract.md"
+    await fs.write(uri, _MEM_FM)
+    # 模拟 S6 迁移/手写：未加引号纯数字 src_hash → yaml.safe_load 解析为 int
+    await fs.write(abs_uri, "---\nsrc_hash: 12345\n---\n旧摘要\n")
+
+    # str() 防御保证 int 不让比较抛错；12345 ≠ 真 hex 哈希 → 重生（自愈）
+    await gen.regenerate(fs, [uri])
+    meta, body = _split_frontmatter(await fs.read(abs_uri))
+    assert str(meta["src_hash"]) == _sha256_hex("用户的名字是李龙飞\n")
+    assert "新摘要" in body
+    assert llm.calls == 1
