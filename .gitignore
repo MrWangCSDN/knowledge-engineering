@@ -46,3 +46,9 @@ javaparser-bridge/.idea/
 run_capability_analysis.py
 src/ir/
 test_pipeline_smoke.py
+
+# 文件式记忆测试产物（S6：MemoryFS 写本地磁盘，.ke-memory/ 是默认根目录）
+.ke-memory/
+
+# 备份文件
+*.bak
