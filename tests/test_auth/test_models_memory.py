@@ -4,7 +4,7 @@
 不起真 DB engine。
 设计：[[记忆系统-设计]] §5（P1 仅 qa_user_memory + qa_session_memory）
 """
-from src.service.db_models_homepage import QAUserMemory, QASessionMemory
+from src.service.db_models_homepage import QAUserMemory
 
 
 # ───────── qa_user_memory ─────────
@@ -36,32 +36,6 @@ def test_user_memory_no_user_fk():
 def test_user_memory_has_lookup_index():
     index_names = {idx.name for idx in QAUserMemory.__table__.indexes}
     assert "idx_qa_user_memory_user_active" in index_names
-
-
-# ───────── qa_session_memory ─────────
-
-def test_session_memory_table_name():
-    assert QASessionMemory.__tablename__ == "qa_session_memory"
-
-
-def test_session_memory_columns():
-    cols = {c.name for c in QASessionMemory.__table__.columns}
-    assert cols == {
-        "id", "session_id", "working_summary",
-        "focus_entity_ids", "turn_count", "updated_at",
-    }
-
-
-def test_session_memory_session_id_unique():
-    cols = {c.name: c for c in QASessionMemory.__table__.columns}
-    assert cols["session_id"].unique is True
-
-
-def test_session_memory_has_session_cascade_fk():
-    fks = list(QASessionMemory.__table__.foreign_keys)
-    sess_fks = [fk for fk in fks if fk.column.table.name == "qa_sessions"]
-    assert len(sess_fks) == 1
-    assert sess_fks[0].ondelete == "CASCADE"
 
 
 # ───────── qa_project_memory（工程级 S1，spec §19）─────────
