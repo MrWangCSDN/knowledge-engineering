@@ -357,37 +357,6 @@ class QAUserMemory(Base):
     )
 
 
-# ─── 7. qa_session_memory（记忆系统 P1：会话级工作状态）──────────────────────
-# 设计：[[记忆系统-设计]] §4.3。一会话一行，滚动覆盖压缩摘要。
-
-class QASessionMemory(Base):
-    """会话级记忆：压缩后的工作状态。一对一绑定 QASession，覆盖式更新。"""
-    __tablename__ = "qa_session_memory"
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-
-    session_id: Mapped[str] = mapped_column(
-        String(64),
-        ForeignKey("qa_sessions.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,
-    )
-    """绑定的会话。删会话级联删其记忆。unique 保证一会话一行。"""
-
-    working_summary: Mapped[str] = mapped_column(Text, nullable=False)
-    """压缩后的工作状态（本次目标 / 已确认 / 已排除）。"""
-
-    focus_entity_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
-    """当前聚焦的 entity_id 列表（P1 可留空，为 P2/P3 预留）。"""
-
-    turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    """上次压缩时的 message_count（用于判断是否需要再压缩）。"""
-
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
-    )
-
-
 # ─── 8. qa_project_memory（记忆系统 P2-S1：工程级部落知识）──────────────────
 # 设计：[[记忆系统-设计]] §19 / §4.2 / §5。S1 纯 SQL；全列一次建全，
 # entity_*/grounding/confidence/promoted_*/vector_synced/last_verified_at
