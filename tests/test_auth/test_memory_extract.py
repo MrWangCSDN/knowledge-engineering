@@ -117,3 +117,27 @@ def test_memory_extractor_construction_accepts_llm():
     extractor = MemoryExtractor(llm=None)
     # __init__ 仅保存引用，不应抛错
     assert extractor._llm is None
+
+
+def test_parse_react_json_strips_multiline_code_fence_dotall():
+    """DOTALL 回归：pretty-printed 多行 JSON 包在 ```json ``` 内 — 必须靠 re.DOTALL
+    才能让 `.*?` 跨行匹配。若未来 refactor 误删 re.DOTALL 标志，此测试会失败。
+    """
+    # 故意构造多行 pretty-printed JSON（内部含真实换行而非仅 fence 边界处的换行）
+    # 没有 re.DOTALL，`.` 不匹配 \n → 整段 raw 不被识别为 fenced，json.loads
+    # 直接处理含 ```json 头尾的原文本 → 抛 JSONDecodeError → ValueError
+    raw = (
+        '```json\n'
+        '{\n'
+        '  "memories": [\n'
+        '    {"kind": "preference", "content": "用户偏好中文", "supersedes_kind": null}\n'
+        '  ]\n'
+        '}\n'
+        '```'
+    )
+    out = _parse_react_json(raw)
+    # 确认 DOTALL 生效：raw 被正确剥栅栏 + 解析为单 entry
+    assert len(out) == 1
+    assert out[0]["kind"] == "preference"
+    assert out[0]["content"] == "用户偏好中文"
+    assert out[0]["supersedes_kind"] is None

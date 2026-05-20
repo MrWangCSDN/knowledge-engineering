@@ -69,7 +69,8 @@ def _now_iso_z() -> str:
 
     与 §22 既有 frontmatter timestamps 格式一致；写入 .md 的 created_at 字段。
     """
-    # datetime.utcnow() 已 deprecated（PEP 615 / 3.12 +）；用 timezone-aware 形式
+    # datetime.utcnow() 自 Python 3.12 起 deprecated（无 PEP，CPython 3.12 changelog）；
+    # 改用 timezone-aware 形式以兼容未来 Python 版本
     now = _dt.datetime.now(_dt.timezone.utc)
     # strftime 输出 YYYY-MM-DDTHH:MM:SS；末尾补 Z 表示 UTC
     return now.strftime("%Y-%m-%dT%H:%M:%SZ")
