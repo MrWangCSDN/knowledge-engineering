@@ -581,3 +581,61 @@ def test_fs_message_duck_type_contract():
     assert m.content == "正文"
     assert m.msg_metadata == {"cited_entities": ["e1"]}
     assert isinstance(m.created_at, datetime)
+
+
+@pytest.mark.asyncio
+async def test_session_compactor_compact_with_fs_messages_end_to_end(tmp_path):
+    """SessionCompactor.compact 改 fs source 端到端（§7.9 场景 7）。
+
+    write 4 messages (2 user + 2 assistant) → compact → 验 fs summary.md：
+    - frontmatter.turn_count == 4
+    - LLM 输入含【新增对话】4 条
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    pairs = [
+        ("msg_u1", "user", "q1"),
+        ("msg_a1", "assistant", "a1"),
+        ("msg_u2", "user", "q2"),
+        ("msg_a2", "assistant", "a2"),
+    ]
+    for i, (mid, role, c) in enumerate(pairs):
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_e2e", msg_id=mid,
+            role=role, content=c, created_at=base + _td(seconds=i),
+        )
+    llm = _FakeLLM(response="4 条对话浓缩")
+    compactor = SessionCompactor(llm)
+
+    # 新签名：不传 db；force=True 让 floor=2 / min_delta=1 触发
+    await compactor.compact(
+        fs, user_id=7, session_id="sess_e2e", every_n_messages=6, force=True,
+    )
+
+    uri = "ke://u/7/session/sess_e2e/summary.md"
+    raw = await fs.read(uri)
+    from src.service.memory.memgen import _split_frontmatter
+    meta, body = _split_frontmatter(raw)
+    assert meta["turn_count"] == 4
+    assert "4 条对话浓缩" in body
+    assert len(llm.calls) == 1
+    user_input = llm.calls[0]["user"]
+    assert "【新增对话】" in user_input
+    assert "[user] q1" in user_input
+    assert "[assistant] a1" in user_input
+    assert "[user] q2" in user_input
+    assert "[assistant] a2" in user_input
+
+
+@pytest.mark.asyncio
+async def test_session_compactor_compact_signature_no_db(tmp_path):
+    """SessionCompactor.compact 新签名不含 db 参数（§7.9 场景 8）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    llm = _FakeLLM(response="摘要")
+    compactor = SessionCompactor(llm)
+    # 不传 db 参数 — S6 后正确签名
+    await compactor.compact(
+        fs, user_id=7, session_id="sess_sig", every_n_messages=6, force=False,
+    )
+    # msg_count=0 < floor=6 → 早退，文件未写
+    assert not await fs.exists("ke://u/7/session/sess_sig/summary.md")
