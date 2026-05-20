@@ -40,10 +40,7 @@ from src.service.db_models_homepage import (
 from src.service.qa_engine.docx_exporter import build_docx, build_docx_from_template
 from src.service.qa_engine.prompts import _TITLE_SUMMARY_SYSTEM
 from src.service.qa_engine.sse_emitter import stream_qa_answer
-from src.service.memory.service import (
-    recall_memory_block,
-    maybe_compact_session,
-)
+from src.service.memory.service import recall_memory_block
 
 # v2.0 Task 5：引入权限 dependency 工厂
 # require_project_role(min_role) 返回一个 FastAPI dependency（async 闭包）：
@@ -593,13 +590,26 @@ def _make_memory_writer(
                 "S4 ReAct extract failed for session %s, silently ignored",
                 session_id, exc_info=True,
             )
-        # 2. 会话压缩（§22 暂留 DB tier，S5 后续迁文件）
+        # 2. 会话压缩（S5：DB → 文件）
+        # 局部 import 同 S4：保持模块顶部 import 轻量（启动期不拉 memory 模块
+        # 链），post-turn 实际调用时延迟加载；与 service.recall_memory_block 同模式
         try:
-            await maybe_compact_session(
-                db, llm, session_id=session_id, force=force_compact,
+            from src.service.memory.session import SessionCompactor
+            # fs 复用 S4 块在前面构造的 MemoryFS 实例（同闭包内同生命周期）；
+            # 若 S4 块在 MemoryFS() 之前抛（仅 import 阶段可能，极罕见），fs 不存在
+            # → 此处 try/except 中层捕获后 debug 静默退出（与 S5 §6.5 一致）
+            compactor = SessionCompactor(llm)
+            await compactor.compact(
+                fs, db,
+                user_id=user_id, session_id=session_id, force=force_compact,
             )
         except Exception:
-            pass
+            # 中层失败语义（§6.5）：debug 留痕 + 静默；compact 自身已含中层 try/except，
+            # 此外层为深度防御冗余兜底（与 S3/S4 同模式）
+            _log.debug(
+                "S5 SessionCompactor failed for session %s, silently ignored",
+                session_id, exc_info=True,
+            )
 
     return _writer
 
