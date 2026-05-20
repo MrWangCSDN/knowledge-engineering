@@ -353,3 +353,40 @@ async def test_compact_with_corrupt_frontmatter_self_heals(tmp_path):
     meta, body = _split_frontmatter(raw)
     assert meta["turn_count"] == 6  # 新水位线
     assert "自愈后新摘要" in body
+
+
+@pytest.mark.asyncio
+async def test_compact_persists_focus_entity_ids(tmp_path):
+    """focus_entity_ids 持久化：mock messages 末段含 cited_entities（§6.7 场景 8）。
+
+    _extract_focus_entity_ids(messages[-12:]) 从 msg_metadata.cited_entities
+    + entry_points 聚合（service.py 既有，S4/S5 共用）→ 写入 frontmatter。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    # 末 3 条 assistant 消息带 cited_entities（聚合源）
+    msgs = [
+        _FakeMessage(role="user", content="q0"),
+        _FakeMessage(role="assistant", content="a0"),
+        _FakeMessage(role="user", content="q1"),
+        _FakeMessage(role="assistant", content="a1",
+                      msg_metadata={"cited_entities": ["ent_alpha"]}),
+        _FakeMessage(role="user", content="q2"),
+        _FakeMessage(role="assistant", content="a2",
+                      msg_metadata={"cited_entities": ["ent_beta"], "entry_points": ["ent_gamma"]}),
+    ]
+    db = _FakeDB(msgs)
+    llm = _FakeLLM(response="摘要")
+    compactor = SessionCompactor(llm)
+
+    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+
+    # 文件已写
+    uri = "ke://u/7/session/sess_x/summary.md"
+    raw = await fs.read(uri)
+    from src.service.memory.memgen import _split_frontmatter
+    meta, body = _split_frontmatter(raw)
+    # focus_entity_ids 按 _extract_focus_entity_ids 的首见顺序去重收集
+    focus = meta.get("focus_entity_ids", [])
+    assert "ent_alpha" in focus
+    assert "ent_beta" in focus
+    assert "ent_gamma" in focus
