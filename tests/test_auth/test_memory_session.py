@@ -731,3 +731,103 @@ async def test_session_compactor_compact_signature_no_db(tmp_path):
     )
     # msg_count=0 < floor=6 → 早退，文件未写
     assert not await fs.exists("ke://u/7/session/sess_sig/summary.md")
+
+
+# ─── S7 T3: fs-back feedback helpers 单元测试（§8.7） ────────────────────────
+
+from src.service.memory.session import (
+    _FsFeedback, write_feedback_to_fs, read_feedback_for_message,
+    _feedback_uri,
+)
+
+
+@pytest.mark.asyncio
+async def test_write_feedback_to_fs_basic(tmp_path):
+    """write_feedback_to_fs 写 up vote + comment：frontmatter.vote=up + user_id + body=comment（§8.7 场景 1）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    ts = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+    await write_feedback_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_abc",
+        vote="up", comment="回答很赞", created_at=ts,
+    )
+    raw = await fs.read("ke://u/7/session/sess_x/messages/msg_abc.feedback.md")
+    from src.service.memory.memgen import _split_frontmatter
+    fm, body = _split_frontmatter(raw)
+    assert fm["vote"] == "up"
+    assert fm["user_id"] == 7
+    assert fm["created_at"] == "2026-05-22T10:00:00Z"
+    assert body.strip() == "回答很赞"
+
+
+@pytest.mark.asyncio
+async def test_write_feedback_to_fs_overwrite(tmp_path):
+    """write_feedback_to_fs 第二次写覆盖第一次（fs.write atomic rename，§8.7 场景 2）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    ts1 = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+    ts2 = datetime(2026, 5, 22, 11, 0, 0, tzinfo=timezone.utc)
+    # 写 up
+    await write_feedback_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_abc",
+        vote="up", created_at=ts1,
+    )
+    # 覆盖为 down（取消之前的 up）
+    await write_feedback_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_abc",
+        vote="down", comment="改主意了", created_at=ts2,
+    )
+    # 验最终态
+    raw = await fs.read("ke://u/7/session/sess_x/messages/msg_abc.feedback.md")
+    from src.service.memory.memgen import _split_frontmatter
+    fm, body = _split_frontmatter(raw)
+    assert fm["vote"] == "down"
+    assert fm["created_at"] == "2026-05-22T11:00:00Z"
+    assert body.strip() == "改主意了"
+
+
+@pytest.mark.asyncio
+async def test_write_feedback_to_fs_null_vote(tmp_path):
+    """write_feedback_to_fs vote=None（取消反馈）frontmatter 序列化为 YAML null（§8.7）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    ts = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+    await write_feedback_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_abc",
+        vote=None, created_at=ts,
+    )
+    # read 回来：vote 应为 None
+    fb = await read_feedback_for_message(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_abc",
+    )
+    assert fb is not None
+    assert fb.vote is None
+    assert fb.user_id == 7
+    assert fb.comment is None
+
+
+@pytest.mark.asyncio
+async def test_read_feedback_for_message_not_exists_returns_none(tmp_path):
+    """read_feedback_for_message 文件不存在 → 返 None（首次访问 / 用户未投票，§8.7）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    result = await read_feedback_for_message(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_no_feedback",
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_read_messages_for_session_filters_feedback_suffix(tmp_path):
+    """read_messages_for_session 过滤 .feedback.md 不误读为 message（§8.4 配套）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    base = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
+    # 写一条 message + 一条 feedback（同 msg_id 不同后缀）
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_abc",
+        role="user", content="正常消息", created_at=base,
+    )
+    await write_feedback_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_abc",
+        vote="up", created_at=base,
+    )
+    # read_messages 只应返 1 条 (msg_abc.md)，不误读 msg_abc.feedback.md
+    result = await read_messages_for_session(fs, user_id=7, session_id="sess_x")
+    assert len(result) == 1
+    assert result[0].content == "正常消息"
