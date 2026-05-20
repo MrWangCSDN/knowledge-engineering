@@ -230,3 +230,93 @@ async def test_compact_recursive_folds_prior_summary_and_only_new_msgs(tmp_path)
     meta, body = _split_frontmatter(raw)
     assert meta["turn_count"] == 12
     assert "更新后摘要" in body
+
+
+@pytest.mark.asyncio
+async def test_compact_skips_below_floor(tmp_path):
+    """floor 守卫：msg_count=5 + every_n=6 + force=False（§6.7 场景 3）。
+
+    早退（不读 fs，不调 LLM，不写）。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    msgs = _msgs(*[("user", f"q{i}") for i in range(5)])  # 5 条
+    db = _FakeDB(msgs)
+    llm = _FakeLLM()
+    compactor = SessionCompactor(llm)
+
+    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+
+    # LLM 未调用 / 文件未写
+    assert len(llm.calls) == 0
+    assert not await fs.exists("ke://u/7/session/sess_x/summary.md")
+
+
+@pytest.mark.asyncio
+async def test_compact_skips_when_no_new_messages_since_last(tmp_path):
+    """delta 守卫：summary.md 存在 turn_count=6 + msg_count=10 + every_n=6（场景 4）。
+
+    10-6=4 < 6 → 早退（避免过阈后每轮压缩 = 成本 bug，对齐旧版守卫）。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    uri = "ke://u/7/session/sess_x/summary.md"
+    from src.service.memory.memgen import _render_frontmatter
+    prev = _render_frontmatter(
+        {"turn_count": 6, "focus_entity_ids": [], "updated_at": "2026-05-21T10:00:00Z"},
+        "旧\n",
+    )
+    await fs.write(uri, prev)
+    msgs = _msgs(*[("user", f"q{i}") for i in range(10)])  # 10 条
+    db = _FakeDB(msgs)
+    llm = _FakeLLM()
+    compactor = SessionCompactor(llm)
+
+    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+
+    # LLM 未调用
+    assert len(llm.calls) == 0
+    # 文件未被改写：raw 仍是旧内容
+    raw = await fs.read(uri)
+    assert "旧" in raw
+
+
+@pytest.mark.asyncio
+async def test_compact_force_bypasses_n_floor(tmp_path):
+    """force=True 路径：msg_count=2 + 首压 + force=True（场景 5）。
+
+    floor=2、min_delta=1 → 进 LLM 路径（首压：prev_turn_count=0）。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    msgs = _msgs(("user", "短"), ("assistant", "回"))
+    db = _FakeDB(msgs)
+    llm = _FakeLLM(response="强制压缩摘要")
+    compactor = SessionCompactor(llm)
+
+    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6, force=True)
+
+    assert len(llm.calls) == 1
+    uri = "ke://u/7/session/sess_x/summary.md"
+    raw = await fs.read(uri)
+    from src.service.memory.memgen import _split_frontmatter
+    meta, body = _split_frontmatter(raw)
+    assert meta["turn_count"] == 2
+    assert "强制压缩摘要" in body
+
+
+@pytest.mark.asyncio
+async def test_compact_llm_returns_empty_skips_write(tmp_path):
+    """LLM 返空：mock LLM 返 "" → 早退 step 6（不写文件）（场景 6）。
+
+    LLM 偶发返空（限流 / token bug）不应破坏既有 summary.md。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
+    db = _FakeDB(msgs)
+    llm = _FakeLLM(response="   ")  # 全空白 → strip 后变 "" → 早退
+    compactor = SessionCompactor(llm)
+
+    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+
+    # LLM 被调用 1 次（说明走到 step 6）
+    assert len(llm.calls) == 1
+    # 文件未写
+    assert not await fs.exists("ke://u/7/session/sess_x/summary.md")
