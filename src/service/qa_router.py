@@ -279,8 +279,29 @@ async def explain(
     except Exception:
         memory_block = ""
 
+    # 5b. 会话级 summary 注入（S5 — §4.3 落实读侧 composer）
+    # 与 5 段共用 MemoryFS()；若 5 段 fs 构造已失败，此处构造新 fs（防御性）
+    try:
+        from src.service.memory.session import read_session_summary
+        from src.service.memory.vfs import MemoryFS as _MemFS
+        session_block = await read_session_summary(
+            _MemFS(),                                # 默认 root 由 KE_MEM_ROOT 派生
+            user_id=user.id,
+            session_id=session_id,
+        )
+    except Exception:
+        session_block = ""
+
+    # 5c. 拼装：session 在前（更近的工作状态），global 在后（稳定身份/偏好/style）
+    if session_block and memory_block:
+        memory_block = session_block + "\n\n" + memory_block
+    elif session_block:
+        memory_block = session_block
+    # 否则 memory_block 维持现状（可能空 / 可能仅 global）
+
     # 6. 会话上下文压力（spec §18）：按 token 预算裁 body.history 只留最近若干轮，
-    #    更早轮由 system 记忆块 working_summary+focus 顶替。失败退回原行为，不抛。
+    #    更早轮由 system 记忆块 working_summary 顶替（S5 已实现读侧 composer，
+    #    5b/5c 把当前 session summary 拼到 memory_block 头部）。失败退回原行为，不抛。
     try:
         from src.service.memory.context_budget import (
             history_token_budget, trim_history_to_budget,
