@@ -17,14 +17,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import select
-
-from src.service.db_models_homepage import QAMessage
 from src.service.memory.vfs import MemoryFS, MemoryNotFound
-from src.service.memory.memgen import _render_frontmatter, _split_frontmatter
-from src.service.memory.service import _extract_focus_entity_ids
-from src.service.memory.extract import _now_iso_z          # S4 既有 helper，原样复用
-from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM
+from src.service.memory.memgen import _split_frontmatter
 
 # 模块级 logger（与 vfs.py / memgen.py / recall.py / extract.py 同模式）
 _log = logging.getLogger(__name__)
@@ -49,9 +43,9 @@ async def read_session_summary(
     不存在 / 失败 → 返 ""（与 recall_memory_block 同自包失败语义，§6.5）。
     composer 直接拼到 memory_block 头部（qa_router 5b/5c 段，T4 接入）。
 
-    frontmatter 损坏时 `_split_frontmatter` 降级返 ({}, 全文)，
-    本函数取 body — body 是 frontmatter 闭合后的部分；闭合都没探到时
-    `_split_frontmatter` 返 ({}, 原文)，本函数仍返裸文本作 summary（自愈优先，§6.5）。
+    frontmatter 损坏（YAML 非法）时 `_split_frontmatter` 容错返 ({}, body)，
+    本函数仍返 body 作 summary；frontmatter 闭合未探到时返 ({}, 原文)，
+    本函数返裸文本（自愈优先，§6.5）。
     """
     try:
         # 拼路径（§6.2 唯一形态）
@@ -97,6 +91,15 @@ class SessionCompactor:
         every_n_messages: int = 6,
         force: bool = False,
     ) -> None:
-        """post-turn 触发的会话压缩。算法 §6.4（T2 实现完整体）。"""
+        """post-turn 触发的会话压缩。算法 §6.4（T2 实现完整体）。
+
+        Args:
+            fs: S1 文件存储层（duck-type async API）
+            db: SQLAlchemy AsyncSession（duck-type；S5 仅读 QAMessage，S6 才迁文件）
+            user_id: KE Integer ≥1，租户 ID
+            session_id: KE String(64)，业务会话串
+            every_n_messages: floor 阈值；msg_count < N 时早退（§6.4 step 2）
+            force: True 表示上下文压力触发（spec §18），降低 floor 至 2、min_delta 至 1
+        """
         # T2 step 1: 完整实现见后续提交；此处保留 stub 让 T1 测试可链接
         raise NotImplementedError("compact() implementation lands in S5 T2")

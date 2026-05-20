@@ -1,8 +1,7 @@
 """文件式记忆 S5：SessionCompactor + read_session_summary 单测。
 设计：[[文件式记忆重构-设计]] §6。
 沿用 tests/test_auth 既有 fake + tmp_path + @pytest.mark.asyncio 风格；
-跨 S2/S4 fake stack 复用（_split_frontmatter/_render_frontmatter from memgen，
-fake LLM 模式同 test_memory_extract.py）。
+fake LLM 模式同 test_memory_extract.py（鸭子 async complete）。
 """
 from __future__ import annotations
 
@@ -85,7 +84,11 @@ class _FakeLLM:
 
 def test_session_compactor_init_holds_llm():
     """SessionCompactor 仅持 llm（同 S4 MemoryExtractor，fs/db 走方法形参）。"""
+    import inspect
     llm = _FakeLLM()
     compactor = SessionCompactor(llm)
-    # 不直接访问私有 _llm 字段（视为实现细节）；通过断言无异常构造来约束公开契约
-    assert compactor is not None
+    # 类型断言：实例确为 SessionCompactor
+    assert isinstance(compactor, SessionCompactor)
+    # compact 必须是 async 协程方法（contract 锁定，T2 不能改成同步）
+    assert callable(compactor.compact)
+    assert inspect.iscoroutinefunction(compactor.compact)
