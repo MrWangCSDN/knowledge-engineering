@@ -654,3 +654,43 @@ async def test_recall_per_hit_assemble_error_isolated(tmp_path, caplog):
     assert "健康记忆" in block
     # 日志显式记 "hit assemble failed"（per-hit 隔离生效）
     assert any("hit assemble failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_index_changed_skips_archived_uri(tmp_path):
+    """index_changed 跳过 /archive/ URI 不进 Weaviate（§8.2 S4 holistic bug 修复）。
+
+    S4 identity-supersede 把旧 .md + .abstract.md mv 到 archive/ 子目录后，
+    archived 路径不应被 vector 索引（否则改名后旧名仍被召回命中污染 context）。
+    """
+    fs = _fs(tmp_path)
+    rec, emb, wv = _make_recaller()
+
+    # 准备 fs 内容：正常 identity 文件
+    normal_uri = "ke://u/1/global/identity/abc.abstract.md"
+    normal_hash = _sha256_hex("用户叫李龙飞\n")
+    await fs.write(normal_uri, _file_l0_md(normal_hash, "用户叫李龙飞"))
+
+    # 准备 fs 内容：archived identity 文件（S4 supersede mv 后的归档路径）
+    archived_uri = "ke://u/1/global/identity/archive/old.abstract.md"
+    archived_hash = _sha256_hex("用户叫王山河（archived）\n")
+    await fs.write(archived_uri, _file_l0_md(archived_hash, "用户叫王山河（archived）"))
+
+    # 传入两个 URI（archive + 正常），archive 应被过滤掉
+    await rec.index_changed(fs, [normal_uri, archived_uri])
+
+    # 验证：tenant "1" 中仅有一条对象（正常 URI，archived URI 被跳过）
+    tenant_store = wv.collections.get("memory_l0").tenants.get("1", {})
+    assert len(tenant_store) == 1, (
+        f"期望 1 条对象（仅 normal_uri），实际 {len(tenant_store)} 条；"
+        f"archived URI 应被 /archive/ 过滤跳过"
+    )
+
+    # 验证入库的是正常 URI，而非 archived URI
+    obj = next(iter(tenant_store.values()))
+    assert obj["properties"]["uri"] == normal_uri, (
+        f"入库对象 URI 应为 normal_uri，实际: {obj['properties']['uri']}"
+    )
+
+    # 验证 embedder 只被调用了 1 次（archive URI 不触发 embed）
+    assert emb.calls == 1, f"embedder 应调用 1 次（archive URI 跳过），实际 {emb.calls} 次"

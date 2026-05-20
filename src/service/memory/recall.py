@@ -142,6 +142,13 @@ class MemoryRecaller:
 
         for uri in ordered:
             try:
+                # S7: archive/ 路径绝源过滤 — archived identity (S4 supersede 归档的旧版本)
+                # 不应参与召回，否则改名后旧名仍被命中污染 context（"王山河→李龙飞" 类 bug）。
+                # 字符串匹配 "/archive/" 精确捕获 archive/ 子目录（S4 把旧 .md + .abstract.md
+                # 一并 mv 到此），不会误伤其他业务路径（无业务路径含 archive 段）。
+                if "/archive/" in uri:
+                    _log.debug("index_changed: skip archived uri %r", uri)
+                    continue
                 # 非 .abstract.md 后缀 → 跳过（debug log，便于追问题）
                 if not uri.endswith(_ABSTRACT_SUFFIX):
                     _log.debug("index_changed: skip non-abstract uri %r", uri)
