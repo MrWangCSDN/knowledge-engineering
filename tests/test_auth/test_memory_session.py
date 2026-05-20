@@ -442,3 +442,26 @@ async def test_compact_fs_write_failure_silently_logged(tmp_path, monkeypatch):
     # 注：此处不能 fs.exists 检查，因为 fs.write mock 后 fs.exists 仍是真的
     # 改为：LLM 仍被调用 1 次（说明 step 1-6 都跑过）
     assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_then_read_returns_body_strip_frontmatter(tmp_path):
+    """端到端：compact 写 + read_session_summary 读 链路一致（§6.7 场景 13）。
+
+    write 后 read 拿到的就是 LLM 输出的 body（去 frontmatter + strip）。
+    复制粘贴 prev_summary 的语义一致性回归。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
+    db = _FakeDB(msgs)
+    llm = _FakeLLM(response="端到端摘要正文")
+    compactor = SessionCompactor(llm)
+
+    # 写
+    await compactor.compact(fs, db, user_id=7, session_id="sess_e2e", every_n_messages=6)
+
+    # 读
+    body = await read_session_summary(fs, user_id=7, session_id="sess_e2e")
+
+    # 链路一致：write 时 body=summary+"\n"，read 时 strip → 等于 LLM 输出原文
+    assert body == "端到端摘要正文"
