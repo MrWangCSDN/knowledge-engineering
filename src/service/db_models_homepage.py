@@ -1,19 +1,21 @@
-"""首页相关 ORM 模型（5 张表）。
+"""首页相关 ORM 模型。
 
 设计文档：[[首页设计]] §7.4
 
-5 张表：
+S6/S7 后保留的 ORM 类（qa_messages / qa_feedback / qa_user_memory /
+qa_project_memory / qa_session_memory 已于 S6/S7 删除，消息与反馈改为
+文件式存储；详见 [[文件式记忆重构-设计]] §7.6 (qa_*_memory + qa_messages
+drop) + §8.4 (qa_feedback drop via S7)）：
+
   projects             - 工程元数据（id 是字符串，如 'deposit-system'）
   user_project_access  - 用户对工程的访问权限（v2 启用 RBAC，v1 写但不严格用）
-  qa_sessions          - 问答会话（按工程归档）
-  qa_messages          - 会话消息（user / assistant 两种 role）
-  qa_feedback          - 用户反馈（👍 / 👎 + 可选评论）
+  qa_sessions          - 问答会话（按工程归档；仅元数据，消息体在 fs）
+  git_credentials      - Git 仓库访问凭证（PAT，Fernet 加密）
 
 关键约定：
   - Project.id 用字符串（业务可读，如 'deposit-system'），不是自增 int
   - user_id 用 int，FK 到 users.id（auth_models.User）
-  - qa_messages.metadata 列在 SQLAlchemy 的 Python 属性上叫 msg_metadata（避开 DeclarativeBase.metadata）
-  - 所有 FK 都开 CASCADE：删工程 → 删会话 → 删消息 → 删反馈
+  - 所有 FK 都开 CASCADE：删工程 → 删会话
 """
 from __future__ import annotations
 

@@ -236,6 +236,11 @@ async def test_delete_session_cascades_fs_cleanup(client, seeded_session, monkey
         f"ke://u/{user_id}/session/{session_id}/messages/msg_test_a.md",
         "---\nrole: user\ncreated_at: \"2026-05-22T10:00:00Z\"\n---\nuser msg\n",
     )
+    # S7 holistic minor 2：补 .feedback.md sibling 也被 fs.rm recursive 级联清
+    await fs.write(
+        f"ke://u/{user_id}/session/{session_id}/messages/msg_test_a.feedback.md",
+        "---\nvote: up\nuser_id: " + str(user_id) + "\ncreated_at: \"2026-05-22T10:00:00Z\"\n---\nfeedback comment\n",
+    )
 
     # 调 DELETE endpoint
     r = client.delete(
@@ -247,6 +252,7 @@ async def test_delete_session_cascades_fs_cleanup(client, seeded_session, monkey
     # 验证 fs 目录消失
     assert not await fs.exists(f"ke://u/{user_id}/session/{session_id}/summary.md")
     assert not await fs.exists(f"ke://u/{user_id}/session/{session_id}/messages/msg_test_a.md")
+    assert not await fs.exists(f"ke://u/{user_id}/session/{session_id}/messages/msg_test_a.feedback.md")
 
 
 @pytest.mark.asyncio

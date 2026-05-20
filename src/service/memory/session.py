@@ -453,7 +453,8 @@ async def read_feedback_for_message(
     except MemoryNotFound:
         # 该 message 还没 feedback（首次 GET / 用户未投票）— 正常路径
         return None
-    except Exception as exc:
+    except Exception:
         # 其他异常（fromisoformat ValueError / fs 权限 / 损坏 YAML 等）— 中层兜底
-        _log.debug("read_feedback_for_message failed: %r", exc)
+        # exc_info=True：保留 traceback 便于生产环境诊断损坏的 feedback 文件
+        _log.debug("read_feedback_for_message failed", exc_info=True)
         return None
