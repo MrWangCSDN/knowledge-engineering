@@ -404,21 +404,33 @@ async def test_explain_meta_context_usage_when_history_trimmed(
       history_token_budget() = int(1000 * (1 - 0.45)) = int(550) = 550 tokens
       8 messages × ceil(200/1.5)=134 tokens = 1072 tokens >> 550 → 裁史必触发
 
-    注：maybe_compact_session 被 patch 为 no-op，因为 SQLite 测试 DB 的 BigInteger
-    主键与 MySQL 行为有差异（RETURNING 在 SQLite 不支持 autoincrement BigInteger），
-    而本测试的目的是验证 router 压力块→meta 接线，不测试压缩回调本身（压缩逻辑由
-    test_memory_service.py 专项覆盖）。
+    注：SessionCompactor + read_session_summary 被 patch 为 no-op（S5 后），
+    避 SQLite 测试 DB 与真 fs 路径耦合（本测试目的是验 router 压力块→meta 接线，
+    不测压缩 / composer 本身；专项覆盖由 test_memory_session.py 提供）。
     """
     import json as _json
 
     monkeypatch.setenv("KE_MODEL_CONTEXT_WINDOW", "1000")
-    # patch 掉压缩回调（避免 SQLite BigInteger RETURNING 限制）；
-    # qa_router.py 通过 `from ... import maybe_compact_session` 引入，
-    # 必须 patch 该模块命名空间里的引用，而非源模块。
-    # 压缩本身由 test_memory_service.py 单独测试。
+    # patch SessionCompactor 类本身：让 SessionCompactor(llm).compact(...) 整体 no-op
+    # S5 闭包内 lazy import，patch 真正符号位置 src.service.memory.session
+    class _NoopCompactor:
+        def __init__(self, llm):
+            pass
+
+        async def compact(self, *args, **kw):
+            return None
+
     monkeypatch.setattr(
-        "src.service.qa_router.maybe_compact_session",
-        AsyncMock(return_value=None),
+        "src.service.memory.session.SessionCompactor",
+        _NoopCompactor,
+    )
+    # 同时 patch read_session_summary 为 no-op（5b 读侧也用文件，SQLite 测试 DB
+    # 与文件 fs 独立，理论上 read 不存在路径会返 ""，但显式 patch 避免依赖文件状态）
+    async def _empty_read(*args, **kw):
+        return ""
+    monkeypatch.setattr(
+        "src.service.memory.session.read_session_summary",
+        _empty_read,
     )
 
     app = _build_app(session_maker)
