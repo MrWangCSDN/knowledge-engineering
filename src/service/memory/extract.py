@@ -21,13 +21,15 @@ import logging
 import re
 from typing import Any
 
-# S1 存储层：MemoryFS（async API）；异常类（MemoryNotFound/MemoryPathError）由 T3 supersede 路径用
-from src.service.memory.vfs import MemoryFS
-# S2 已有 frontmatter / 哈希工具 + 路径常量（同包私名 import 合理）
+# S1 存储层：MemoryFS（async API）+ 异常类（_supersede_identity 用）
+from src.service.memory.vfs import MemoryFS, MemoryNotFound, MemoryPathError
+# S2 已有 frontmatter / 哈希工具 + 路径常量（同包私名 import 合理）；
+# _OVERVIEW_NAME 用于 _supersede_identity 筛 dir 内 .overview.md 子项
 from src.service.memory.memgen import (
     MemoryGen,
     _render_frontmatter,
     _ABSTRACT_SUFFIX,
+    _OVERVIEW_NAME,
     _MD_SUFFIX,
 )
 # S3 召回引擎（写入后 index_changed 同步 Weaviate）
@@ -44,6 +46,8 @@ _VALID_KINDS = ("preference", "identity", "style_feedback")
 _SLUG_HEX_LEN = 12
 # source 字段值（§5.3：区分 S4 ReAct vs §22 历史 explicit，S6 迁移辨识）
 _SOURCE_REACT = "react"
+# archive/ 子目录名（§5.4 identity-supersede 归档目录）
+_ARCHIVE_DIRNAME = "archive"
 
 # LLM 输出有时包 ```json ... ``` —— 解析前剥掉
 _CODE_FENCE_RE = re.compile(r"^`{1,4}(?:json)?\s*(.*?)\s*`{1,4}$", re.DOTALL)
@@ -211,16 +215,14 @@ class MemoryExtractor:
         """
         kind = memory["kind"]
         content = memory["content"]
-        # Task 3 会接管 supersedes_kind 路径；本 Task 仅处理 None
-        if memory.get("supersedes_kind") == "identity":
-            # T3 实现；本 Task 暂跳过（不写、不抛 — 避免误用）
-            _log.debug(
-                "extract: identity-supersede deferred to T3 (mem skipped this version)"
-            )
-            return
-        # 路径
+        # 路径：先算 slug；identity-supersede 也需要 new_slug 来判断"是否归档自己"
         slug = _compute_slug(content)
         uri = f"ke://u/{user_id}/global/{kind}/{slug}.md"
+        # identity-supersede（§5.4）：先归档同 kind=identity 旧 .md 到 archive/
+        if memory.get("supersedes_kind") == "identity":
+            archived = await self._supersede_identity(fs, user_id, slug)
+            # 归档产生的 src/dst 都加入 changed_uris（S3 自洽对账）
+            changed_uris.extend(archived)
         # frontmatter（dict 保序：kind 在前，便于人读）
         meta = {
             "kind": kind,
@@ -235,3 +237,61 @@ class MemoryExtractor:
         # 写入（fs.write 是原子的：tempfile.mkstemp + os.replace）
         await fs.write(uri, text)
         changed_uris.append(uri)
+
+    async def _supersede_identity(
+        self,
+        fs: MemoryFS,
+        user_id: int,
+        new_slug: str,
+    ) -> list[str]:
+        """归档同 user 同 kind=identity 的所有旧 .md（slug != new_slug）至 archive/。
+
+        §5.4 设计：
+        - 取 identity 目录直接子项
+        - 筛真记忆 .md（非 .abstract.md / .overview.md / 末段恰 .md / slug != new_slug）
+        - 对每个旧 .md `fs.mv` 到 archive/ 子目录
+        - 返回所有发生 mv 的 uri 列表（src + dst），供 changed_uris 收集
+
+        S3.index_changed 见 src 不 exists 删 / 见 dst exists 加 — 自洽。
+        """
+        # 用户的 identity 目录路径
+        base = f"ke://u/{user_id}/global/identity"
+        # ls 取直接子项；目录不存在抛 MemoryNotFound（首次写 identity 时正常）
+        try:
+            entries = await fs.ls(base)
+        except MemoryNotFound:
+            # 目录不存在 → 无旧 identity 可归档（首次写 identity）
+            return []
+
+        changed: list[str] = []
+        for name in entries:
+            # 跳过 S2 生成的 .abstract.md / .overview.md
+            if name in (_ABSTRACT_SUFFIX, _OVERVIEW_NAME):
+                continue
+            if name.endswith(_ABSTRACT_SUFFIX):     # 子文件 L0：{slug}.abstract.md
+                continue
+            # 非 .md 后缀 → 视为子目录（如 archive/）；不归档子目录本身
+            if not name.endswith(_MD_SUFFIX):
+                continue
+            # 提取 slug（末段去 .md）
+            slug = name[: -len(_MD_SUFFIX)]
+            if slug == new_slug:
+                # 新写入的不归档（同 content 幂等场景）
+                continue
+            # mv 到 archive/ 子目录（同名文件）
+            src = f"{base}/{name}"
+            dst = f"{base}/{_ARCHIVE_DIRNAME}/{name}"
+            try:
+                await fs.mv(src, dst)
+            except (MemoryNotFound, MemoryPathError) as exc:
+                # mv 失败（如目标已存在）— 单条目隔离，记 debug 跳过
+                _log.debug(
+                    "extract: archive mv failed src=%r dst=%r: %r",
+                    src, dst, exc,
+                )
+                continue
+            # 记录这次 mv 的 src + dst（供 S3.index_changed 对账：
+            # src 不 exists → delete Weaviate 对象 / dst exists → upsert）
+            changed.append(src)
+            changed.append(dst)
+        return changed

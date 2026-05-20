@@ -9,9 +9,9 @@ import pytest
 
 # 从 S1 vfs 导入：真 MemoryFS（tmp_path 注入做隔离）
 from src.service.memory.vfs import MemoryFS
-# 从 S2 memgen 导入：仅 _split_frontmatter（T2 测试用来验证 .md frontmatter）；
-# _render_frontmatter / _ABSTRACT_SUFFIX / _OVERVIEW_NAME / _sha256_hex 等 T3 接管时再加
-from src.service.memory.memgen import _split_frontmatter
+# 从 S2 memgen 导入：_split_frontmatter (T2 验证 frontmatter) + _render_frontmatter
+# (T3 测试构造老 identity .md 时序列化 frontmatter)
+from src.service.memory.memgen import _split_frontmatter, _render_frontmatter
 # 从被测模块导入（本 Task 实现）
 from src.service.memory.extract import (
     MemoryExtractor,               # S4 主引擎
@@ -322,3 +322,109 @@ async def test_extract_single_write_failure_isolated(tmp_path, caplog):
     assert not await fs.exists(f"ke://u/7/global/preference/{bad_slug}.md")
     # caplog 含 "write failed" 调试日志
     assert any("memory write failed" in r.message for r in caplog.records)
+
+
+# ── Task 3：identity-supersede + 幂等 + 端到端 ───────────────────
+@pytest.mark.asyncio
+async def test_extract_identity_supersedes_old_via_archive(tmp_path):
+    """场景③：先有一份旧 identity .md → 跑 ReAct 返回新 identity →
+    旧 .md 被 mv 到 archive/ 子目录 + 新 .md 写入 + changed_uris 含三件。
+    """
+    extractor, fs, memgen, recaller, llm, emb, wv = _make_extract_stack(
+        tmp_path,
+        '{"memories":[{"kind":"identity","content":"用户的名字是李龙飞",'
+        '"supersedes_kind":"identity"}]}',
+    )
+    # 先写一份"旧 identity .md"（模拟前几轮已经写入）
+    old_content = "用户的名字是王山河"
+    old_slug = _compute_slug(old_content)
+    old_uri = f"ke://u/7/global/identity/{old_slug}.md"
+    await fs.write(
+        old_uri,
+        _render_frontmatter(
+            {"kind": "identity", "slug": old_slug, "source": "react",
+             "created_at": "2026-05-20T01:00:00Z"},
+            old_content + "\n",
+        ),
+    )
+
+    # 跑 ReAct 抽取（返回新 identity，supersedes_kind="identity"）
+    await extractor.extract_and_persist(
+        fs, memgen, recaller, user_id=7,
+        turn_text="用户：我改名为李龙飞了",
+    )
+
+    # 验证：
+    # 1. 新 identity .md 写入到原位置
+    new_slug = _compute_slug("用户的名字是李龙飞")
+    new_uri = f"ke://u/7/global/identity/{new_slug}.md"
+    assert await fs.exists(new_uri)
+    # 2. 旧 identity .md 已经被 mv 到 archive/ 子目录（同 slug 文件名）
+    archive_uri = f"ke://u/7/global/identity/archive/{old_slug}.md"
+    assert await fs.exists(archive_uri)
+    # 3. 旧 path 已不再存在（被 mv 走了）
+    assert not await fs.exists(old_uri)
+    # 4. 验证归档后 .md 内容与原始一致（fs.mv 是 rename 不改内容）
+    raw = await fs.read(archive_uri)
+    _meta, body = _split_frontmatter(raw)
+    assert body.strip() == old_content
+
+
+@pytest.mark.asyncio
+async def test_extract_slug_idempotent_same_content_no_rewrite(tmp_path):
+    """场景⑦：同 content 第二次抽取 → 同 slug → 同 path → fs 已存在文件不变；
+    S2.regenerate 哈希命中零 LLM；S3.index_changed 哈希命中零 embed。
+    """
+    react_json = (
+        '{"memories":[{"kind":"preference",'
+        '"content":"用户偏好中文","supersedes_kind":null}]}'
+    )
+    extractor, fs, memgen, recaller, llm, emb, wv = _make_extract_stack(
+        tmp_path, react_json
+    )
+    # 第一次抽取
+    await extractor.extract_and_persist(
+        fs, memgen, recaller, user_id=7, turn_text="用户：我喜欢中文"
+    )
+    slug = _compute_slug("用户偏好中文")
+    uri = f"ke://u/7/global/preference/{slug}.md"
+    # 拍快照
+    first_md = await fs.read(uri)
+    first_emb_calls = emb.calls
+    first_llm_calls = llm.calls
+
+    # 第二次抽取（同 content）→ 同 slug → 同 path → fs.write 覆盖（内容一致）→
+    # S2.regenerate 检查 .abstract.md frontmatter src_hash 命中 → 不调 LLM；
+    # S3.index_changed 检查 Weaviate 对象 hash 命中 → 不调 embedder。
+    await extractor.extract_and_persist(
+        fs, memgen, recaller, user_id=7, turn_text="用户：我喜欢中文（重复）"
+    )
+    # .md 文件内容不变（覆盖写但内容相同）
+    assert await fs.read(uri) == first_md
+    # embedder 调用次数零增量（S3 哈希命中）
+    assert emb.calls == first_emb_calls
+    # LLM 调用次数：S4 ReAct 调用 +1（每轮一次）；S2 因为 src_hash 命中不调 → 仅 +1
+    assert llm.calls == first_llm_calls + 1
+
+
+@pytest.mark.asyncio
+async def test_extract_end_to_end_recall_works(tmp_path):
+    """场景⑧：端到端 — fake LLM + 真链路一次跑完 → Weaviate 中能召回该记忆。"""
+    react_json = (
+        '{"memories":[{"kind":"identity","content":"用户的名字是李龙飞",'
+        '"supersedes_kind":"identity"}]}'
+    )
+    extractor, fs, memgen, recaller, llm, emb, wv = _make_extract_stack(
+        tmp_path, react_json
+    )
+    await extractor.extract_and_persist(
+        fs, memgen, recaller, user_id=7,
+        turn_text="用户：我叫李龙飞",
+    )
+    # 召回（query 关键字"名字"应命中 identity 子树）
+    block = await recaller.recall_memory_block(
+        fs, "用户的名字", user_id=7, top_k=5
+    )
+    # block 非空（有命中）且含名字
+    assert block != ""
+    assert "李龙飞" in block
