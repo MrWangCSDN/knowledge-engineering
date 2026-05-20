@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -33,8 +33,6 @@ from src.service.auth_models import User
 from src.service.db import get_db
 from src.service.db_models_homepage import (
     Project as ProjectModel,
-    QAFeedback,
-    QAMessage,
     QASession,
 )
 from src.service.qa_engine.docx_exporter import build_docx, build_docx_from_template
@@ -238,26 +236,40 @@ async def explain(
     async def persist_messages(
         question: str, sections: list[dict], metadata: dict
     ) -> None:
-        """流完成后写 user 消息 + assistant 消息到 qa_messages 表。"""
-        # 注意：emitter 的 done event 还没发出去，这里 db 操作必须快（< 500ms）
-        async with db.begin_nested() if db.in_transaction() else _noop_ctx():
-            user_msg = QAMessage(
-                id="msg_" + uuid.uuid4().hex[:12],
-                session_id=session_id,
-                role="user",
-                content=question,
-            )
-            assistant_msg = QAMessage(
-                id="msg_" + uuid.uuid4().hex[:12],
-                session_id=session_id,
-                role="assistant",
-                content=None,
-                sections=sections,
-                msg_metadata=metadata,
-            )
-            db.add_all([user_msg, assistant_msg])
+        """流完成后写 user 消息 + assistant 消息到 fs；同时更新 qa_session.message_count。
 
-            # 更新会话 message_count
+        S6 改造（§7.4）：DB qa_messages insert → fs per-message file。
+        失败语义：fs.write 抛 → debug 静默（与 §4.3 一致，不影响主答）。
+        """
+        # 1. 生成 msg_id（复用 S5 既有方式）+ 当前 UTC 时间
+        user_msg_id = "msg_" + uuid.uuid4().hex[:12]
+        assistant_msg_id = "msg_" + uuid.uuid4().hex[:12]
+        now = datetime.now(timezone.utc)
+
+        # 2. 写 fs (per-message file)
+        # 局部 import 同 S4/S5：保持模块顶部 import 轻量
+        try:
+            from src.service.memory.session import write_message_to_fs
+            from src.service.memory.vfs import MemoryFS as _MemFS
+            fs = _MemFS()
+            await write_message_to_fs(
+                fs, user_id=user.id, session_id=session_id,
+                msg_id=user_msg_id, role="user", content=question, created_at=now,
+            )
+            await write_message_to_fs(
+                fs, user_id=user.id, session_id=session_id,
+                msg_id=assistant_msg_id, role="assistant", content=None,
+                sections=sections, msg_metadata=metadata, created_at=now,
+            )
+        except Exception:
+            # 中层失败语义（§7.7）：debug + 静默；用户已看 SSE 答案 → 主答完好
+            _log.debug(
+                "persist_messages fs write failed for session %s, silently ignored",
+                session_id, exc_info=True,
+            )
+
+        # 3. 更新 qa_session.message_count（QASession 仍在 DB；不在 S6 scope）
+        async with db.begin_nested() if db.in_transaction() else _noop_ctx():
             sess = await db.get(QASession, session_id)
             if sess is not None:
                 sess.message_count = (sess.message_count or 0) + 2
