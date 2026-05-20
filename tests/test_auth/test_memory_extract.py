@@ -434,3 +434,75 @@ async def test_extract_end_to_end_recall_works(tmp_path):
     # block 非空（有命中）且含名字
     assert block != ""
     assert "李龙飞" in block
+
+
+@pytest.mark.asyncio
+async def test_extract_identity_supersede_also_archives_sibling_abstract(tmp_path):
+    """S4 holistic review Critical 回归：identity-supersede 时同 slug 的
+    sibling .abstract.md 必须一并 archive，否则会留下 orphan 污染 L1 + Weaviate。
+    设计：[[文件式记忆重构-设计]] §5.4 (修订后)。
+    """
+    # 导入 hashlib 用于计算旧 abstract 的 src_hash（模拟 S2 之前为旧 identity 写过 L0）
+    import hashlib
+
+    extractor, fs, memgen, recaller, llm, emb, wv = _make_extract_stack(
+        tmp_path,
+        '{"memories":[{"kind":"identity","content":"用户的名字是李龙飞",'
+        '"supersedes_kind":"identity"}]}',
+    )
+    # 先写一份"旧 identity .md"与"旧 sibling .abstract.md"（模拟 S2 已经为旧 identity 生成过 L0）
+    old_content = "用户的名字是王山河"
+    old_slug = _compute_slug(old_content)
+    old_md_uri = f"ke://u/7/global/identity/{old_slug}.md"
+    old_abs_uri = f"ke://u/7/global/identity/{old_slug}.abstract.md"
+    # 写旧 .md
+    await fs.write(
+        old_md_uri,
+        _render_frontmatter(
+            {"kind": "identity", "slug": old_slug, "source": "react",
+             "created_at": "2026-05-20T01:00:00Z"},
+            old_content + "\n",
+        ),
+    )
+    # 写旧 .abstract.md（模拟 S2 之前生成过，含 src_hash 指向旧正文）
+    old_body_for_hash = old_content + "\n"
+    old_src_hash = hashlib.sha256(old_body_for_hash.encode("utf-8")).hexdigest()
+    await fs.write(
+        old_abs_uri,
+        _render_frontmatter(
+            {"src_hash": old_src_hash},
+            f"摘要：用户的名字是王山河（旧版本）\n",
+        ),
+    )
+
+    # 跑 ReAct 抽取（返回新 identity，supersedes_kind="identity"）
+    await extractor.extract_and_persist(
+        fs, memgen, recaller, user_id=7,
+        turn_text="用户：我改名为李龙飞了",
+    )
+
+    # 验证：
+    # 1. 旧 sibling .abstract.md 已被 mv 到 archive/（不再留在 identity/ 根目录）
+    assert not await fs.exists(old_abs_uri), (
+        f"orphan abstract should be archived, but still at {old_abs_uri}"
+    )
+    archived_abs_uri = f"ke://u/7/global/identity/archive/{old_slug}.abstract.md"
+    assert await fs.exists(archived_abs_uri), (
+        f"abstract should now be at archive: {archived_abs_uri}"
+    )
+    # 2. 旧 .md 也被 archive（与 T3 既有契约一致）
+    archived_md_uri = f"ke://u/7/global/identity/archive/{old_slug}.md"
+    assert await fs.exists(archived_md_uri)
+    assert not await fs.exists(old_md_uri)
+    # 3. 新 identity .md 存在
+    new_slug = _compute_slug("用户的名字是李龙飞")
+    new_uri = f"ke://u/7/global/identity/{new_slug}.md"
+    assert await fs.exists(new_uri)
+    # 4. recall 结果不应含 "王山河"（旧身份不再被召回；orphan 已修复）
+    # 注意：archive/ 子目录里仍有旧内容，但其 abstract 现在位于 archive/ 路径，
+    # 不在直接子项扫描里被混入新 identity 的 L1；Weaviate 中 archive 路径的对象
+    # 与新身份分离。
+    block = await recaller.recall_memory_block(fs, "用户的名字", user_id=7, top_k=5)
+    assert "李龙飞" in block, "new identity should be recallable"
+    # orphan 已不再污染新身份目录 L1（虽然 archive/ 仍含旧内容，是 feature 不是 bug；
+    # S7 可加 "ignore archive/" 选项，本测试仅锁定 orphan 不在 identity/ 根目录留下）

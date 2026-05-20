@@ -300,4 +300,26 @@ class MemoryExtractor:
             # src 不 exists → delete Weaviate 对象 / dst exists → upsert）
             changed.append(src)
             changed.append(dst)
+            # 同 slug 的 sibling .abstract.md 也必须 archive：否则会留下 orphan：
+            # ① S2 _gen_dir_l0_l1 会把旧 abstract 混入 identity 目录 L1，污染新身份
+            # ② S3 index_changed 见 orphan abstract 存在 + hash 不变 → 哈希命中跳过
+            #    → 旧 Weaviate 向量永不删除 → recall 返回 stale 内容 → 重现「王山河→李龙飞」
+            #    leak bug。修复 S4 holistic review Critical 发现。
+            abs_name = slug + _ABSTRACT_SUFFIX
+            abs_src = f"{base}/{abs_name}"
+            abs_dst = f"{base}/{_ARCHIVE_DIRNAME}/{abs_name}"
+            try:
+                await fs.mv(abs_src, abs_dst)
+            except (MemoryNotFound, MemoryPathError):
+                # 旧 abstract 缺失（首次写入 .md 时 S2 尚未生成；或被外部清理）
+                # 视作"无需 archive"，让 S2/S3 后续重生即可。不是错误。
+                continue
+            except Exception as exc:           # noqa: BLE001 同 .md mv 隔离模式
+                _log.debug(
+                    "extract: archive abstract mv failed src=%r dst=%r: %r",
+                    abs_src, abs_dst, exc,
+                )
+                continue
+            changed.append(abs_src)
+            changed.append(abs_dst)
         return changed
