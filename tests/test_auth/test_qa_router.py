@@ -417,7 +417,13 @@ async def test_explain_meta_context_usage_when_history_trimmed(
         def __init__(self, llm):
             pass
 
-        async def compact(self, *args, **kw):
+        async def compact(
+            self, fs, db, *,
+            user_id, session_id,
+            every_n_messages=6, force=False,
+        ) -> None:
+            # noop mock：S5 SessionCompactor 整体替换，让 router 压力块→meta 测试
+            # 不被真 fs/db 操作干扰；专项 compactor 覆盖在 test_memory_session.py
             return None
 
     monkeypatch.setattr(

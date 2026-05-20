@@ -280,7 +280,7 @@ async def explain(
         memory_block = ""
 
     # 5b. 会话级 summary 注入（S5 — §4.3 落实读侧 composer）
-    # 与 5 段共用 MemoryFS()；若 5 段 fs 构造已失败，此处构造新 fs（防御性）
+    # 防御性：独立构造 _MemFS()（不依赖 5 段；各段独立 try/except 无共享 fs 变量）
     try:
         from src.service.memory.session import read_session_summary
         from src.service.memory.vfs import MemoryFS as _MemFS
@@ -562,7 +562,7 @@ def _make_memory_writer(
     """构造 on_memory 回调（闭包）。done 之后异步执行：
 
     1. S4 ReAct 抽取本轮可记忆事实 → 写文件 .md → S2.regenerate + S3.index_changed
-    2. 会话消息达阈值 → 压缩会话工作状态（§22 暂留 DB tier，S5 后续迁文件）。
+    2. 会话消息达阈值 → 压缩会话工作状态（S5 已迁文件：SessionCompactor + ke://u/{uid}/session/{sid}/summary.md）。
 
     全程异常静默（记忆是辅助，绝不影响主答）。
     设计：[[文件式记忆重构-设计]] §5.5。
@@ -618,7 +618,8 @@ def _make_memory_writer(
             from src.service.memory.session import SessionCompactor
             # fs 复用 S4 块在前面构造的 MemoryFS 实例（同闭包内同生命周期）；
             # 若 S4 块在 MemoryFS() 之前抛（仅 import 阶段可能，极罕见），fs 不存在
-            # → 此处 try/except 中层捕获后 debug 静默退出（与 S5 §6.5 一致）
+            # → S5 块访问 fs 抛 UnboundLocalError（NameError 子类）→ except Exception
+            # 中层捕获后 debug 静默退出（与 S5 §6.5 一致）
             compactor = SessionCompactor(llm)
             await compactor.compact(
                 fs, db,

@@ -282,7 +282,7 @@ def build_user_prompt_with_history(
     """把历史轮直接拼到 question 前面（不在此压缩）。
 
     P2②（[[记忆系统-设计]] §18）起：router 进流前已按模型窗口 token 预算裁过
-    body.history（更早轮由 system 记忆块 working_summary+focus 顶替），传入此处
+    body.history（更早轮由 system 记忆块头部的 session summary 顶替，S5 在 qa_router 5b/5c 读侧 composer 实现），传入此处
     的已是裁好的最近若干轮。此处的 history[-10:] 仅作冗余兜底硬上限，正常不会触发。
     """
     if not history:
