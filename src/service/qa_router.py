@@ -269,6 +269,8 @@ async def explain(
             )
 
         # 3. 更新 qa_session.message_count（QASession 仍在 DB；不在 S6 scope）
+        # 注：辅助显示元数据；即使 step 2 fs write 失败仍执行 — divergence 可接受
+        #     详情读取走 fs 真相源（get_session_detail / SessionCompactor.compact），不依赖此计数
         async with db.begin_nested() if db.in_transaction() else _noop_ctx():
             sess = await db.get(QASession, session_id)
             if sess is not None:
@@ -641,7 +643,7 @@ def _make_memory_writer(
             # 中层失败语义（§6.5）：debug 留痕 + 静默；compact 自身已含中层 try/except，
             # 此外层为深度防御冗余兜底（与 S3/S4 同模式）
             _log.debug(
-                "S5 SessionCompactor failed for session %s, silently ignored",
+                "SessionCompactor failed for session %s, silently ignored",
                 session_id, exc_info=True,
             )
 

@@ -568,7 +568,7 @@ async def test_read_messages_for_session_skips_corrupt_file(tmp_path):
 
 
 def test_fs_message_duck_type_contract():
-    """_FsMessage 鸭子契约：4 属性齐备 + created_at 是 datetime（§7.9 场景 6）。"""
+    """_FsMessage 鸭子契约：5 属性齐备 + created_at 是 datetime（§7.9 场景 6）。"""
     ts = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
     m = _FsMessage(
         role="assistant",
@@ -580,6 +580,8 @@ def test_fs_message_duck_type_contract():
     assert m.content == "正文"
     assert m.msg_metadata == {"cited_entities": ["e1"]}
     assert isinstance(m.created_at, datetime)
+    # sections 是 T2 加的第 5 字段，default None；不传时 dataclass 注入 None
+    assert m.sections is None
 
 
 @pytest.mark.asyncio
