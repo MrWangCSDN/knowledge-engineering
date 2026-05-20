@@ -426,3 +426,55 @@ async def test_index_s6_whole_tree_one_call(tmp_path):
     assert by_uri["ke://u/9/global/.abstract.md"]["properties"]["kind"] == "dir"
     # embed 调用 4 次（每个 uri 1 次）
     assert emb.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_index_missing_hash_in_frontmatter_skipped(tmp_path, caplog):
+    """Minor M1：frontmatter 缺哈希字段（src_hash 与 inputs_hash 都没）→ 跳过、
+    写零（让 S2 下一轮自愈），caplog 含 "missing hash"。"""
+    fs = _fs(tmp_path)
+    rec, emb, wv = _make_recaller()
+    abs_uri = "ke://u/7/global/identity/user-name.abstract.md"
+    # 故意写一份 frontmatter 不带 src_hash/inputs_hash 的 .abstract.md
+    bad_md = _render_frontmatter({"unrelated": "value"}, "破损内容\n")
+    await fs.write(abs_uri, bad_md)
+
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="src.service.memory.recall"):
+        await rec.index_changed(fs, [abs_uri])
+
+    # 未写出任何对象（让 S2 下轮自愈）
+    tenants = wv.collections.get("memory_l0").tenants
+    assert tenants.get("7", {}) == {}
+    # embedder 未被调（缺 hash 直接 return）
+    assert emb.calls == 0
+    # 日志显式记 missing hash
+    assert any("missing hash" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_index_skips_non_abstract_uri(tmp_path, caplog):
+    """Minor M2：非 .abstract.md 后缀的 uri → 跳过、debug log "skip non-abstract"，
+    不影响其他合法 uri 的索引。"""
+    fs = _fs(tmp_path)
+    rec, emb, wv = _make_recaller()
+    abs_uri = "ke://u/7/global/identity/user-name.abstract.md"
+    md_uri = "ke://u/7/global/identity/user-name.md"          # 仅 .md，非 .abstract.md
+    body = "ignored body"
+    h = _sha256_hex("正常 body\n")
+    await fs.write(abs_uri, _file_l0_md(h, "正常 body"))
+    await fs.write(md_uri, "随便写点 .md 但不该被索引\n")
+
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="src.service.memory.recall"):
+        await rec.index_changed(fs, [md_uri, abs_uri])
+
+    # 仅 abs_uri 被索引（md_uri 被过滤）
+    tenant_store = wv.collections.get("memory_l0").tenants["7"]
+    assert len(tenant_store) == 1
+    obj = next(iter(tenant_store.values()))
+    assert obj["properties"]["uri"] == abs_uri
+    # embedder 调用 1 次（仅 abs_uri）
+    assert emb.calls == 1
+    # 日志显式记 skip non-abstract
+    assert any("skip non-abstract" in r.message for r in caplog.records)

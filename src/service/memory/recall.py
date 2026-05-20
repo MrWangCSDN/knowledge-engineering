@@ -130,7 +130,8 @@ class MemoryRecaller:
         - 不 exists 走 delete（不存在则静默忽略）。
         单条目失败 try/except → _log.debug → continue（同 S2 §3.5 隔离）。
         """
-        # 去重保持稳定顺序（dict.fromkeys 是 Python 3.7+ 保序去重的惯用法）
+        # 去重保持稳定顺序（set 命中判断 + ordered list 追加；与 S2 memgen.py
+        # 中 regenerate 的去重写法对齐，避免引入双份风格）
         seen: set[str] = set()
         ordered: list[str] = []
         for uri in changed_uris:
@@ -155,50 +156,56 @@ class MemoryRecaller:
         # vfs._parse_uri 静态方法已校验 uri 合法性，返回 (uid, segs)
         uid, _segs = MemoryFS._parse_uri(uri)
         tenant = uid
-        # Weaviate 对象主键 uuid：复用 BaseWeaviateStore._to_uuid（SHA-256[:32] 拼 UUID5）
+        # Weaviate 对象主键 uuid：复用 BaseWeaviateStore._to_uuid（SHA-256[:32]
+        # 重排为 UUID 字符串形式，不是 RFC 4122 UUID5；只取其确定性派生属性）
         obj_uuid = _uuid_mod.UUID(BaseWeaviateStore._to_uuid(uri))
 
         # 取 collection + tenant view
         coll = self._weaviate_client.collections.get(_COLLECTION_NAME)
         view = coll.with_tenant(tenant)
 
-        if await fs.exists(uri):
-            # 走 upsert 路径
+        # 单次 read 取代 exists()+read()：去掉 await 间隙的 TOCTOU、少一次 syscall
+        # （与 S2 memgen.py _gen_file_l0 / _stale 的 review 修正后模式一致）
+        try:
             raw = await fs.read(uri)
-            meta, body = _split_frontmatter(raw)
-            # frontmatter 内哈希：文件 L0 用 src_hash / 目录 L0 用 inputs_hash
-            fresh_hash = meta.get("src_hash") or meta.get("inputs_hash")
-            if fresh_hash is None:
-                # frontmatter 损坏 / 缺失哈希 → 跳过（让上层下轮自愈；S2 自愈机制兜底）
-                _log.debug("index_changed: missing hash in frontmatter %r", uri)
-                return
-            # 把 hash 转 str（防 YAML 把全数字 hash 解析为 int，与 S2 同模式）
-            fresh_hash = str(fresh_hash)
-
-            # 查既有对象：命中且 hash 相同 → 跳过（零 embedding API 调用）
-            existing = view.query.fetch_object_by_id(obj_uuid)
-            if existing is not None and existing.properties.get("hash") == fresh_hash:
-                _log.debug("index_changed: hash hit, skip %r", uri)
-                return
-
-            # 不命中：调 embedder 取向量
-            vec = await self._embedder.embed(body.strip())
-            # 整理 properties
-            kind = _kind_of_uri(uri)
-            props = {
-                "uri": uri,
-                "kind": kind,
-                "hash": fresh_hash,
-                "body": body,                  # 保留 frontmatter 后的完整 body（含末尾 "\n"）
-            }
-            # 已存在则 replace；不存在则 insert（fake 这两个语义相同；真 v4 client 行为有别）
-            if existing is None:
-                view.data.insert(uuid=obj_uuid, properties=props, vector=vec)
-            else:
-                view.data.replace(uuid=obj_uuid, properties=props, vector=vec)
-        else:
-            # 文件不存在 → 删 Weaviate 对象（v4 client 对不存在的 uuid 是静默忽略）
+        except MemoryNotFound:
+            # 文件不存在 → 删 Weaviate 对象（v4 client 对不存在 uuid 静默忽略）
             view.data.delete_by_id(obj_uuid)
+            return
+
+        meta, body = _split_frontmatter(raw)
+        # frontmatter 内哈希：文件 L0 用 src_hash / 目录 L0 用 inputs_hash
+        fresh_hash = meta.get("src_hash") or meta.get("inputs_hash")
+        if fresh_hash is None:
+            # frontmatter 损坏 / 缺失哈希 → 跳过（让上层下轮自愈；S2 自愈机制兜底）
+            _log.debug("index_changed: missing hash in frontmatter %r", uri)
+            return
+        # 把 hash 转 str（防 YAML 把全数字 hash 解析为 int，与 S2 同模式）
+        fresh_hash = str(fresh_hash)
+
+        # 查既有对象：命中且 hash 相同 → 跳过（零 embedding API 调用）
+        existing = view.query.fetch_object_by_id(obj_uuid)
+        if existing is not None and existing.properties.get("hash") == fresh_hash:
+            _log.debug("index_changed: hash hit, skip %r", uri)
+            return
+
+        # 不命中：调 embedder 取向量
+        vec = await self._embedder.embed(body.strip())
+        # 整理 properties
+        kind = _kind_of_uri(uri)
+        props = {
+            "uri": uri,
+            "kind": kind,
+            "hash": fresh_hash,
+            "body": body,                  # 保留 frontmatter 后的完整 body（含末尾 "\n"）
+        }
+        # 已存在则 replace；不存在则 insert（fake 行为相同；真 v4 client：
+        # insert 对已存在 uuid 抛 ObjectAlreadyExistsError，replace 对不存在抛 404，
+        # 故必须先 fetch 判 existence）
+        if existing is None:
+            view.data.insert(uuid=obj_uuid, properties=props, vector=vec)
+        else:
+            view.data.replace(uuid=obj_uuid, properties=props, vector=vec)
 
 
 class _DefaultEmbedder:
