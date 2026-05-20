@@ -17,8 +17,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sqlalchemy import select
+
+from src.service.db_models_homepage import QAMessage
 from src.service.memory.vfs import MemoryFS, MemoryNotFound
-from src.service.memory.memgen import _split_frontmatter
+from src.service.memory.memgen import _render_frontmatter, _split_frontmatter
+from src.service.memory.service import _extract_focus_entity_ids
+from src.service.memory.extract import _now_iso_z          # S4 既有 helper，原样复用
+from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM
 
 # 模块级 logger（与 vfs.py / memgen.py / recall.py / extract.py 同模式）
 _log = logging.getLogger(__name__)
@@ -101,5 +107,102 @@ class SessionCompactor:
             every_n_messages: floor 阈值；msg_count < N 时早退（§6.4 step 2）
             force: True 表示上下文压力触发（spec §18），降低 floor 至 2、min_delta 至 1
         """
-        # T2 step 1: 完整实现见后续提交；此处保留 stub 让 T1 测试可链接
-        raise NotImplementedError("compact() implementation lands in S5 T2")
+        try:
+            # ─── step 1: 拉本 session 所有 messages（仍 DB；QAMessage 文件化属 S6） ───
+            # select(QAMessage).where(...).order_by(...) 沿用 service.py 既有写法
+            msg_res = await db.execute(
+                select(QAMessage)
+                .where(QAMessage.session_id == session_id)
+                .order_by(QAMessage.created_at)
+            )
+            # .scalars().all() 把 Row 对象拆为列扁平 list（ORM 单实体 select 标准用法）
+            messages = msg_res.scalars().all()
+            msg_count = len(messages)
+
+            # ─── step 2: floor 判定（与旧版 maybe_compact_session 同：force 降门槛到 2） ───
+            # force=True（上下文压力 spec §18）：越过固定 N floor，但仍要求 msg_count ≥ 2
+            floor = 2 if force else every_n_messages
+            if msg_count < floor:
+                # 消息数不足 floor → 不调 LLM、不读 fs、不写 fs（成本守卫）
+                return
+
+            # ─── step 3: 读旧 summary.md（不存在 → 首压，prev_turn_count=0, prev_summary="") ───
+            uri = _summary_uri(user_id, session_id)
+            prev_turn_count = 0
+            prev_summary = ""
+            try:
+                # fs.read 不存在抛 MemoryNotFound（vfs.py read 契约）
+                raw = await fs.read(uri)
+                # S2 helper 拆 frontmatter；非法 YAML 已被 S2 内部容错为空 dict {}
+                fm, body = _split_frontmatter(raw)
+                # body 是 frontmatter 闭合后的部分（或无 frontmatter 时即全文）
+                prev_summary = (body or "").strip()
+                # fm 由 _split_frontmatter 保证是 dict（空 YAML / 损坏 → {}），
+                # 故只需检查 turn_count 字段类型 + ≥0 取值（防手工误改产出 -5 等）
+                tc = fm.get("turn_count")
+                if isinstance(tc, int) and tc >= 0:
+                    prev_turn_count = tc
+            except MemoryNotFound:
+                # 首压路径：summary.md 还不存在 → prev_turn_count 维持 0
+                pass
+
+            # ─── step 4: delta 判定（自上次压缩起新增 ≥ N；force 降到 ≥ 1） ───
+            # 与旧版同：避免「过阈后每轮压缩 = 成本 bug」（消息每轮 +2，过 6 后会每轮跑 LLM）
+            min_delta = 1 if force else every_n_messages
+            if msg_count - prev_turn_count < min_delta:
+                return
+
+            # ─── step 5: 拼 convo：§21 递归累积（旧 summary + 仅自水位线起的新增消息） ───
+            # messages[prev_turn_count:] 取自上次压缩水位线起的新增 messages
+            # 旧 summary 已被 LLM 浓缩 → 不再二次浓缩老消息，token 输入恒有界
+            new_msgs = messages[prev_turn_count:]
+            parts: list[str] = []
+            if prev_summary:
+                parts.append("【已有会话摘要】\n" + prev_summary)
+            # 守卫已保证 msg_count - prev_turn_count >= min_delta >= 1 → new_msgs 必非空；
+            # 仍以 if 守一层，与 prev_summary 段对称且对未来阈值改动稳健
+            if new_msgs:
+                parts.append(
+                    "【新增对话】\n"
+                    + "\n".join(
+                        # [role] 前缀 + content 截 200 字（与旧版一致）；
+                        # 截断防单条消息撑爆 LLM context；m.content 可能 None → 默认 ""
+                        f"[{m.role}] {(m.content or '')[:200]}" for m in new_msgs
+                    )
+                )
+            # 两段间用 \n\n 分隔（同旧版 service.py:152）
+            convo = "\n\n".join(parts)
+
+            # ─── step 6: LLM 调用 ───
+            summary = await self._llm.complete(system=_SESSION_COMPACT_SYSTEM, user=convo)
+            # strip 防 LLM 返带前后空白；None 防鸭子 LLM 实现失误返 None
+            summary = (summary or "").strip()
+            if not summary:
+                # LLM 返空 → 不写文件（旧 summary.md 维持，下轮 delta 守卫重试）
+                return
+
+            # ─── step 7: focus_entity_ids 聚合（复用 service.py 既有 helper，S4/S5 共用） ───
+            # messages[-12:] 取末 12 条（最近 ~6 轮）做 focus 主题判定；
+            # _extract_focus_entity_ids 内部已防御 missing/bad metadata，不抛
+            focus = _extract_focus_entity_ids(messages[-12:])
+
+            # ─── step 8: 写新 summary.md（frontmatter + body，复用 S2 helper） ───
+            fm_new = {
+                "turn_count": msg_count,                  # 新水位线
+                "focus_entity_ids": focus,                # 截 _FOCUS_MAX=10
+                "updated_at": _now_iso_z(),               # ISO 8601 Z（S4 helper 复用）
+            }
+            # _render_frontmatter(meta, body) 真签名：返 "---\n{YAML}---\n{body}"
+            # 调用方约定 body 自带末尾换行（S2 _render_frontmatter docstring 明示）
+            content = _render_frontmatter(fm_new, summary + "\n")
+            # fs.write 原子写（S1 os.replace POSIX rename）；并发安全
+            await fs.write(uri, content)
+
+        except Exception:
+            # 中层失败语义（§6.5）：整体 try/except → debug 留痕 + return None，绝不抛
+            # 记忆是辅助（§4.3），主答绝不受影响
+            _log.debug(
+                "SessionCompactor.compact failed for session %s, silently ignored",
+                session_id, exc_info=True,
+            )
+            return

@@ -66,6 +66,62 @@ async def test_read_session_summary_corrupt_frontmatter_returns_body(tmp_path):
 
 from src.service.memory.session import SessionCompactor
 
+from dataclasses import dataclass, field
+from typing import Any as _Any
+
+
+@dataclass
+class _FakeMessage:
+    """fake QAMessage row（duck-type：role / content / msg_metadata / created_at）。
+
+    设计：仅满足 SessionCompactor.compact step 1 select 之后的 ORM-like
+    属性访问 + step 7 _extract_focus_entity_ids 需要的 msg_metadata 字段。
+    """
+    role: str
+    content: str
+    msg_metadata: dict | None = None
+    created_at: _Any = None
+
+
+class _FakeMsgScalars:
+    """fake .scalars() 返回值：仅暴露 .all() → list[_FakeMessage]。"""
+    def __init__(self, rows: list[_FakeMessage]):
+        self._rows = rows
+
+    def all(self) -> list[_FakeMessage]:
+        return self._rows
+
+
+class _FakeMsgResult:
+    """fake db.execute() 返回值：仅暴露 .scalars() → _FakeMsgScalars。"""
+    def __init__(self, rows: list[_FakeMessage]):
+        self._rows = rows
+
+    def scalars(self) -> _FakeMsgScalars:
+        return _FakeMsgScalars(self._rows)
+
+
+class _FakeDB:
+    """fake AsyncSession：仅响应 execute(select(QAMessage).where(...).order_by(...))。
+
+    不实现 commit/add/flush；S5 fs 落盘不走 DB 写路径，DB 仅读 QAMessage（S6 才迁）。
+    """
+    def __init__(self, messages: list[_FakeMessage]):
+        self._messages = messages
+
+    async def execute(self, stmt) -> _FakeMsgResult:
+        # stmt 是 SQLAlchemy select 表达式，我们不解析（fake 只服务 compact 的单条 select）
+        # 返回固定 messages（每次测试单独构造 _FakeDB(messages=...)）
+        return _FakeMsgResult(self._messages)
+
+
+def _msgs(*roles_contents: tuple[str, str]) -> list[_FakeMessage]:
+    """便捷构造一批 fake message。
+
+    用法：_msgs(("user", "你好"), ("assistant", "你好！"), ...)
+    """
+    return [_FakeMessage(role=r, content=c) for r, c in roles_contents]
+
 
 class _FakeLLM:
     """记录 complete() 调用入参；返回固定的 fake summary 文本。
@@ -92,3 +148,36 @@ def test_session_compactor_init_holds_llm():
     # compact 必须是 async 协程方法（contract 锁定，T2 不能改成同步）
     assert callable(compactor.compact)
     assert inspect.iscoroutinefunction(compactor.compact)
+
+
+@pytest.mark.asyncio
+async def test_compact_first_time_writes_new_summary(tmp_path):
+    """首压路径：summary.md 不存在 + msg_count=6 + every_n=6（§6.7 场景 1）。
+
+    fs.read 抛 MemoryNotFound → prev_turn_count=0 / prev_summary=""
+    → 拼 convo 仅含【新增对话】段 → 调 LLM → 写新 summary.md。
+    断言：frontmatter.turn_count == 6，body 含 LLM 输出。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    db = _FakeDB(_msgs(*[("user", f"q{i}") if i % 2 == 0 else ("assistant", f"a{i}") for i in range(6)]))
+    llm = _FakeLLM(response="用户讨论了 6 条消息，主要话题是 q0/q2/q4。")
+    compactor = SessionCompactor(llm)
+
+    await compactor.compact(fs, db, user_id=7, session_id="sess_first", every_n_messages=6)
+
+    # 断言文件已写
+    uri = "ke://u/7/session/sess_first/summary.md"
+    assert await fs.exists(uri)
+    raw = await fs.read(uri)
+    # frontmatter 解析回来验证 turn_count
+    from src.service.memory.memgen import _split_frontmatter
+    meta, body = _split_frontmatter(raw)
+    assert meta["turn_count"] == 6
+    # body 含 LLM 输出（去尾换行后）
+    assert "用户讨论了 6 条消息" in body
+    # LLM 被调用 1 次
+    assert len(llm.calls) == 1
+    # convo 不含【已有会话摘要】（首压）
+    assert "【已有会话摘要】" not in llm.calls[0]["user"]
+    # convo 含【新增对话】
+    assert "【新增对话】" in llm.calls[0]["user"]
