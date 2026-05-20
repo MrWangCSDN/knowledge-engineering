@@ -291,36 +291,97 @@ def test_delete_other_user_forbidden(client, seeded_session):
 
 # ───────── POST /sessions/{sid}/messages/{mid}/feedback ─────────
 
-def test_post_feedback_success(client, seeded_session, session_maker):
-    """S6 注：qa_feedback 表已删（§7.6）；feedback endpoint 暂时返回 404（待迁移 fs）。"""
-    token, _ = _login(client)
+@pytest.mark.asyncio
+async def test_post_feedback_success(client, seeded_session, monkeypatch, tmp_path):
+    """post_feedback 写 fs feedback file 成功（§8.4 S7 修 S6 broken stub）。
+
+    S6 后是 404 stub；S7 恢复完整契约：POST upvote → fs.read 看 frontmatter.vote=up。
+    """
+    monkeypatch.setenv("KE_MEM_ROOT", str(tmp_path))
+    session_id = seeded_session
+    token, user_id = _login(client)
+    message_id = "msg_test_assistant"
+
     r = client.post(
-        f"/projects/deposit/qa/sessions/{seeded_session}/messages/msg_a_1/feedback",
+        f"/projects/deposit/qa/sessions/{session_id}/messages/{message_id}/feedback",
+        json={"vote": "up", "comment": "答得好"},
         headers=_auth(token),
-        json={"vote": "up", "comment": "答得不错"},
     )
-    # S6：qa_feedback 表已删，endpoint 返回 404（消息不存在）直到迁移 fs
-    assert r.status_code == 404
+    assert r.status_code == 204
+
+    # 验 fs 写入
+    from src.service.memory.vfs import MemoryFS
+    from src.service.memory.memgen import _split_frontmatter
+    fs = MemoryFS()
+    raw = await fs.read(
+        f"ke://u/{user_id}/session/{session_id}/messages/{message_id}.feedback.md"
+    )
+    fm, body = _split_frontmatter(raw)
+    assert fm["vote"] == "up"
+    assert fm["user_id"] == user_id
+    assert body.strip() == "答得好"
 
 
-def test_post_feedback_overwrites_existing(client, seeded_session, session_maker):
-    """S6 注：qa_feedback 表已删（§7.6）；feedback endpoint 暂时返回 404。"""
-    token, _ = _login(client)
-    url = f"/projects/deposit/qa/sessions/{seeded_session}/messages/msg_a_1/feedback"
-    r2 = client.post(url, headers=_auth(token), json={"vote": "down", "comment": "反悔了"})
-    # S6：qa_feedback 表已删，endpoint 返回 404
-    assert r2.status_code == 404
+@pytest.mark.asyncio
+async def test_post_feedback_overwrites_existing(client, seeded_session, monkeypatch, tmp_path):
+    """post_feedback 同 msg_id 第二次覆盖第一次（fs.write 原子覆盖，§8.4）。"""
+    monkeypatch.setenv("KE_MEM_ROOT", str(tmp_path))
+    session_id = seeded_session
+    token, user_id = _login(client)
+    message_id = "msg_test_overwrite"
 
-
-def test_post_feedback_404_on_unknown_message(client, seeded_session):
-    """feedback endpoint 对不存在消息返 404（S6 前后行为一致）。"""
-    token, _ = _login(client)
-    r = client.post(
-        f"/projects/deposit/qa/sessions/{seeded_session}/messages/unknown/feedback",
-        headers=_auth(token),
+    # 第一次 up
+    r1 = client.post(
+        f"/projects/deposit/qa/sessions/{session_id}/messages/{message_id}/feedback",
         json={"vote": "up"},
+        headers=_auth(token),
     )
-    assert r.status_code == 404
+    assert r1.status_code == 204
+    # 第二次 down（覆盖）
+    r2 = client.post(
+        f"/projects/deposit/qa/sessions/{session_id}/messages/{message_id}/feedback",
+        json={"vote": "down", "comment": "改主意了"},
+        headers=_auth(token),
+    )
+    assert r2.status_code == 204
+
+    # 验最终态 = down
+    from src.service.memory.vfs import MemoryFS
+    from src.service.memory.memgen import _split_frontmatter
+    fs = MemoryFS()
+    raw = await fs.read(
+        f"ke://u/{user_id}/session/{session_id}/messages/{message_id}.feedback.md"
+    )
+    fm, body = _split_frontmatter(raw)
+    assert fm["vote"] == "down"
+    assert body.strip() == "改主意了"
+
+
+@pytest.mark.asyncio
+async def test_post_feedback_unknown_message_writes_orphan_feedback(client, seeded_session, monkeypatch, tmp_path):
+    """post_feedback 对未知 message_id 仍返 204 写 orphan feedback file（§8.4 设计选择）。
+
+    S7 endpoint 不校验 message 在 fs 真实存在 — 写 feedback file 是独立操作。
+    Orphan feedback file 在 delete_session §8.3 时一同被 fs.rm recursive 清。
+    """
+    monkeypatch.setenv("KE_MEM_ROOT", str(tmp_path))
+    session_id = seeded_session
+    token, user_id = _login(client)
+    message_id = "msg_does_not_exist"
+
+    r = client.post(
+        f"/projects/deposit/qa/sessions/{session_id}/messages/{message_id}/feedback",
+        json={"vote": "up"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 204
+
+    # orphan feedback file 已写
+    from src.service.memory.vfs import MemoryFS
+    fs = MemoryFS()
+    assert await fs.exists(
+        f"ke://u/{user_id}/session/{session_id}/messages/{message_id}.feedback.md"
+    )
 
 
 def test_post_feedback_validates_vote(client, seeded_session):
@@ -329,6 +390,9 @@ def test_post_feedback_validates_vote(client, seeded_session):
     S6 注：post_feedback 已暂返 404 stub（qa_feedback 表已删，S7 迁文件后恢复完整契约）；
     本测试验证的是 Pydantic body validation（vote enum 校验），独立于 endpoint 体 stub
     状态，未来 S7 恢复完整契约后本测试断言不变（仍 422）。
+
+    S7 注：Pydantic body validation 422 与 S7 endpoint 200/500 行为正交 —
+    Pydantic 先于 endpoint 体执行；vote="maybe" 仍 422，不取决于 fs 状态。
     """
     token, _ = _login(client)
     r = client.post(

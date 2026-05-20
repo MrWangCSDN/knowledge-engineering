@@ -796,14 +796,30 @@ async def post_feedback(
     body: FeedbackRequest,
     user: User = Depends(get_current_user),
 ) -> None:
-    """对一条 assistant 消息打反馈（覆盖式 upsert）。
+    """对一条 assistant 消息打反馈（覆盖式 upsert）。S7 改造：fs sibling file。
 
-    S6 注：qa_feedback 表已在 S6 migration 中 drop（文件式记忆重构 §7.6）。
-    此 endpoint 暂时返回 404 直到反馈功能迁移到 fs（下一迭代）。
+    设计：[[文件式记忆重构-设计]] §8.4（修 S6 §7.11 #1 broken stub）。
+    路径：ke://u/{uid}/session/{sid}/messages/{msg_id}.feedback.md（与 message 同目录）。
+    覆盖式更新（同 msg_id 后续 POST 覆盖前次）；vote=None 表示取消反馈。
+
+    失败语义（§8.5）：fs.write 抛 → 抛 500（不静默 — 用户主动投票需明确反馈，
+    与 compact/recall 那种 best-effort 元数据不同）。
     """
-    # S6：qa_feedback / qa_messages 表已删（§7.6 Alembic migration drop）；
-    # 反馈功能待迁移到 fs（下一迭代）；当前返回 404 防止 NameError
-    raise HTTPException(status_code=404, detail="消息不存在")
+    try:
+        from src.service.memory.session import write_feedback_to_fs
+        from src.service.memory.vfs import MemoryFS as _MemFS
+        fs = _MemFS()
+        await write_feedback_to_fs(
+            fs, user_id=user.id, session_id=session_id, msg_id=message_id,
+            vote=body.vote, comment=body.comment,
+        )
+    except Exception:
+        # 中层失败语义（§8.5）：fs 写失败 → 500 让前端知反馈未保存
+        _log.debug(
+            "post_feedback fs write failed for msg %s, returning 500",
+            message_id, exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="反馈保存失败")
 
 
 # ─── v1.5 Word 导出 ────────────────────────────────────────────────────────
