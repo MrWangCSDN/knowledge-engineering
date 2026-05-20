@@ -627,6 +627,97 @@ async def test_session_compactor_compact_with_fs_messages_end_to_end(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_read_messages_for_session_skips_unparseable_iso_date(tmp_path):
+    """read_messages_for_session 跳过 created_at 非法 ISO 文件（命中 outer except）。
+
+    覆盖 fromisoformat ValueError 路径 — 与"缺 role"内层 skip 不同，是 outer
+    except Exception 兜底的关键路径（M6 review fix 补足覆盖）。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    # 正常文件
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_iso", msg_id="msg_good",
+        role="user", content="正常",
+        created_at=datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc),
+    )
+    # 非法 ISO 日期文件（fromisoformat 抛 ValueError）
+    bad_raw = "---\nrole: user\ncreated_at: \"not-an-iso-date\"\n---\n损坏\n"
+    await fs.write("ke://u/7/session/sess_iso/messages/msg_bad.md", bad_raw)
+
+    result = await read_messages_for_session(fs, user_id=7, session_id="sess_iso")
+    # 仅返正常那一条；fromisoformat 抛被 outer except 吃掉
+    assert len(result) == 1
+    assert result[0].content == "正常"
+
+
+@pytest.mark.asyncio
+async def test_write_message_normalizes_naive_to_utc(tmp_path):
+    """write_message_to_fs naive datetime 归一为 UTC-aware（I1 review fix）。
+
+    naive datetime → frontmatter.created_at 必带 Z 后缀；fromisoformat 回读
+    必返 UTC-aware datetime → 混合 tz sort 不再抛 TypeError。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    naive = datetime(2026, 5, 21, 10, 0, 0)  # 无 tzinfo
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_tz", msg_id="msg_naive",
+        role="user", content="naive 输入", created_at=naive,
+    )
+    msgs = await read_messages_for_session(fs, user_id=7, session_id="sess_tz")
+    assert len(msgs) == 1
+    # 关键断言：回读 created_at 必是 UTC-aware（不是 naive）
+    assert msgs[0].created_at.tzinfo is timezone.utc
+    # 时间值不变（naive 视作 UTC，不平移）
+    assert msgs[0].created_at == datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_write_message_normalizes_non_utc_to_utc(tmp_path):
+    """write_message_to_fs 非 UTC tz-aware 归一为 UTC（I1 review fix）。
+
+    输入 +08:00 时区 → 转 UTC（-8 小时）再写 ISO Z 字符串；防止本地时间被
+    错标为 UTC 导致跨 client 时间显示错乱。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    from datetime import timezone as _tz, timedelta
+    shanghai_tz = _tz(timedelta(hours=8))
+    sh_time = datetime(2026, 5, 21, 18, 0, 0, tzinfo=shanghai_tz)  # UTC 时间 10:00
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_tz2", msg_id="msg_sh",
+        role="user", content="Shanghai 输入", created_at=sh_time,
+    )
+    msgs = await read_messages_for_session(fs, user_id=7, session_id="sess_tz2")
+    # UTC 归一后时间 = 10:00 而非 18:00
+    assert msgs[0].created_at == datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_read_messages_for_session_role_tiebreak_same_second(tmp_path):
+    """同 created_at 时按 role tie-break（user 在前 assistant 在后）（M3 review fix）。
+
+    模拟 persist_messages 同一调用写 user+assistant 同秒场景（strftime 截微秒
+    导致同 created_at 字符串）→ sort 应稳定按 role tie-break，与旧 DB
+    qa_router.py:463 case 同语义。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    same_ts = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    # 先写 assistant（让 fs.ls 字典序倾向于把 assistant 排在前）
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_tie", msg_id="z_assistant",
+        role="assistant", content="answer", created_at=same_ts,
+    )
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_tie", msg_id="a_user",
+        role="user", content="question", created_at=same_ts,
+    )
+    result = await read_messages_for_session(fs, user_id=7, session_id="sess_tie")
+    assert len(result) == 2
+    # 同 created_at + role tie-break → user 在前 assistant 在后（不依赖文件名字典序）
+    assert result[0].role == "user"
+    assert result[1].role == "assistant"
+
+
+@pytest.mark.asyncio
 async def test_session_compactor_compact_signature_no_db(tmp_path):
     """SessionCompactor.compact 新签名不含 db 参数（§7.9 场景 8）。"""
     fs = MemoryFS(root=str(tmp_path))

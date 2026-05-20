@@ -248,14 +248,21 @@ async def write_message_to_fs(
         msg_metadata: assistant 才有的 entry_points / cited_entities / token_usage 等
         created_at: 不传则用当前 UTC 时间（datetime.now(timezone.utc)）
     """
-    # 默认时间 = 当前 UTC；调用方可传入精确时间
+    # 时区归一：null 默认 UTC now；naive 视作 UTC；非 UTC tz-aware 转 UTC
+    # 保证 frontmatter.created_at 始终是合法 ISO 8601 Z 字符串
     if created_at is None:
         created_at = datetime.now(timezone.utc)
-    # 拼 frontmatter dict；可选字段仅在非 None 时入 frontmatter（保持 YAML 干净）
+    elif created_at.tzinfo is None:
+        # naive 视作 UTC（与 S4 _now_iso_z 同模式：UTC 为默认时区）
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    else:
+        # 非 UTC tz-aware → 归一为 UTC（避免错标 Z）
+        created_at = created_at.astimezone(timezone.utc)
+    # 现在 created_at 必是 UTC-aware
     fm: dict = {
         "role": role,
         # ISO 8601 Z 字符串（与 S4 _now_iso_z 同格式）
-        "created_at": created_at.strftime("%Y-%m-%dT%H:%M:%SZ") if created_at.tzinfo else created_at.isoformat(),
+        "created_at": created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     if sections is not None:
         fm["sections"] = sections
@@ -321,5 +328,9 @@ async def read_messages_for_session(
             _log.debug("read_messages_for_session: skip corrupt file %s: %r", file_uri, exc)
             continue
 
-    out.sort(key=lambda m: m.created_at)
+    # 按 created_at 升序排序（不依赖 fs.ls 字典序 — 文件名是 msg_id，无时间排序保证）；
+    # 同 created_at 时按 role tie-break（user 在前 assistant 在后），与旧 DB
+    # qa_router.py:463 case((QAMessage.role == "user", 0), else_=1) 同语义 —
+    # persist_messages 同一调用写 user+assistant 极可能同秒（strftime 截微秒）
+    out.sort(key=lambda m: (m.created_at, 0 if m.role == "user" else 1))
     return out
