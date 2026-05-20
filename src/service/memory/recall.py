@@ -67,6 +67,12 @@ def _overview_uri_for_dir_l0(dir_l0_uri: str) -> str:
     用于 recall 时 fs.read 展开命中目录的导航图。
     输入约定：dir_l0_uri 必须以 "/.abstract.md" 结尾（调用方确保 _kind_of_uri == "dir"）。
     """
+    # 防御性断言：契约要求末段恰为 "/.abstract.md"；若上游调用点 _kind_of_uri
+    # 判定漂移导致传入文件 L0 uri，这里抛 AssertionError 而非默默产出错误 uri
+    # （如 user-nam/.overview.md from user-name.abstract.md）。零运行时成本。
+    assert dir_l0_uri.endswith("/" + _ABSTRACT_SUFFIX), (
+        f"_overview_uri_for_dir_l0: uri must end with '/.abstract.md': {dir_l0_uri!r}"
+    )
     # 把末段 "/.abstract.md" 替换为 "/.overview.md"
     # 等价于：去掉 "/.abstract.md" 后缀，拼上 "/.overview.md"
     base = dir_l0_uri[: -len("/" + _ABSTRACT_SUFFIX)]   # 去掉 "/.abstract.md"
@@ -120,11 +126,13 @@ class MemoryRecaller:
 class _DefaultEmbedder:
     """KE 既有 get_embedding 的 thin async wrapper。
 
-    get_embedding 是同步函数（src/semantic/embedding.py:19）；S3 内一律 await embed(...)
-    保持调用面一致。注：embedding 实际通过 Ollama HTTP 调用，不是 CPU 密集 → 同步
-    包裹在 async 函数里语义上等价（不阻塞事件循环超过单次 HTTP 调用时长）。
+    get_embedding 是同步函数（src/semantic/embedding.py:19），底层走 urllib.urlopen
+    (Ollama HTTP) timeout=60s。直接在 async def 里 return 会阻塞事件循环最长 60s，
+    挡掉所有并发协程（多租户召回 / S4 post-turn 索引等）。用 asyncio.to_thread
+    把同步调用放线程池，立刻让出事件循环。stdlib-only，零额外依赖。
     """
 
     async def embed(self, text: str) -> list[float]:
-        # 直接调用 KE 同步函数，返回 1024 维向量
-        return get_embedding(text, _VECTOR_DIM)
+        # 用 asyncio.to_thread 把同步阻塞调用搬到线程池，主事件循环立刻让出
+        import asyncio
+        return await asyncio.to_thread(get_embedding, text, _VECTOR_DIM)

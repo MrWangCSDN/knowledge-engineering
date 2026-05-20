@@ -61,3 +61,11 @@ def test_memory_recaller_construction_accepts_embedder_and_client():
     # __init__ 仅保存引用，不应抛错
     assert rec._embedder is None
     assert rec._weaviate_client is None
+
+
+def test_overview_uri_for_dir_l0_rejects_file_uri():
+    """防御性断言：传入文件 L0 uri（不以 "/.abstract.md" 结尾）→ AssertionError。"""
+    # 文件 L0：末段是 "user-name.abstract.md"（带 slug 前缀，不是裸 ".abstract.md"）
+    # 此调用违反 _overview_uri_for_dir_l0 的契约，应被 assert 兜住
+    with pytest.raises(AssertionError):
+        _overview_uri_for_dir_l0("ke://u/7/global/identity/user-name.abstract.md")
