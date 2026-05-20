@@ -407,3 +407,19 @@ _MEM_L1_SYSTEM = (
     "各自讲什么、需要时如何进一步查看其正文。中文，不超过约 1500 字，"
     "结构清晰可作为该子树索引；直接输出导航图正文，不要前缀、不要额外解释。"
 )
+
+
+# ─── 文件式记忆 S4：ReAct 抽取（2026-05-21）──────────────────────────────
+# 设计：[[文件式记忆重构-设计]] §5.2。单次 LLM 调用，输出 JSON 数组含 kind /
+# content / supersedes_kind 三字段。空 {"memories":[]} = 本轮无可记。
+_MEM_EXTRACT_SYSTEM = (
+    "你是用户记忆抽取器。给你一段用户与助理的对话，抽取所有值得长期记住的"
+    "关于本用户的事实，分类为 preference / identity / style_feedback：\n"
+    "- identity：用户身份/姓名/自我称呼/角色（必含 supersedes_kind='identity'，"
+    "  会取代旧身份事实，先更新不并存重复，避免「王山河→李龙飞」类 bug）；\n"
+    "- preference：用户长期偏好（语言、风格、领域、工程范畴等）；\n"
+    "- style_feedback：用户对回答风格/格式/长度的反馈；\n"
+    '输出严格 JSON：{"memories":[{"kind":...,"content":"第三人称陈述事实",'
+    '"supersedes_kind":null|"identity"}]}。本轮无可记则 {"memories":[]}。'
+    "只输出 JSON 对象本身，不要代码块、不要解释。"
+)
