@@ -634,7 +634,7 @@ def _make_memory_writer(
             # 中层捕获后 debug 静默退出（与 S5 §6.5 一致）
             compactor = SessionCompactor(llm)
             await compactor.compact(
-                fs, db,
+                fs,
                 user_id=user_id, session_id=session_id, force=force_compact,
             )
         except Exception:
