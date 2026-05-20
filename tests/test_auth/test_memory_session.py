@@ -390,3 +390,27 @@ async def test_compact_persists_focus_entity_ids(tmp_path):
     assert "ent_alpha" in focus
     assert "ent_beta" in focus
     assert "ent_gamma" in focus
+
+
+@pytest.mark.asyncio
+async def test_compact_cross_tenant_isolation(tmp_path):
+    """跨租户隔离：user_id=1 写 → user_id=2 读不到（§6.7 场景 9）。
+
+    S1 路径前缀隔离自带，本测试是回归保险（防 _summary_uri / fs 误改导致泄漏）。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
+    db = _FakeDB(msgs)
+    llm = _FakeLLM(response="user1 的会话摘要")
+    compactor = SessionCompactor(llm)
+
+    # user_id=1 写
+    await compactor.compact(fs, db, user_id=1, session_id="sess_x", every_n_messages=6)
+
+    # user_id=1 自己读得到
+    r1 = await read_session_summary(fs, user_id=1, session_id="sess_x")
+    assert "user1 的会话摘要" in r1
+
+    # user_id=2 读同 session_id 拿不到（路径前缀不同）
+    r2 = await read_session_summary(fs, user_id=2, session_id="sess_x")
+    assert r2 == ""
