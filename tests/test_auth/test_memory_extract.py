@@ -9,14 +9,9 @@ import pytest
 
 # 从 S1 vfs 导入：真 MemoryFS（tmp_path 注入做隔离）
 from src.service.memory.vfs import MemoryFS
-# 从 S2 memgen 导入：frontmatter 工具与哈希函数（S4 测试用来构造/检查 .md）
-from src.service.memory.memgen import (
-    _split_frontmatter,           # 拆 frontmatter / body
-    _render_frontmatter,           # 序列化 frontmatter
-    _sha256_hex,                   # 字符串 → SHA-256 hex
-    _ABSTRACT_SUFFIX,              # ".abstract.md"
-    _OVERVIEW_NAME,                # ".overview.md"
-)
+# 从 S2 memgen 导入：仅 _split_frontmatter（T2 测试用来验证 .md frontmatter）；
+# _render_frontmatter / _ABSTRACT_SUFFIX / _OVERVIEW_NAME / _sha256_hex 等 T3 接管时再加
+from src.service.memory.memgen import _split_frontmatter
 # 从被测模块导入（本 Task 实现）
 from src.service.memory.extract import (
     MemoryExtractor,               # S4 主引擎

@@ -21,14 +21,13 @@ import logging
 import re
 from typing import Any
 
-# S1 存储层：MemoryFS（async API）+ 异常类
-from src.service.memory.vfs import MemoryFS, MemoryNotFound, MemoryPathError
-# S2 已有 frontmatter / 哈希工具（同包私名 import 合理）
+# S1 存储层：MemoryFS（async API）；异常类（MemoryNotFound/MemoryPathError）由 T3 supersede 路径用
+from src.service.memory.vfs import MemoryFS
+# S2 已有 frontmatter / 哈希工具 + 路径常量（同包私名 import 合理）
 from src.service.memory.memgen import (
     MemoryGen,
     _render_frontmatter,
     _ABSTRACT_SUFFIX,
-    _OVERVIEW_NAME,
     _MD_SUFFIX,
 )
 # S3 召回引擎（写入后 index_changed 同步 Weaviate）
@@ -45,8 +44,6 @@ _VALID_KINDS = ("preference", "identity", "style_feedback")
 _SLUG_HEX_LEN = 12
 # source 字段值（§5.3：区分 S4 ReAct vs §22 历史 explicit，S6 迁移辨识）
 _SOURCE_REACT = "react"
-# archive/ 子目录名（§5.4 identity-supersede 归档目录）
-_ARCHIVE_DIRNAME = "archive"
 
 # LLM 输出有时包 ```json ... ``` —— 解析前剥掉
 _CODE_FENCE_RE = re.compile(r"^`{1,4}(?:json)?\s*(.*?)\s*`{1,4}$", re.DOTALL)
