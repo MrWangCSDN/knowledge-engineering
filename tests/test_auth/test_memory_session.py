@@ -181,3 +181,52 @@ async def test_compact_first_time_writes_new_summary(tmp_path):
     assert "【已有会话摘要】" not in llm.calls[0]["user"]
     # convo 含【新增对话】
     assert "【新增对话】" in llm.calls[0]["user"]
+
+
+@pytest.mark.asyncio
+async def test_compact_recursive_folds_prior_summary_and_only_new_msgs(tmp_path):
+    """递归累积：summary.md 存在（turn_count=6）+ msg_count=12（§6.7 场景 2）。
+
+    读 prev_summary + 取 messages[6:] 作 new_msgs → 拼 convo（含两段）
+    → 调 LLM → 写新（turn_count=12）。
+    断言：convo 含【已有会话摘要】+【新增对话】两段；仅 new_msgs 入 convo（旧 6 条不重摘）。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    uri = "ke://u/7/session/sess_x/summary.md"
+
+    # 预置旧 summary（turn_count=6, body="旧摘要：用户偏好哈密瓜"）
+    from src.service.memory.memgen import _render_frontmatter
+    prev_content = _render_frontmatter(
+        {"turn_count": 6, "focus_entity_ids": [], "updated_at": "2026-05-21T10:00:00Z"},
+        "旧摘要：用户偏好哈密瓜\n",
+    )
+    await fs.write(uri, prev_content)
+
+    # 12 条消息：前 6 已被压缩进 prev_summary；后 6 是新增（带新事实）
+    msgs = [_FakeMessage(role="user" if i % 2 == 0 else "assistant",
+                          content=f"老消息 {i}" if i < 6 else f"新消息 {i}-讨论西瓜")
+            for i in range(12)]
+    db = _FakeDB(msgs)
+    llm = _FakeLLM(response="更新后摘要：用户偏好哈密瓜+西瓜")
+    compactor = SessionCompactor(llm)
+
+    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+
+    # convo 包含两段
+    assert len(llm.calls) == 1
+    user_input = llm.calls[0]["user"]
+    assert "【已有会话摘要】" in user_input
+    assert "旧摘要：用户偏好哈密瓜" in user_input
+    assert "【新增对话】" in user_input
+    # 旧消息（前 6 条）不入 convo（已被 prev_summary 浓缩）
+    assert "老消息 0" not in user_input
+    assert "老消息 5" not in user_input
+    # 新消息（后 6 条）入 convo
+    assert "新消息 6-讨论西瓜" in user_input or "新消息 11-讨论西瓜" in user_input
+
+    # 写后 turn_count=12
+    raw = await fs.read(uri)
+    from src.service.memory.memgen import _split_frontmatter
+    meta, body = _split_frontmatter(raw)
+    assert meta["turn_count"] == 12
+    assert "更新后摘要" in body
