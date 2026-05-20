@@ -29,3 +29,18 @@ def test_summary_uri_different_sessions_isolated():
     s1 = _summary_uri(7, "sess_a")
     s2 = _summary_uri(7, "sess_b")
     assert s1 != s2
+
+
+from src.service.memory.session import read_session_summary
+from src.service.memory.vfs import MemoryFS
+
+
+@pytest.mark.asyncio
+async def test_read_session_summary_not_exists_returns_empty(tmp_path):
+    """summary.md 不存在 → 返 ""（与 recall_memory_block 同自包失败语义，§6.5）。"""
+    # tmp_path 是 pytest 内置的临时目录 fixture；MemoryFS(root=...) 接收物理根
+    fs = MemoryFS(root=str(tmp_path))
+    # user 7 + sess_x 路径下没写过任何文件
+    result = await read_session_summary(fs, user_id=7, session_id="sess_x")
+    # 不存在 → 返 "" 让 composer 走零开销不注入路径
+    assert result == ""
