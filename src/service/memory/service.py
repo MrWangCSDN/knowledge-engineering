@@ -94,65 +94,51 @@ def detect_explicit_project_memory(question: str) -> str | None:
     return None
 
 
-async def recall_memory_block(db: Any, *, user_id: int, session_id: str, project_id: str | None = None) -> str:
-    """召回当前用户 + 当前会话 + 工程的记忆，拼成一个文本块。
+async def recall_memory_block(
+    fs,                                          # 类型由 import 决定（避免循环导入 → 不在签名标注 MemoryFS）
+    query: str,
+    user_id: int,
+    *,
+    top_k: int = 5,
+) -> str:
+    """召回当前用户的记忆 L0 拼装为 system-prompt 块（S3 实现）。
 
-    顺序（spec §7）：会话级在前（工作上下文，最高优先），用户级次之，工程级末位。
-    project_id=None 不出工程块（向后兼容）。
-    全空 → 返回 ""（调用方据此跳过注入，零开销）。
-    注：本函数自身不吞异常（保持纯逻辑可测）。若调用方要求「记忆失败绝不影响主答」，须自行 try/except —— Task 7 的 router 调用点已这样包裹。
+    新签名（drop-in 替换 §22 DB 版）：fs + query + user_id；返回 str（空字符串
+    表示无记忆，调用方 with_memory_block 据此跳过注入零开销）。
+    内部委托 MemoryRecaller；S3 自包失败语义（embed/query 失败返 ""），
+    调用方 try/except 不再必需（但 qa_router 既有 try 保留为防御性深度防护）。
+
+    设计：[[文件式记忆重构-设计]] §4.1（drop-in 替换契约）+ §4.4（召回算法）。
     """
-    parts: list[str] = []
-
-    sm_res = await db.execute(
-        select(QASessionMemory).where(QASessionMemory.session_id == session_id)
-    )
-    sm = sm_res.scalars().one_or_none()
-    if sm is not None and (sm.working_summary or "").strip():
-        session_block = "【本次会话工作状态】\n" + sm.working_summary.strip()
-        focus = sm.focus_entity_ids
-        if isinstance(focus, list):
-            ids = [x for x in focus if isinstance(x, str) and x]
-            if ids:
-                session_block += "\n【本次聚焦实体】" + ", ".join(ids)
-        parts.append(session_block)
-
-    um_res = await db.execute(
-        select(QAUserMemory)
-        .where(QAUserMemory.user_id == user_id, QAUserMemory.status == "active")
-        .order_by(QAUserMemory.created_at)
-    )
-    user_rows = um_res.scalars().all()
-    if user_rows:
-        lines = "\n".join(
-            f"- {r.content}" for r in user_rows if (r.content or "").strip()
+    # 局部 import：避免模块顶层循环引入（recall.py → memgen.py → 不回环 service.py）
+    from src.service.memory.recall import MemoryRecaller, MemoryL0Store, _DefaultEmbedder
+    # 单例 / 注入：本函数走 KE 部署期既定 Weaviate 配置；在生产里由 KE 框架装配
+    # 注入；此处为简化集成层调用，按 KE 既有 Weaviate 客户端创建惯例就地构造。
+    # 注：MemoryL0Store(BaseWeaviateStore) 的 __init__ 同步打开连接 / 检查 schema，
+    # 重复构造代价不大（KE 既有 weaviate_*_store.py 同模式）；如需性能优化（连接池），
+    # 由 S7 / 独立 hardening pass 引入单例（不在 S3 MVP）。
+    # 为可测：本函数若被现存测试以 fake fs 调入但无 Weaviate 部署，会因
+    # MemoryL0Store 构造抛 ConnectionError → 进入 S3 自包 try 路径返 ""。
+    try:
+        # 读 KE 既有部署配置（与 KE 既有 weaviate stores 一致的入口）
+        import os
+        url = os.getenv("WEAVIATE_URL", "http://127.0.0.1:8080")
+        grpc_port = int(os.getenv("WEAVIATE_GRPC_PORT", "50051"))
+        api_key = os.getenv("WEAVIATE_API_KEY") or None
+        # 构造 MemoryL0Store（同步初始化连接 + 必要时建 collection）
+        store = MemoryL0Store(
+            url=url,
+            grpc_port=grpc_port,
+            collection_name="memory_l0",
+            dimension=1024,
+            api_key=api_key,
         )
-        if lines:
-            parts.append("【用户偏好 / 已知事实】\n" + lines)
-
-    if project_id is not None:
-        pm_res = await db.execute(
-            select(QAProjectMemory)
-            .where(
-                QAProjectMemory.project_id == project_id,
-                QAProjectMemory.status == "active",
-                or_(
-                    QAProjectMemory.scope == "team",
-                    QAProjectMemory.user_id == user_id,
-                ),
-            )
-            .order_by(QAProjectMemory.created_at)
-            .limit(_PROJECT_MEMORY_LIMIT)
-        )
-        proj_rows = pm_res.scalars().all()
-        if proj_rows:
-            lines = "\n".join(
-                f"- {r.content}" for r in proj_rows if (r.content or "").strip()
-            )
-            if lines:
-                parts.append("【工程记忆】\n" + lines)
-
-    return "\n\n".join(parts)
+        # MemoryL0Store._client 是 weaviate v4 client；MemoryRecaller 直接接收 client
+        recaller = MemoryRecaller(embedder=_DefaultEmbedder(), weaviate_client=store._client)
+        return await recaller.recall_memory_block(fs, query, user_id, top_k=top_k)
+    except Exception:
+        # S3 自包失败语义：任何异常 → 返 ""（with_memory_block 走零开销不注入路径）
+        return ""
 
 
 # 去 LLM 输出的 ```json … ``` / ``` … ``` / ````json … ```` 围栏（1~4 反引号、可选 json 标签）

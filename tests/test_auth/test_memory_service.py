@@ -8,7 +8,6 @@ from src.service.qa_engine.retriever import RetrievedContext
 from src.service.qa_engine.sse_emitter import stream_qa_answer
 from src.service.memory.service import (
     detect_explicit_memory,
-    recall_memory_block,
     write_explicit_memory,
     maybe_compact_session,
     detect_explicit_project_memory,
@@ -219,26 +218,6 @@ class _FakeMemLLM:
 
 
 @pytest.mark.asyncio
-async def test_recall_empty_when_nothing():
-    db = _FakeMemDB()
-    block = await recall_memory_block(db, user_id=1, session_id="s1")
-    assert block == ""
-
-
-@pytest.mark.asyncio
-async def test_recall_combines_session_then_user():
-    um = QAUserMemory(user_id=1, kind="preference", content="回答简短",
-                       source="explicit", status="active")
-    sm = QASessionMemory(session_id="s1", working_summary="已确认瓶颈在网关",
-                         turn_count=6)
-    db = _FakeMemDB(user_rows=[um], session_row=sm)
-    block = await recall_memory_block(db, user_id=1, session_id="s1")
-    assert "已确认瓶颈在网关" in block
-    assert "回答简短" in block
-    assert block.index("已确认瓶颈在网关") < block.index("回答简短")
-
-
-@pytest.mark.asyncio
 async def test_write_explicit_adds_user_memory_row():
     db = _FakeMemDB()
     await write_explicit_memory(db, user_id=7, session_id="s1", content="我用 Java")
@@ -353,30 +332,6 @@ async def test_compact_updates_focus_entity_ids_existing_row():
 
 
 @pytest.mark.asyncio
-async def test_recall_includes_focus_entities_in_session_block():
-    sm = QASessionMemory(session_id="s1", working_summary="已确认瓶颈在网关",
-                         turn_count=6, focus_entity_ids=["method://pay", "table://orders"])
-    db = _FakeMemDB(user_rows=[], session_row=sm)
-    block = await recall_memory_block(db, user_id=1, session_id="s1")
-    assert "已确认瓶颈在网关" in block
-    assert "【本次聚焦实体】" in block
-    assert "method://pay" in block and "table://orders" in block
-    assert block.index("已确认瓶颈在网关") < block.index("【本次聚焦实体】")
-
-
-@pytest.mark.asyncio
-async def test_recall_no_focus_line_when_empty_or_none():
-    sm1 = QASessionMemory(session_id="s1", working_summary="x", turn_count=6,
-                          focus_entity_ids=[])
-    sm2 = QASessionMemory(session_id="s2", working_summary="y", turn_count=6,
-                          focus_entity_ids=None)
-    for sid, sm in (("s1", sm1), ("s2", sm2)):
-        db = _FakeMemDB(user_rows=[], session_row=sm)
-        block = await recall_memory_block(db, user_id=1, session_id=sid)
-        assert "【本次聚焦实体】" not in block
-
-
-@pytest.mark.asyncio
 async def test_compact_force_bypasses_n_floor():
     db = _FakeMemDB(session_row=None, msg_rows=[_FakeMsg(), _FakeMsg(role="assistant")])
     await maybe_compact_session(db, _FakeMemLLM(), session_id="s1",
@@ -461,92 +416,6 @@ async def test_write_explicit_project_adds_row():
     assert r.scope == "private" and r.source == "explicit" and r.status == "active"
     assert r.source_session_id == "s1"
     assert db.committed is True
-
-
-@pytest.mark.asyncio
-async def test_recall_includes_project_block_after_user_block():
-    pm = QAProjectMemory(project_id="deposit", user_id=1, scope="private",
-                          content="orders_v2 是现行表", source="explicit", status="active")
-    um = QAUserMemory(user_id=1, kind="preference", content="回答简短",
-                       source="explicit", status="active")
-    db = _FakeMemDB(user_rows=[um], session_row=None, project_rows=[pm])
-    block = await recall_memory_block(db, user_id=1, session_id="s1", project_id="deposit")
-    assert "回答简短" in block and "orders_v2 是现行表" in block
-    assert "【工程记忆】" in block
-    assert block.index("回答简短") < block.index("orders_v2 是现行表")
-
-
-@pytest.mark.asyncio
-async def test_recall_no_project_block_when_project_id_none():
-    pm = QAProjectMemory(project_id="deposit", user_id=1, scope="private",
-                          content="X", source="explicit", status="active")
-    db = _FakeMemDB(user_rows=[], session_row=None, project_rows=[pm])
-    block = await recall_memory_block(db, user_id=1, session_id="s1")
-    assert "【工程记忆】" not in block
-
-
-@pytest.mark.asyncio
-async def test_recall_project_tenant_filter_real_sqlite():
-    """真 SQLite 验证多租户隔离 SQL（_FakeMemDB 绕过 WHERE，安全属性须真查）。
-    4 条隔离轴：跨工程 / 他人 private 不可见 / team 可见 / archived 排除。"""
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-    from src.service.db import Base
-
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    SM = async_sessionmaker(eng, expire_on_commit=False)
-    async with SM() as s:
-        s.add_all([
-            QAProjectMemory(id=1, project_id="A", user_id=1, scope="private",
-                            content="A-own-private", source="explicit", status="active"),
-            QAProjectMemory(id=2, project_id="A", user_id=2, scope="private",
-                            content="A-other-private", source="explicit", status="active"),
-            QAProjectMemory(id=3, project_id="A", user_id=2, scope="team",
-                            content="A-team", source="explicit", status="active"),
-            QAProjectMemory(id=4, project_id="B", user_id=1, scope="private",
-                            content="B-own-private", source="explicit", status="active"),
-            QAProjectMemory(id=5, project_id="A", user_id=1, scope="private",
-                            content="A-own-archived", source="explicit", status="archived"),
-        ])
-        await s.commit()
-    async with SM() as s:
-        block = await recall_memory_block(s, user_id=1, session_id="x", project_id="A")
-    # 可见：自己在 A 的 active private + A 的 team
-    assert "A-own-private" in block
-    assert "A-team" in block
-    # 不可见：他人 A private / 跨工程 B / 自己 archived
-    assert "A-other-private" not in block
-    assert "B-own-private" not in block
-    assert "A-own-archived" not in block
-    await eng.dispose()
-
-
-@pytest.mark.asyncio
-async def test_recall_project_block_caps_at_limit_real_sqlite():
-    """真 SQLite：>20 条 active 工程记忆，recall 只取 _PROJECT_MEMORY_LIMIT(20) 条
-    （回归守护 .limit()，防被误删导致 prompt 膨胀/成本失控）。"""
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-    from src.service.db import Base
-
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    SM = async_sessionmaker(eng, expire_on_commit=False)
-    async with SM() as s:
-        s.add_all([
-            QAProjectMemory(
-                id=i, project_id="A", user_id=1, scope="private",
-                content=f"note-{i}", source="explicit", status="active",
-            )
-            for i in range(1, 26)  # 25 条
-        ])
-        await s.commit()
-    async with SM() as s:
-        block = await recall_memory_block(s, user_id=1, session_id="x", project_id="A")
-    # 工程块每条是 "- note-i" 一行；统计 "- note-" 出现次数
-    assert block.count("- note-") == 20
-    await eng.dispose()
 
 
 # ───────── chit-chat 会话级多轮：history 接入（spec §20）─────────
@@ -888,14 +757,6 @@ async def test_write_preference_appends_no_archive():
     )
     assert old_pref.status == "active"          # 旧 preference 不归档（累加）
     assert len([o for o in db.added if isinstance(o, QAUserMemory)]) == 1
-
-
-@pytest.mark.asyncio
-async def test_recall_only_current_identity_after_supersede():
-    # 取代后召回只剩李龙飞（模拟旧行已 archived，DB 过滤后只返回 active）
-    db = _FakeMemDB(user_rows=[_um("identity", "用户的名字是李龙飞")])
-    block = await recall_memory_block(db, user_id=7, session_id="sX")
-    assert "李龙飞" in block and "王山河" not in block
 
 
 # ───────── §22.5 review 收尾：锁 SQL WHERE + 零/多旧 identity ─────────

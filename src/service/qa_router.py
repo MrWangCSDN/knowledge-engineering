@@ -271,11 +271,18 @@ async def explain(
                 sess.message_count = (sess.message_count or 0) + 2
         await db.commit()
 
-    # 5. 记忆召回（spec §7）：进流前查用户级+会话级，拼 memory_block。
-    # 失败静默 → 空串，不影响主答。
+    # 5. 记忆召回（文件式记忆 S3：Weaviate 向量召回 on L0）：embed body.question
+    # 在用户租户内做 near_vector top-k，命中目录 L0 时同目录 fs.read .overview.md
+    # 展开；失败 S3 自包返 ""（with_memory_block 零开销不注入路径）。
+    # 防御性 try 保留（深度防护；S3 自身已 try → 返 ""，此层是冗余兜底）。
     try:
+        # fs 由 KE 部署期单例提供；按 KE 既有 memory.vfs 入口构造
+        from src.service.memory.vfs import MemoryFS
         memory_block = await recall_memory_block(
-            db, user_id=user.id, session_id=session_id, project_id=project_id
+            MemoryFS(),                         # 默认 root 由 KE_MEM_ROOT 环境变量或仓库根派生
+            body.question,                       # query 来自 body.question（当前用户问题）
+            user_id=user.id,
+            top_k=5,
         )
     except Exception:
         memory_block = ""
