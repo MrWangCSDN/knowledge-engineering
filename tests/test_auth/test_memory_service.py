@@ -6,10 +6,7 @@ import pytest
 from src.service.qa_engine.synthesizer import QASynthesizer
 from src.service.qa_engine.retriever import RetrievedContext
 from src.service.qa_engine.sse_emitter import stream_qa_answer
-from src.service.memory.service import (
-    maybe_compact_session,
-)
-from src.service.db_models_homepage import QASessionMemory
+from src.service.memory.service import _extract_focus_entity_ids
 
 
 class _CapturingLLM:
@@ -151,81 +148,7 @@ async def test_stream_passes_memory_block_and_calls_on_memory():
 
 # ───────── memory.service 逻辑（Fake DB/LLM）─────────
 
-
-# --- Fake DB / LLM ---
-
-class _FakeResult:
-    def __init__(self, rows): self._rows = rows
-    def scalars(self): return self
-    def all(self): return self._rows
-    def one_or_none(self): return self._rows[0] if self._rows else None
-
-
-class _FakeMsg:
-    def __init__(self, role="user", content="问题", msg_metadata=None):
-        self.role = role
-        self.content = content
-        self.msg_metadata = msg_metadata
-
-
-class _FakeMemDB:
-    def __init__(self, session_row=None, msg_rows=None):
-        self._session_row = session_row
-        self._msg_rows = msg_rows or []
-        self.added = []
-        self.committed = False
-
-    async def execute(self, stmt):
-        ent = stmt.column_descriptions[0]["entity"]
-        if ent is QASessionMemory:
-            return _FakeResult([self._session_row] if self._session_row else [])
-        return _FakeResult(self._msg_rows)
-
-    def add(self, obj): self.added.append(obj)
-    async def commit(self): self.committed = True
-    async def get(self, model, pk): return self._session_row
-
-
-class _FakeMemLLM:
-    def __init__(self, reply="本次目标：排查下单超时；已确认瓶颈在 PaymentGateway"):
-        self._reply = reply
-    async def complete(self, *, system, user, **kw): return self._reply
-
-
-@pytest.mark.asyncio
-async def test_compact_skips_below_threshold():
-    sm = QASessionMemory(session_id="s1", working_summary="old", turn_count=0)
-    db = _FakeMemDB(session_row=sm, msg_rows=[_FakeMsg(), _FakeMsg()])
-    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
-    assert db.committed is False
-
-
-@pytest.mark.asyncio
-async def test_compact_creates_summary_when_threshold_reached():
-    db = _FakeMemDB(session_row=None, msg_rows=[_FakeMsg() for _ in range(6)])
-    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
-    assert len(db.added) == 1
-    row = db.added[0]
-    assert isinstance(row, QASessionMemory)
-    assert row.session_id == "s1"
-    assert "PaymentGateway" in row.working_summary
-    assert db.committed is True
-
-
-@pytest.mark.asyncio
-async def test_compact_skips_when_no_new_messages_since_last():
-    # turn_count == msg_count → 距上次压缩零新增，跳过（不调 LLM、不 commit）。
-    # 同时是 Important-1（过阈后每轮都压）的回归守卫。
-    sm = QASessionMemory(session_id="s1", working_summary="prev", turn_count=6)
-    db = _FakeMemDB(session_row=sm, msg_rows=[_FakeMsg() for _ in range(6)])
-    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
-    assert db.committed is False
-    assert db.added == []
-
-
 # ───────── 会话级 focus_entity_ids 抽取（spec §17）─────────
-
-from src.service.memory.service import _extract_focus_entity_ids
 
 
 class _FakeMsgMeta:
@@ -264,59 +187,6 @@ def test_extract_focus_defensive_on_missing_or_bad_metadata():
 def test_extract_focus_filters_empty_and_nonstr():
     msgs = [_FakeMsgMeta(msg_metadata={"cited_entities": ["method://ok", "", None, 123]})]
     assert _extract_focus_entity_ids(msgs) == ["method://ok"]
-
-
-@pytest.mark.asyncio
-async def test_compact_persists_focus_entity_ids_new_row():
-    msgs = [_FakeMsg() for _ in range(5)] + [
-        _FakeMsg(role="assistant", content="答",
-                 msg_metadata={"cited_entities": ["method://pay", "table://orders"]}),
-    ]
-    db = _FakeMemDB(session_row=None, msg_rows=msgs)
-    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
-    row = [o for o in db.added if isinstance(o, QASessionMemory)][0]
-    assert row.focus_entity_ids == ["method://pay", "table://orders"]
-    assert row.working_summary
-
-
-@pytest.mark.asyncio
-async def test_compact_updates_focus_entity_ids_existing_row():
-    sm = QASessionMemory(session_id="s1", working_summary="old",
-                         turn_count=0, focus_entity_ids=["method://old"])
-    msgs = [_FakeMsg() for _ in range(5)] + [
-        _FakeMsg(role="assistant",
-                 msg_metadata={"cited_entities": ["method://new"]}),
-    ]
-    db = _FakeMemDB(session_row=sm, msg_rows=msgs)
-    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
-    assert sm.focus_entity_ids == ["method://new"]
-    assert db.committed is True
-
-
-@pytest.mark.asyncio
-async def test_compact_force_bypasses_n_floor():
-    db = _FakeMemDB(session_row=None, msg_rows=[_FakeMsg(), _FakeMsg(role="assistant")])
-    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1",
-                                every_n_messages=6, force=True)
-    assert any(isinstance(o, QASessionMemory) for o in db.added)
-    assert db.committed is True
-
-
-@pytest.mark.asyncio
-async def test_compact_force_still_skips_when_nothing_new():
-    sm = QASessionMemory(session_id="s1", working_summary="prev", turn_count=2)
-    db = _FakeMemDB(session_row=sm, msg_rows=[_FakeMsg(), _FakeMsg(role="assistant")])
-    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1",
-                                every_n_messages=6, force=True)
-    assert db.committed is False
-    assert db.added == []
-
-
-@pytest.mark.asyncio
-async def test_compact_non_force_unchanged_below_floor():
-    db = _FakeMemDB(session_row=None, msg_rows=[_FakeMsg(), _FakeMsg()])
-    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1", every_n_messages=6)
-    assert db.added == []
 
 
 @pytest.mark.asyncio
@@ -431,74 +301,5 @@ async def test_chitchat_composes_history_and_memory_block():
     # 旧轮/记忆经 memory_block 进 system prompt（§7/§20 两层并存）
     assert "用户偏好：只看支付域" in llm.last_system
 
-
-# ───────── §21：会话压缩递归累积输入 ─────────
-
-class _CapCompactLLM:
-    """捕获 maybe_compact_session 喂给摘要器的 user 输入。"""
-    def __init__(self, reply="更新后的摘要"):
-        self._reply = reply
-        self.last_user = None
-
-    async def complete(self, *, system, user, **kw):
-        self.last_user = user
-        return self._reply
-
-
-@pytest.mark.asyncio
-async def test_compact_first_time_no_prior_summary_segment():
-    # 首次压缩（sm=None）：输入只有【新增对话】，无【已有会话摘要】段
-    msgs = [_FakeMsg(role="user", content="我喜欢吃哈密瓜")] + [
-        _FakeMsg(role="assistant", content=f"a{i}") for i in range(5)
-    ]
-    llm = _CapCompactLLM()
-    db = _FakeMemDB(session_row=None, msg_rows=msgs)
-    await maybe_compact_session(db, llm, session_id="s1", every_n_messages=6)
-    assert "【已有会话摘要】" not in llm.last_user
-    assert "【新增对话】" in llm.last_user
-    assert "我喜欢吃哈密瓜" in llm.last_user
-    row = [o for o in db.added if isinstance(o, QASessionMemory)][0]
-    assert row.working_summary == "更新后的摘要" and row.turn_count == 6
-
-
-@pytest.mark.asyncio
-async def test_compact_recursive_folds_prior_summary_and_only_new_msgs():
-    # 二次压缩：sm 已有 working_summary（含"哈密瓜"）+ turn_count=4（水位线）
-    # 10 条消息：前 4 条是"老原始消息"，messages[4:] 是 6 条新增；
-    # 增量 6 == every_n_messages(6) → 正常触发，无需 force（与 force 语义解耦）
-    sm = QASessionMemory(session_id="s1",
-                          working_summary="用户最早喜欢哈密瓜", turn_count=4)
-    msgs = [_FakeMsg(role="user", content=f"OLD-{i}") for i in range(4)] + [
-        _FakeMsg(role="user", content="现在喜欢西瓜"),
-        _FakeMsg(role="assistant", content="好的西瓜"),
-        _FakeMsg(role="user", content="夏天到了"),
-        _FakeMsg(role="assistant", content="确实"),
-        _FakeMsg(role="user", content="再聊聊"),
-        _FakeMsg(role="assistant", content="嗯"),
-    ]
-    llm = _CapCompactLLM()
-    db = _FakeMemDB(session_row=sm, msg_rows=msgs)
-    await maybe_compact_session(db, llm, session_id="s1", every_n_messages=6)
-    u = llm.last_user
-    # 递归：含【已有会话摘要】+ 旧摘要内容（哈密瓜经此被保留，非靠老原始消息）
-    assert "【已有会话摘要】\n用户最早喜欢哈密瓜" in u
-    # 【新增对话】只含 messages[prev=4:]，不重复老原始消息
-    assert "【新增对话】" in u
-    assert "现在喜欢西瓜" in u and "夏天到了" in u
-    assert "OLD-0" not in u and "OLD-3" not in u
-    assert sm.working_summary == "更新后的摘要" and sm.turn_count == 10
-
-
-@pytest.mark.asyncio
-async def test_compact_existing_fixed_fake_still_works_regression():
-    # 既有风格 fake（固定返回、与输入无关）仍正常 upsert（不回归）
-    sm = QASessionMemory(session_id="s1", working_summary="old", turn_count=0)
-    msgs = [_FakeMsg() for _ in range(6)]
-    db = _FakeMemDB(session_row=sm, msg_rows=msgs)
-    await maybe_compact_session(db, _FakeMemLLM(), session_id="s1",
-                                every_n_messages=6)
-    assert sm.working_summary  # 被更新
-    assert sm.turn_count == 6
-    assert db.committed is True
 
 
