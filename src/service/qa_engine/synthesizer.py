@@ -81,7 +81,8 @@ class QASynthesizer:
     ) -> SynthesizedAnswer:
         """v1.2 chit-chat 闲聊路径：用专属 prompt 调 LLM，返回单段 chit-chat section。
         设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.4；记忆注入见 [[记忆系统-设计]] §7。
-        §20：带最近历史原文（旧轮由 memory_block 的 working_summary 覆盖）。"""
+        §20：带最近历史原文（旧轮由 memory_block 头部的 session summary 顶替，
+        S5 已落实读侧 composer 在 qa_router 5b/5c 段）。"""
         reply = await self.llm.complete(
             system=with_memory_block(_CHIT_CHAT_SYSTEM, memory_block),
             user=build_chitchat_user_prompt(ctx.question, history),
@@ -108,7 +109,8 @@ class QASynthesizer:
     ) -> SynthesizedAnswer:
         """v1.2 chit-chat 流式版：边收 LLM token 边调 on_token。
         设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.6；记忆注入见 [[记忆系统-设计]] §7。
-        §20：带最近历史原文（旧轮由 memory_block 的 working_summary 覆盖）。"""
+        §20：带最近历史原文（旧轮由 memory_block 头部的 session summary 顶替，
+        S5 已落实读侧 composer 在 qa_router 5b/5c 段）。"""
         parts: list[str] = []
         async for tok in self.llm.complete_stream(
             system=with_memory_block(_CHIT_CHAT_SYSTEM, memory_block),

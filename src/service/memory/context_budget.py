@@ -1,7 +1,8 @@
 """会话上下文 token 预算 / 历史裁剪（spec §18）。纯函数，无 DB/IO。
 
 对齐 Claude Code：按模型窗口 token 压力决定保留多少最近原文轮；
-更早轮由 system 记忆块的 working_summary+focus 顶替（不在此模块，在 recall）。
+更早轮由 system 记忆块头部的 session summary 顶替（S5 在 qa_router 5b/5c
+读侧 composer 实现：read_session_summary 拼到 memory_block 头部）。
 """
 from __future__ import annotations
 
