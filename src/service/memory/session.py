@@ -339,3 +339,118 @@ async def read_messages_for_session(
     # persist_messages 同一调用写 user+assistant 极可能同秒（strftime 截微秒）
     out.sort(key=lambda m: (m.created_at, 0 if m.role == "user" else 1))
     return out
+
+
+# ─── S7: fs-back feedback helpers（§8.4）─────────────────────────────────────
+
+
+@dataclass
+class _FsFeedback:
+    """fs-back feedback 鸭子类型（duck-type 等价于 S6 已删的 QAFeedback ORM）。
+
+    设计：[[文件式记忆重构-设计]] §8.4（S7 修 S6 §7.11 #1 broken stub）。
+    一条 assistant message 对应 0 或 1 feedback（覆盖式更新；用户可改投票 / 取消）。
+
+    字段：
+    - vote: "up" / "down" / None（取消反馈）
+    - user_id: 反馈人 user.id
+    - comment: optional 文字反馈
+    - created_at: UTC-aware datetime（write 端归一化保证）
+    """
+    vote: str | None
+    user_id: int
+    comment: str | None
+    created_at: datetime
+
+
+def _feedback_uri(user_id: int, session_id: str, msg_id: str) -> str:
+    """URI 派生：ke://u/{uid}/session/{sid}/messages/{msg_id}.feedback.md（§8.4）。
+
+    与 message 同目录，`.feedback.md` 后缀隐含与 {msg_id}.md 关联；
+    delete_session recursive rm（§8.3）时一同被清；
+    需配套 read_messages_for_session 加 `.feedback.md` 过滤避误读为 message。
+    """
+    return f"ke://u/{user_id}/session/{session_id}/messages/{msg_id}.feedback.md"
+
+
+async def write_feedback_to_fs(
+    fs: MemoryFS, *, user_id: int, session_id: str, msg_id: str,
+    vote: str | None, comment: str | None = None,
+    created_at: datetime | None = None,
+) -> None:
+    """写一条 feedback 到 fs（覆盖式更新；新 feedback 覆盖旧文件）。
+
+    设计：[[文件式记忆重构-设计]] §8.4。
+    qa_router post_feedback endpoint 用此 helper 替换 S6 后的 404 stub。
+
+    Args:
+        fs: S1 文件存储层
+        user_id / session_id / msg_id: 路径派生
+        vote: "up" / "down" / None（取消反馈）— None 序列化为 YAML null
+        comment: optional 文字反馈（写入 body）
+        created_at: 不传则用当前 UTC；naive datetime 视作 UTC；非 UTC tz-aware 转 UTC
+                    （同 S6 write_message_to_fs I1 fix 模式，保证 frontmatter Z 字符串正确）
+    """
+    # 时区归一为 UTC-aware（同 write_message_to_fs 模式）
+    if created_at is None:
+        created_at = datetime.now(timezone.utc)
+    elif created_at.tzinfo is None:
+        # naive 视作 UTC（与 S4 _now_iso_z / S6 I1 fix 同模式）
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    else:
+        # 非 UTC tz-aware → 归一为 UTC（防错标 Z）
+        created_at = created_at.astimezone(timezone.utc)
+
+    fm: dict = {
+        "vote": vote,            # 显式 None 允许（取消反馈）— YAML 序列化为 null
+        "user_id": user_id,
+        "created_at": created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    # body 末尾换行（S2 _render_frontmatter 约定）；comment 可能 None
+    body = (comment or "") + "\n"
+    raw = _render_frontmatter(fm, body)
+    uri = _feedback_uri(user_id, session_id, msg_id)
+    # fs.write 原子（S1 os.replace POSIX rename）；覆盖式自然达成（同路径 → 替换）
+    await fs.write(uri, raw)
+
+
+async def read_feedback_for_message(
+    fs: MemoryFS, *, user_id: int, session_id: str, msg_id: str,
+) -> _FsFeedback | None:
+    """读单条 message 的 feedback；不存在返 None（首次访问，正常路径）。
+
+    设计：[[文件式记忆重构-设计]] §8.4。
+    单文件损坏（缺字段 / fromisoformat 抛）→ debug 返 None（§8.5 中层失败语义）。
+    """
+    uri = _feedback_uri(user_id, session_id, msg_id)
+    try:
+        raw = await fs.read(uri)
+        fm, body = _split_frontmatter(raw)
+        # vote 字段：允许 None / str；其他类型容错为 None
+        vote = fm.get("vote")
+        if vote is not None and not isinstance(vote, str):
+            vote = None
+        # user_id 必须 int — 损坏文件直接返 None
+        uid_val = fm.get("user_id")
+        if not isinstance(uid_val, int):
+            return None
+        # created_at 必须可解析 ISO — 损坏 / 缺失返 None
+        created_at_str = fm.get("created_at")
+        if not isinstance(created_at_str, str):
+            return None
+        created_at = datetime.fromisoformat(created_at_str)
+        # body strip 后为 "" 时视作无 comment（None）；非 "" 才入 comment
+        comment = body.strip() if isinstance(body, str) and body.strip() else None
+        return _FsFeedback(
+            vote=vote,
+            user_id=uid_val,
+            comment=comment,
+            created_at=created_at,
+        )
+    except MemoryNotFound:
+        # 该 message 还没 feedback（首次 GET / 用户未投票）— 正常路径
+        return None
+    except Exception as exc:
+        # 其他异常（fromisoformat ValueError / fs 权限 / 损坏 YAML 等）— 中层兜底
+        _log.debug("read_feedback_for_message failed: %r", exc)
+        return None
