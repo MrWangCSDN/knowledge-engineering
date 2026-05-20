@@ -463,3 +463,121 @@ async def test_compact_then_read_returns_body_strip_frontmatter(tmp_path):
 
     # 链路一致：write 时 body=summary+"\n"，read 时 strip → 等于 LLM 输出原文
     assert body == "端到端摘要正文"
+
+
+# ─── S6 T1: fs message helpers 单元测试（§7.9 场景 1-6） ─────────────
+
+from datetime import datetime, timezone, timedelta as _td
+from src.service.memory.session import (
+    _FsMessage, write_message_to_fs, read_messages_for_session,
+    _messages_dir_uri, _message_uri,
+)
+
+
+@pytest.mark.asyncio
+async def test_write_message_to_fs_user(tmp_path):
+    """write_message_to_fs 写 user 消息：frontmatter.role=user + body=content + created_at ISO（§7.9 场景 1）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    ts = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_abc",
+        role="user", content="帮我看 PaymentGateway", created_at=ts,
+    )
+    raw = await fs.read("ke://u/7/session/sess_x/messages/msg_abc.md")
+    from src.service.memory.memgen import _split_frontmatter
+    fm, body = _split_frontmatter(raw)
+    assert fm["role"] == "user"
+    assert fm["created_at"] == "2026-05-21T10:00:00Z"
+    assert "sections" not in fm
+    assert "msg_metadata" not in fm
+    assert body.strip() == "帮我看 PaymentGateway"
+
+
+@pytest.mark.asyncio
+async def test_write_message_to_fs_assistant_with_sections_and_metadata(tmp_path):
+    """write_message_to_fs 写 assistant + sections + msg_metadata（§7.9 场景 2）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    ts = datetime(2026, 5, 21, 10, 0, 5, tzinfo=timezone.utc)
+    sections = [
+        {"type": "overview", "title": "概览", "content": "正文", "references": []},
+    ]
+    metadata = {
+        "entry_points": ["PaymentGateway.charge"],
+        "cited_entities": ["method:PaymentGateway.retry"],
+        "token_usage": 1234,
+    }
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_def",
+        role="assistant", content=None,
+        sections=sections, msg_metadata=metadata, created_at=ts,
+    )
+    raw = await fs.read("ke://u/7/session/sess_x/messages/msg_def.md")
+    from src.service.memory.memgen import _split_frontmatter
+    fm, body = _split_frontmatter(raw)
+    assert fm["role"] == "assistant"
+    assert fm["sections"] == sections
+    assert fm["msg_metadata"] == metadata
+    assert body.strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_read_messages_for_session_dir_not_exists_returns_empty(tmp_path):
+    """read_messages_for_session 目录不存在 → 返 []（§7.9 场景 3）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    result = await read_messages_for_session(fs, user_id=7, session_id="sess_new")
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_read_messages_for_session_sorts_by_created_at(tmp_path):
+    """read_messages_for_session 多文件按 created_at 升序返（§7.9 场景 4）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    t1 = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 5, 21, 10, 0, 5, tzinfo=timezone.utc)
+    # msg_b 文件名字典序在 msg_a 之后，但写入时间更早
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_b",
+        role="user", content="第一条", created_at=t1,
+    )
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_a",
+        role="assistant", content="第二条", created_at=t2,
+    )
+    result = await read_messages_for_session(fs, user_id=7, session_id="sess_x")
+    assert len(result) == 2
+    assert result[0].content == "第一条"
+    assert result[1].content == "第二条"
+    assert result[0].created_at < result[1].created_at
+
+
+@pytest.mark.asyncio
+async def test_read_messages_for_session_skips_corrupt_file(tmp_path):
+    """read_messages_for_session 单文件损坏 → _log.debug 跳过，其他文件正常返（§7.9 场景 5）。"""
+    fs = MemoryFS(root=str(tmp_path))
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_good",
+        role="user", content="正常消息",
+        created_at=datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc),
+    )
+    # 缺 role 字段的损坏文件
+    bad_raw = "---\ncreated_at: \"2026-05-21T11:00:00Z\"\n---\n损坏消息\n"
+    await fs.write("ke://u/7/session/sess_x/messages/msg_bad.md", bad_raw)
+
+    result = await read_messages_for_session(fs, user_id=7, session_id="sess_x")
+    assert len(result) == 1
+    assert result[0].content == "正常消息"
+
+
+def test_fs_message_duck_type_contract():
+    """_FsMessage 鸭子契约：4 属性齐备 + created_at 是 datetime（§7.9 场景 6）。"""
+    ts = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    m = _FsMessage(
+        role="assistant",
+        content="正文",
+        msg_metadata={"cited_entities": ["e1"]},
+        created_at=ts,
+    )
+    assert m.role == "assistant"
+    assert m.content == "正文"
+    assert m.msg_metadata == {"cited_entities": ["e1"]}
+    assert isinstance(m.created_at, datetime)
