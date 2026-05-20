@@ -11,7 +11,7 @@ import logging
 import re
 from typing import Any
 
-from sqlalchemy import select, or_
+from sqlalchemy import select
 
 from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
 from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM, _USER_MEM_INTENT_SYSTEM
@@ -74,7 +74,7 @@ def detect_explicit_memory(question: str) -> str | None:
 # ⚠️ 这些是「记住」的超串，调用方（_make_memory_writer）必须先调本检测器、
 #    后调通用 detect_explicit_memory，否则「记住这个工程：X」会被误判为 user 级。
 _PROJECT_TRIGGERS = ("记住这个工程", "记住本工程", "记住该工程", "工程记住")
-_PROJECT_MEMORY_LIMIT = 20    # 工程记忆 S1 单次 recall 上限（spec §19）
+
 
 
 def detect_explicit_project_memory(question: str) -> str | None:
@@ -136,8 +136,11 @@ async def recall_memory_block(
         # MemoryL0Store._client 是 weaviate v4 client；MemoryRecaller 直接接收 client
         recaller = MemoryRecaller(embedder=_DefaultEmbedder(), weaviate_client=store._client)
         return await recaller.recall_memory_block(fs, query, user_id, top_k=top_k)
-    except Exception:
-        # S3 自包失败语义：任何异常 → 返 ""（with_memory_block 走零开销不注入路径）
+    except Exception as exc:
+        # S3 自包失败语义：任何异常 → 返 ""（with_memory_block 走零开销不注入路径）。
+        # 加 debug log 让运维在 Weaviate 不可达 / env 解析失败时有迹可循（修 T4 review I1）；
+        # MemoryRecaller 内部各步已自记 debug log，本层覆盖 wrapper 构造期的 ConnectionError 等。
+        _log.debug("recall_memory_block wrapper failed: %r", exc)
         return ""
 
 
