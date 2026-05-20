@@ -511,11 +511,12 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> None:
-    """删除会话：从 DB 删 qa_sessions 行；fs 端 message 文件保留 orphan（S7 清理）。
+    """删除会话：从 DB 删 qa_sessions 行 + fs 级联清理 session 目录。
 
-    S6 注：qa_messages / qa_feedback 表已删（§7.6），DB 不再级联消息/反馈；
-    fs 端 ke://u/{uid}/session/{sid}/messages/ 文件在 session 被删后成 orphan，
-    暂留待 S7 引入 fs 端级联清理（同 §7.11 #N 注记）。
+    设计：[[文件式记忆重构-设计]] §8.3（S7 修 S6 §7.11 #2 orphan 累积）。
+    DB delete 先（业务核心 / 事务一致性）；fs.rm recursive 后（best-effort，
+    失败 debug 静默，不影响 DB delete 主业务，与 §6.5/§7.7 三层防御一致）。
+    清理范围：ke://u/{uid}/session/{sid}/ 整目录（含 summary.md / messages/）。
     """
     sess = await db.get(QASession, session_id)
     if not sess or sess.project_id != project_id or sess.user_id != user.id:
@@ -523,6 +524,21 @@ async def delete_session(
 
     await db.delete(sess)
     await db.commit()
+
+    # S7: fs 级联清理（best-effort，失败不抛）
+    try:
+        from src.service.memory.vfs import MemoryFS as _MemFS, MemoryNotFound
+        fs = _MemFS()
+        await fs.rm(f"ke://u/{user.id}/session/{session_id}", recursive=True)
+    except MemoryNotFound:
+        # session 目录还没创建（首压前 / 仅 DB row 无 fs）— 正常路径，静默继续
+        pass
+    except Exception:
+        # 其他异常 → 中层失败语义（§8.5）：debug + 静默；DB 主业务已成功
+        _log.debug(
+            "delete_session fs cleanup failed for session %s, silently ignored",
+            session_id, exc_info=True,
+        )
 
 
 # ─── 异步标题总结 ───────────────────────────────────────────────────────────

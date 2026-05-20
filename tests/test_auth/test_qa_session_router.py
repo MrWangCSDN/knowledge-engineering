@@ -184,10 +184,11 @@ def test_get_session_other_user_forbidden(client, seeded_session):
 # ───────── DELETE /sessions/{sid} ─────────
 
 def test_delete_session_cascades_messages(client, seeded_session, session_maker):
-    """删 session 应该成功；DB session 记录删除。
+    """delete_session 删 DB row 后 fs 目录级联清理（§8.3 S7 修）。
 
-    S6 改造（§7.4）：qa_messages 表已删（S6 Alembic migration）。
-    仅验证 QASession DB 记录被删除；fs 消息文件需 fs.delete 另行清理（下一迭代）。
+    S6 → S7 路径：S6 后 fs message 文件成 orphan；S7 加 fs.rm recursive 级联
+    清理整目录。本测试保留 DB delete 主断言；fs 级联断言由
+    test_delete_session_cascades_fs_cleanup 专项覆盖。
     """
     token, _ = _login(client)
     r = client.delete(
@@ -209,6 +210,66 @@ def test_delete_session_404(client):
     token, _ = _login(client)
     r = client.delete("/projects/deposit/qa/sessions/no-such", headers=_auth(token))
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_session_cascades_fs_cleanup(client, seeded_session, monkeypatch, tmp_path):
+    """delete_session 调 fs.rm 级联清理 session 目录（§8.3 S7）。
+
+    先 fs.write session 目录下若干文件（summary + messages），调 DELETE endpoint，
+    断言 fs 目录消失。MemoryFS root 指向 tmp_path 避污染仓库 .ke-memory/。
+    """
+    # MemoryFS 默认 root 由 KE_MEM_ROOT env 派生；测试期指向 tmp_path
+    monkeypatch.setenv("KE_MEM_ROOT", str(tmp_path))
+
+    # 准备 fs：先写 session 目录下若干文件
+    from src.service.memory.vfs import MemoryFS
+    fs = MemoryFS()
+    # seeded_session 返回 session_id 字符串；user_id 经 _login 获取
+    session_id = seeded_session
+    token, user_id = _login(client)
+    await fs.write(
+        f"ke://u/{user_id}/session/{session_id}/summary.md",
+        "---\nturn_count: 2\n---\n会话摘要\n",
+    )
+    await fs.write(
+        f"ke://u/{user_id}/session/{session_id}/messages/msg_test_a.md",
+        "---\nrole: user\ncreated_at: \"2026-05-22T10:00:00Z\"\n---\nuser msg\n",
+    )
+
+    # 调 DELETE endpoint
+    r = client.delete(
+        f"/projects/deposit/qa/sessions/{session_id}",
+        headers=_auth(token),
+    )
+    assert r.status_code == 204
+
+    # 验证 fs 目录消失
+    assert not await fs.exists(f"ke://u/{user_id}/session/{session_id}/summary.md")
+    assert not await fs.exists(f"ke://u/{user_id}/session/{session_id}/messages/msg_test_a.md")
+
+
+@pytest.mark.asyncio
+async def test_delete_session_fs_not_exists_ok(client, seeded_session, monkeypatch, tmp_path):
+    """delete_session 在 fs 目录不存在时不抛（首压前 session / 仅 DB row 无 fs，§8.3）。
+
+    seeded_session fixture 仅 seed DB 不 seed fs；调 DELETE endpoint 应 204
+    （MemoryNotFound 被中层 catch + continue）。
+    """
+    monkeypatch.setenv("KE_MEM_ROOT", str(tmp_path))
+    session_id = seeded_session
+    token, user_id = _login(client)
+
+    # fs 目录从未创建（fixture 仅 DB seed）
+    from src.service.memory.vfs import MemoryFS
+    fs = MemoryFS()
+    assert not await fs.exists(f"ke://u/{user_id}/session/{session_id}")
+
+    r = client.delete(
+        f"/projects/deposit/qa/sessions/{session_id}",
+        headers=_auth(token),
+    )
+    assert r.status_code == 204
 
 
 def test_delete_other_user_forbidden(client, seeded_session):
