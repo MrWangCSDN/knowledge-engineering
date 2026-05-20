@@ -207,6 +207,79 @@ class MemoryRecaller:
         else:
             view.data.replace(uuid=obj_uuid, properties=props, vector=vec)
 
+    # ── 公开 API #2 ──────────────────────────────────────────────
+    async def recall_memory_block(
+        self,
+        fs: MemoryFS,
+        query: str,
+        user_id: int,
+        *,
+        top_k: int = 5,
+    ) -> str:
+        """召回当前用户的 L0 → 拼装 system-prompt 记忆块（§4.4）。
+
+        S3 自包失败语义：embed / Weaviate query / 单 hit L1.read 失败全 try/except
+        → 返 ""（with_memory_block 见空跳过注入路径 = 主答零开销）。
+        「记忆失败绝不影响主答」在 S3 自身保证，调用方 try/except 不再必需（但
+        §22 的 qa_router 防御性 try 仍保留，§4.5 设计）。
+        """
+        tenant = str(user_id)
+
+        # 1) embed query（失败即返 ""）
+        try:
+            q_vec = await self._embedder.embed(query)
+        except Exception as exc:
+            _log.debug("recall: embed failed %r", exc)
+            return ""
+
+        # 2) tenant-scoped 近邻搜索（失败即返 ""）
+        try:
+            coll = self._weaviate_client.collections.get(_COLLECTION_NAME)
+            view = coll.with_tenant(tenant)
+            result = view.query.near_vector(near_vector=q_vec, limit=top_k)
+            hits = result.objects
+        except Exception as exc:
+            _log.debug("recall: weaviate query failed %r", exc)
+            return ""
+
+        # 3) 装配 parts：file hit 直拼 body；dir hit 同目录 fs.read .overview.md 展开
+        parts: list[str] = []
+        for h in hits:
+            try:
+                props = h.properties
+                kind = props.get("kind")
+                body = (props.get("body") or "").strip()
+                if not body:
+                    # 空 body 极少发生（S3 不写空 body；防御性跳过）
+                    continue
+                if kind == "file":
+                    parts.append(body)
+                else:
+                    # kind == "dir"：派生同目录 .overview.md 路径
+                    dir_l0_uri = props.get("uri") or ""
+                    if not dir_l0_uri.endswith("/" + _ABSTRACT_SUFFIX):
+                        # 防御：理论上 dir 类 uri 必以 "/.abstract.md" 结尾
+                        parts.append(body)
+                        continue
+                    ovr_uri = _overview_uri_for_dir_l0(dir_l0_uri)
+                    try:
+                        ovr_raw = await fs.read(ovr_uri)
+                        _meta, ovr_body = _split_frontmatter(ovr_raw)
+                        parts.append(body + "\n---\n" + ovr_body.strip())
+                    except MemoryNotFound:
+                        # L1 缺失：fallback 仅用 L0（不连累其他 hits）
+                        _log.debug("recall: overview missing %r, fallback L0", ovr_uri)
+                        parts.append(body)
+            except Exception as exc:
+                _log.debug("recall: hit assemble failed: %r", exc)
+                # 单 hit 装配失败不连累其他 hits
+                continue
+
+        # 4) 空 → "" ；非空 → "- " 起首的 bullet 拼装（§4.4 末尾设计）
+        if not parts:
+            return ""
+        return "\n\n".join(f"- {p}" for p in parts)
+
 
 class _DefaultEmbedder:
     """KE 既有 get_embedding 的 thin async wrapper。

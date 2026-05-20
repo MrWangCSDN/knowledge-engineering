@@ -478,3 +478,95 @@ async def test_index_skips_non_abstract_uri(tmp_path, caplog):
     assert emb.calls == 1
     # 日志显式记 skip non-abstract
     assert any("skip non-abstract" in r.message for r in caplog.records)
+
+
+# ── Task 3：recall_memory_block 场景 ⑥⑦⑧⑨(recall) ─────────────
+@pytest.mark.asyncio
+async def test_recall_multi_tenant_physical_isolation(tmp_path):
+    """场景⑥：tenant 物理隔离 — user 7 索引的内容、user 8 召回零结果。"""
+    fs = _fs(tmp_path)
+    rec, emb, wv = _make_recaller()
+    # user 7 写入 + 索引
+    abs7 = "ke://u/7/global/identity/u7-name.abstract.md"
+    h7 = _sha256_hex("u7 secret\n")
+    await fs.write(abs7, _file_l0_md(h7, "u7 secret"))
+    await rec.index_changed(fs, [abs7])
+
+    # user 8 完全没有自己的索引；用 query="secret" 召回
+    block = await rec.recall_memory_block(fs, "secret", user_id=8, top_k=5)
+    # 物理隔离 = user 8 看不到 user 7 的任何对象 → block 为 ""
+    assert block == ""
+    # 反之，user 7 自己召回有结果
+    block7 = await rec.recall_memory_block(fs, "secret", user_id=7, top_k=5)
+    assert "u7 secret" in block7
+
+
+@pytest.mark.asyncio
+async def test_recall_dir_l0_hit_expands_l1(tmp_path):
+    """场景⑦：目录 L0 命中 → 同目录 .overview.md(L1) 经 fs.read 展开拼接。"""
+    fs = _fs(tmp_path)
+    rec, emb, wv = _make_recaller()
+    # 在 identity 子树写：目录 L0（.abstract.md）+ 目录 L1（.overview.md）
+    dir_l0_uri = "ke://u/7/global/identity/.abstract.md"
+    dir_l1_uri = "ke://u/7/global/identity/.overview.md"
+    inputs_hash = _sha256_hex("aggregated\n")
+    await fs.write(dir_l0_uri, _dir_l0_md(inputs_hash, "identity 摘要"))
+    await fs.write(dir_l1_uri, _render_frontmatter(
+        {"inputs_hash": inputs_hash}, "L1 导航：name / alias\n"
+    ))
+    await rec.index_changed(fs, [dir_l0_uri])    # 只把目录 L0 灌入 Weaviate
+
+    block = await rec.recall_memory_block(fs, "identity", user_id=7, top_k=5)
+    # 应同时含 L0（"identity 摘要"）与 L1（"L1 导航：name / alias"）
+    assert "identity 摘要" in block
+    assert "L1 导航：name / alias" in block
+
+
+@pytest.mark.asyncio
+async def test_recall_l1_missing_fallback_to_l0_only(tmp_path):
+    """场景⑧：dir L0 命中但 .overview.md 不存在 → 该 hit fallback 到仅 L0；
+    其他 hits 不受影响。
+    """
+    fs = _fs(tmp_path)
+    rec, emb, wv = _make_recaller()
+    dir_l0_uri = "ke://u/7/global/identity/.abstract.md"
+    file_l0_uri = "ke://u/7/global/identity/name.abstract.md"
+    h_dir = _sha256_hex("dir agg\n")
+    h_file = _sha256_hex("名字是李龙飞\n")
+    # 写目录 L0 + 文件 L0；**不写**目录 .overview.md（模拟 L1 缺失）
+    await fs.write(dir_l0_uri, _dir_l0_md(h_dir, "identity 子树摘要"))
+    await fs.write(file_l0_uri, _file_l0_md(h_file, "名字是李龙飞"))
+    await rec.index_changed(fs, [dir_l0_uri, file_l0_uri])
+
+    block = await rec.recall_memory_block(fs, "identity", user_id=7, top_k=5)
+    # block 含 dir L0 内容（fallback：仅 L0，无 L1 段）+ file L0 内容（正常）
+    assert "identity 子树摘要" in block
+    assert "名字是李龙飞" in block
+    # block 不应含 "L1 导航" 类字样（因为 L1 缺失）
+    assert "L1 导航" not in block
+
+
+@pytest.mark.asyncio
+async def test_recall_embed_error_returns_empty_string(tmp_path):
+    """场景⑨（recall 侧）：embed 抛错 → recall_memory_block 返 ""（不抛）。"""
+    fs = _fs(tmp_path)
+
+    class _AlwaysBoomEmbedder:
+        async def embed(self, text: str) -> list[float]:
+            raise RuntimeError("embed always boom")
+
+    rec = MemoryRecaller(embedder=_AlwaysBoomEmbedder(), weaviate_client=_FakeWeaviateClient())
+    # 不需要先 index，直接 recall（embed query 时抛错）
+    block = await rec.recall_memory_block(fs, "anything", user_id=7, top_k=5)
+    assert block == ""
+
+
+@pytest.mark.asyncio
+async def test_recall_returns_empty_when_no_hits(tmp_path):
+    """recall 兜底：tenant 中无对象 → near_vector 返空 → block 为 ""（with_memory_block
+    走零开销不注入路径，§4.4 末尾设计）。"""
+    fs = _fs(tmp_path)
+    rec, emb, wv = _make_recaller()
+    # 完全没有 index_changed 任何 uri
+    block = await rec.recall_memory_block(fs, "anything", user_id=7, top_k=5)
+    assert block == ""
