@@ -64,63 +64,9 @@ async def test_read_session_summary_corrupt_frontmatter_returns_body(tmp_path):
     assert result == "用户讨论 PaymentGateway。"
 
 
-from src.service.memory.session import SessionCompactor
+from src.service.memory.session import SessionCompactor, write_message_to_fs
 
-from dataclasses import dataclass
-from typing import Any
-
-
-@dataclass
-class _FakeMessage:
-    """fake QAMessage row（duck-type：role / content / msg_metadata / created_at）。
-
-    设计：仅满足 SessionCompactor.compact step 1 select 之后的 ORM-like
-    属性访问 + step 7 _extract_focus_entity_ids 需要的 msg_metadata 字段。
-    """
-    role: str
-    content: str
-    msg_metadata: dict | None = None
-    created_at: Any = None
-
-
-class _FakeMsgScalars:
-    """fake .scalars() 返回值：仅暴露 .all() → list[_FakeMessage]。"""
-    def __init__(self, rows: list[_FakeMessage]):
-        self._rows = rows
-
-    def all(self) -> list[_FakeMessage]:
-        return self._rows
-
-
-class _FakeMsgResult:
-    """fake db.execute() 返回值：仅暴露 .scalars() → _FakeMsgScalars。"""
-    def __init__(self, rows: list[_FakeMessage]):
-        self._rows = rows
-
-    def scalars(self) -> _FakeMsgScalars:
-        return _FakeMsgScalars(self._rows)
-
-
-class _FakeDB:
-    """fake AsyncSession：仅响应 execute(select(QAMessage).where(...).order_by(...))。
-
-    不实现 commit/add/flush；S5 fs 落盘不走 DB 写路径，DB 仅读 QAMessage（S6 才迁）。
-    """
-    def __init__(self, messages: list[_FakeMessage]):
-        self._messages = messages
-
-    async def execute(self, stmt) -> _FakeMsgResult:
-        # stmt 是 SQLAlchemy select 表达式，我们不解析（fake 只服务 compact 的单条 select）
-        # 返回固定 messages（每次测试单独构造 _FakeDB(messages=...)）
-        return _FakeMsgResult(self._messages)
-
-
-def _msgs(*roles_contents: tuple[str, str]) -> list[_FakeMessage]:
-    """便捷构造一批 fake message。
-
-    用法：_msgs(("user", "你好"), ("assistant", "你好！"), ...)
-    """
-    return [_FakeMessage(role=r, content=c) for r, c in roles_contents]
+from datetime import datetime, timezone, timedelta as _td
 
 
 class _FakeLLM:
@@ -159,11 +105,18 @@ async def test_compact_first_time_writes_new_summary(tmp_path):
     断言：frontmatter.turn_count == 6，body 含 LLM 输出。
     """
     fs = MemoryFS(root=str(tmp_path))
-    db = _FakeDB(_msgs(*[("user", f"q{i}") if i % 2 == 0 else ("assistant", f"a{i}") for i in range(6)]))
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(6):
+        role = "user" if i % 2 == 0 else "assistant"
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_first", msg_id=f"msg_{i:03d}",
+            role=role, content=f"q{i}" if role == "user" else f"a{i}",
+            created_at=base + _td(seconds=i),
+        )
     llm = _FakeLLM(response="用户讨论了 6 条消息，主要话题是 q0/q2/q4。")
     compactor = SessionCompactor(llm)
 
-    await compactor.compact(fs, db, user_id=7, session_id="sess_first", every_n_messages=6)
+    await compactor.compact(fs, user_id=7, session_id="sess_first", every_n_messages=6)
 
     # 断言文件已写
     uri = "ke://u/7/session/sess_first/summary.md"
@@ -203,14 +156,18 @@ async def test_compact_recursive_folds_prior_summary_and_only_new_msgs(tmp_path)
     await fs.write(uri, prev_content)
 
     # 12 条消息：前 6 已被压缩进 prev_summary；后 6 是新增（带新事实）
-    msgs = [_FakeMessage(role="user" if i % 2 == 0 else "assistant",
-                          content=f"老消息 {i}" if i < 6 else f"新消息 {i}-讨论西瓜")
-            for i in range(12)]
-    db = _FakeDB(msgs)
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(12):
+        role = "user" if i % 2 == 0 else "assistant"
+        content = f"老消息 {i}" if i < 6 else f"新消息 {i}-讨论西瓜"
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_x", msg_id=f"msg_{i:03d}",
+            role=role, content=content, created_at=base + _td(seconds=i),
+        )
     llm = _FakeLLM(response="更新后摘要：用户偏好哈密瓜+西瓜")
     compactor = SessionCompactor(llm)
 
-    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+    await compactor.compact(fs, user_id=7, session_id="sess_x", every_n_messages=6)
 
     # convo 包含两段
     assert len(llm.calls) == 1
@@ -239,12 +196,16 @@ async def test_compact_skips_below_floor(tmp_path):
     早退（不读 fs，不调 LLM，不写）。
     """
     fs = MemoryFS(root=str(tmp_path))
-    msgs = _msgs(*[("user", f"q{i}") for i in range(5)])  # 5 条
-    db = _FakeDB(msgs)
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(5):
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_x", msg_id=f"msg_{i:03d}",
+            role="user", content=f"q{i}", created_at=base + _td(seconds=i),
+        )
     llm = _FakeLLM()
     compactor = SessionCompactor(llm)
 
-    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+    await compactor.compact(fs, user_id=7, session_id="sess_x", every_n_messages=6)
 
     # LLM 未调用 / 文件未写
     assert len(llm.calls) == 0
@@ -265,12 +226,16 @@ async def test_compact_skips_when_no_new_messages_since_last(tmp_path):
         "旧\n",
     )
     await fs.write(uri, prev)
-    msgs = _msgs(*[("user", f"q{i}") for i in range(10)])  # 10 条
-    db = _FakeDB(msgs)
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(10):
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_x", msg_id=f"msg_{i:03d}",
+            role="user", content=f"q{i}", created_at=base + _td(seconds=i),
+        )
     llm = _FakeLLM()
     compactor = SessionCompactor(llm)
 
-    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+    await compactor.compact(fs, user_id=7, session_id="sess_x", every_n_messages=6)
 
     # LLM 未调用
     assert len(llm.calls) == 0
@@ -286,12 +251,19 @@ async def test_compact_force_bypasses_n_floor(tmp_path):
     floor=2、min_delta=1 → 进 LLM 路径（首压：prev_turn_count=0）。
     """
     fs = MemoryFS(root=str(tmp_path))
-    msgs = _msgs(("user", "短"), ("assistant", "回"))
-    db = _FakeDB(msgs)
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_000",
+        role="user", content="短", created_at=base,
+    )
+    await write_message_to_fs(
+        fs, user_id=7, session_id="sess_x", msg_id="msg_001",
+        role="assistant", content="回", created_at=base + _td(seconds=1),
+    )
     llm = _FakeLLM(response="强制压缩摘要")
     compactor = SessionCompactor(llm)
 
-    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6, force=True)
+    await compactor.compact(fs, user_id=7, session_id="sess_x", every_n_messages=6, force=True)
 
     assert len(llm.calls) == 1
     uri = "ke://u/7/session/sess_x/summary.md"
@@ -309,12 +281,17 @@ async def test_compact_llm_returns_empty_skips_write(tmp_path):
     LLM 偶发返空（限流 / token bug）不应破坏既有 summary.md。
     """
     fs = MemoryFS(root=str(tmp_path))
-    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
-    db = _FakeDB(msgs)
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(6):
+        role = "user" if i % 2 == 0 else "assistant"
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_x", msg_id=f"msg_{i:03d}",
+            role=role, content=f"q{i}", created_at=base + _td(seconds=i),
+        )
     llm = _FakeLLM(response="   ")  # 全空白 → strip 后变 "" → 早退
     compactor = SessionCompactor(llm)
 
-    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+    await compactor.compact(fs, user_id=7, session_id="sess_x", every_n_messages=6)
 
     # LLM 被调用 1 次（说明走到 step 6）
     assert len(llm.calls) == 1
@@ -338,12 +315,17 @@ async def test_compact_with_corrupt_frontmatter_self_heals(tmp_path):
     bad = "---\n: : : invalid yaml :::\n---\n旧 body\n"
     await fs.write(uri, bad)
 
-    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
-    db = _FakeDB(msgs)
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(6):
+        role = "user" if i % 2 == 0 else "assistant"
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_x", msg_id=f"msg_{i:03d}",
+            role=role, content=f"q{i}", created_at=base + _td(seconds=i),
+        )
     llm = _FakeLLM(response="自愈后新摘要")
     compactor = SessionCompactor(llm)
 
-    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+    await compactor.compact(fs, user_id=7, session_id="sess_x", every_n_messages=6)
 
     # LLM 被调用（说明自愈走通）
     assert len(llm.calls) == 1
@@ -363,22 +345,26 @@ async def test_compact_persists_focus_entity_ids(tmp_path):
     + entry_points 聚合（service.py 既有，S4/S5 共用）→ 写入 frontmatter。
     """
     fs = MemoryFS(root=str(tmp_path))
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
     # 末 3 条 assistant 消息带 cited_entities（聚合源）
-    msgs = [
-        _FakeMessage(role="user", content="q0"),
-        _FakeMessage(role="assistant", content="a0"),
-        _FakeMessage(role="user", content="q1"),
-        _FakeMessage(role="assistant", content="a1",
-                      msg_metadata={"cited_entities": ["ent_alpha"]}),
-        _FakeMessage(role="user", content="q2"),
-        _FakeMessage(role="assistant", content="a2",
-                      msg_metadata={"cited_entities": ["ent_beta"], "entry_points": ["ent_gamma"]}),
+    msg_specs = [
+        ("user", "q0", None),
+        ("assistant", "a0", None),
+        ("user", "q1", None),
+        ("assistant", "a1", {"cited_entities": ["ent_alpha"]}),
+        ("user", "q2", None),
+        ("assistant", "a2", {"cited_entities": ["ent_beta"], "entry_points": ["ent_gamma"]}),
     ]
-    db = _FakeDB(msgs)
+    for i, (role, content, metadata) in enumerate(msg_specs):
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_x", msg_id=f"msg_{i:03d}",
+            role=role, content=content, msg_metadata=metadata,
+            created_at=base + _td(seconds=i),
+        )
     llm = _FakeLLM(response="摘要")
     compactor = SessionCompactor(llm)
 
-    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+    await compactor.compact(fs, user_id=7, session_id="sess_x", every_n_messages=6)
 
     # 文件已写
     uri = "ke://u/7/session/sess_x/summary.md"
@@ -398,13 +384,17 @@ async def test_compact_cross_tenant_isolation(tmp_path):
     S1 路径前缀隔离自带，本测试是回归保险（防 _summary_uri / fs 误改导致泄漏）。
     """
     fs = MemoryFS(root=str(tmp_path))
-    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
-    db = _FakeDB(msgs)
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(6):
+        await write_message_to_fs(
+            fs, user_id=1, session_id="sess_x", msg_id=f"msg_{i:03d}",
+            role="user", content=f"q{i}", created_at=base + _td(seconds=i),
+        )
     llm = _FakeLLM(response="user1 的会话摘要")
     compactor = SessionCompactor(llm)
 
     # user_id=1 写
-    await compactor.compact(fs, db, user_id=1, session_id="sess_x", every_n_messages=6)
+    await compactor.compact(fs, user_id=1, session_id="sess_x", every_n_messages=6)
 
     # user_id=1 自己读得到（严格 equality — read 路径 deterministic，body 就是 LLM 输出）
     r1 = await read_session_summary(fs, user_id=1, session_id="sess_x")
@@ -422,20 +412,25 @@ async def test_compact_fs_write_failure_silently_logged(tmp_path, monkeypatch):
     §6.5 关键不变量：summary.md 缺失/损坏永不阻塞 SSE 流。
     """
     fs = MemoryFS(root=str(tmp_path))
-
-    # monkeypatch fs.write 抛任意异常
+    # 准备 messages（在 monkeypatch 前，fs.write 仍正常工作）
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(6):
+        role = "user" if i % 2 == 0 else "assistant"
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_x", msg_id=f"msg_{i:03d}",
+            role=role, content=f"q{i}", created_at=base + _td(seconds=i),
+        )
+    # 现在 monkeypatch fs.write 抛 — 影响后续 compact step 8 写 summary.md
     async def _explode(*args):
         raise OSError("simulated disk error")
     monkeypatch.setattr(fs, "write", _explode)
 
-    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
-    db = _FakeDB(msgs)
     llm = _FakeLLM(response="摘要")
     compactor = SessionCompactor(llm)
 
     # 关键断言：不抛 → compact 中层 catch 兜住
     # （pytest 默认 fail 在未捕获异常 → 不需要 try/except wrap）
-    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+    await compactor.compact(fs, user_id=7, session_id="sess_x", every_n_messages=6)
 
     # 选 LLM 调用计数而非 fs.exists 检查，因为前者强证算法走到 step 6（LLM 调用是 fs.write 的 precondition）；
     # fs.exists 仅证"文件不存在"，不区分"早退跳过 step 6/7/8"还是"step 6 跑了但 step 8 fs.write 中层 catch 兜住"
@@ -450,13 +445,18 @@ async def test_compact_then_read_returns_body_strip_frontmatter(tmp_path):
     复制粘贴 prev_summary 的语义一致性回归。
     """
     fs = MemoryFS(root=str(tmp_path))
-    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
-    db = _FakeDB(msgs)
+    base = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(6):
+        role = "user" if i % 2 == 0 else "assistant"
+        await write_message_to_fs(
+            fs, user_id=7, session_id="sess_e2e", msg_id=f"msg_{i:03d}",
+            role=role, content=f"q{i}", created_at=base + _td(seconds=i),
+        )
     llm = _FakeLLM(response="端到端摘要正文")
     compactor = SessionCompactor(llm)
 
     # 写
-    await compactor.compact(fs, db, user_id=7, session_id="sess_e2e", every_n_messages=6)
+    await compactor.compact(fs, user_id=7, session_id="sess_e2e", every_n_messages=6)
 
     # 读
     body = await read_session_summary(fs, user_id=7, session_id="sess_e2e")
@@ -467,9 +467,8 @@ async def test_compact_then_read_returns_body_strip_frontmatter(tmp_path):
 
 # ─── S6 T1: fs message helpers 单元测试（§7.9 场景 1-6） ─────────────
 
-from datetime import datetime, timezone, timedelta as _td
 from src.service.memory.session import (
-    _FsMessage, write_message_to_fs, read_messages_for_session,
+    _FsMessage, read_messages_for_session,
     _messages_dir_uri, _message_uri,
 )
 
