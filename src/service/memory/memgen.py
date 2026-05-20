@@ -69,8 +69,14 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     # 闭合行后常跟一个换行（"---\n正文"），剥掉它得到纯正文
     if after.startswith("\n"):
         after = after[1:]
-    # 空 YAML 段不调用 safe_load（避免 None）
-    meta = yaml.safe_load(yaml_src) if yaml_src.strip() else {}
+    # 空 YAML 段不调用 safe_load（避免 None）；
+    # 损坏 YAML（partial write 崩溃 / 手工误改 / S6 迁移 bug）吞为空 meta，
+    # 让上层按「stale → 重生」处理；否则该文件每轮 YAML 解析抛错→被隔离→
+    # 永不被覆盖 = 自愈死锁，§3.3/§3.5 自愈承诺受损。
+    try:
+        meta = yaml.safe_load(yaml_src) if yaml_src.strip() else {}
+    except yaml.YAMLError:
+        meta = {}
     # safe_load 可能返回非 dict（如纯标量）→ 归一为 {}
     if not isinstance(meta, dict):
         meta = {}
@@ -138,11 +144,15 @@ class MemoryGen:
     # ── 分类辅助 ──────────────────────────────────────────────────
     @staticmethod
     def _is_memory_file(uri: str) -> bool:
-        """记忆文件 = 以 .md 结尾，且不是 .abstract.md / .overview.md。"""
+        """记忆文件 = 以 .md 结尾，且不是 .abstract.md / .overview.md，且
+        slug 非空（拒绝末段恰为 ``.md`` 的病理 URI——否则其 abs_uri 会与该
+        目录自身 ``.abstract.md`` 冲突；S4 规范 slug 为非空 kebab）。
+        """
         return (
             uri.endswith(_MD_SUFFIX)
             and not uri.endswith(_ABSTRACT_SUFFIX)
             and not uri.endswith(_OVERVIEW_NAME)
+            and not uri.endswith("/" + _MD_SUFFIX)   # 末段恰为 ".md" → 空 slug
         )
 
     # ── 步骤①：记忆文件 L0 ────────────────────────────────────────
@@ -230,6 +240,11 @@ class MemoryGen:
             if name.endswith(_MD_SUFFIX):
                 # 子记忆文件 {slug}.md → 其 L0 = {slug}.abstract.md
                 key = name[: -len(_MD_SUFFIX)]
+                if not key:                       # 空 slug（文件名仅 ".md"）：其
+                    # L0 路径恰为本目录自身 .abstract.md，与目录 L0 冲突 → 跳过
+                    # （与 _is_memory_file 对称防护；S4 规范 slug 非空）
+                    _log.debug("dir loop skip empty-slug entry under %r", dir_uri)
+                    continue
                 child_l0 = f"{dir_uri}/{key}{_ABSTRACT_SUFFIX}"
             else:
                 # 否则视为子目录（路径 scheme §3.2：非 .md 段即目录）
@@ -267,9 +282,15 @@ class MemoryGen:
 
     @staticmethod
     async def _stale(fs: MemoryFS, uri: str, want_hash: str) -> bool:
-        """目标不存在、或其 frontmatter ``inputs_hash`` ≠ want → 需重生。"""
-        if not await fs.exists(uri):
+        """目标不存在、或其 frontmatter ``inputs_hash`` ≠ want → 需重生。
+
+        单次 read 取代 exists()+read()（与 ``_gen_file_l0`` 同模式），
+        消除 TOCTOU 间隙并少一次 syscall。
+        """
+        try:
+            text = await fs.read(uri)
+        except MemoryNotFound:
             return True
-        meta, _ = _split_frontmatter(await fs.read(uri))
+        meta, _ = _split_frontmatter(text)
         # str() 防御 YAML 把全数字 hash 解析成 int；缺键 str(None)!=hash → 重生
         return str(meta.get("inputs_hash")) != want_hash

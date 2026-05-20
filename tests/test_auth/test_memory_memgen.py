@@ -80,6 +80,8 @@ class _FixedLLM:
         # 的 joined = "## {k}\n{v}..." ），跳过不计；Task 3 步骤②起 regenerate
         # 含目录 LLM 调用，本计数器保留对 Task 2 文件 L0 用例「llm.calls==1」
         # 等断言的语义不变。目录 L0/L1 行为由 Task 3 的 _RoutingLLM 覆盖。
+        # 边界：若未来用例的记忆正文本身以「## 」起首（Markdown 标题），会被
+        # 此启发式误判为目录调用 → 此类场景改用 _RoutingLLM 或新增 fake。
         if user.startswith("## "):
             return self.ret
         self.calls += 1
@@ -382,3 +384,51 @@ async def test_dir_llm_error_isolated_other_dirs_still_generated(tmp_path, caplo
     assert await fs.exists("ke://u/7/global/identity/name.abstract.md")
     # identity 目录首调抛错被隔离、记 debug；regenerate 未抛出
     assert any("dir L0/L1 failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_dir_corrupt_yaml_frontmatter_self_heals(tmp_path):
+    fs = _fs(tmp_path)
+    llm = _RoutingLLM()
+    gen = MemoryGen(llm)
+    # 模拟 partial-write 崩溃 / 手工误改 / S6 迁移 bug：目录 .abstract.md
+    # 的 frontmatter YAML 损坏。若 _split_frontmatter 不吞 YAMLError，每轮
+    # 都因解析抛错被隔离 → 永不被覆盖 = 自愈死锁（§3.3/§3.5）。
+    uri = "ke://u/7/global/identity/name.md"
+    dir_abs = "ke://u/7/global/identity/.abstract.md"
+    await fs.write(uri, _mem("identity", "名字是李龙飞"))
+    # 写入损坏 YAML（: : : 非法）
+    await fs.write(dir_abs, "---\n: : :\n---\n破损内容\n")
+
+    # 不抛错（YAMLError 吞为空 meta → 按 stale 重生）→ 文件被自愈覆盖
+    await gen.regenerate(fs, [uri])
+    meta, _ = _split_frontmatter(await fs.read(dir_abs))
+    # 自愈成功：inputs_hash 已写入，损坏内容被覆盖
+    assert "inputs_hash" in meta
+
+
+@pytest.mark.asyncio
+async def test_pathological_md_named_slug_does_not_collide_with_dir_l0(tmp_path):
+    fs = _fs(tmp_path)
+    llm = _FixedLLM("不应被聚合的病理摘要")
+    gen = MemoryGen(llm)
+    # 病理：末段恰为 ".md"（空 slug；S4 规范 kebab slug 非空，不会真实产生）
+    # 若不防护：bad 的 abs_uri = "ke://u/7/g/identity/.abstract.md" 与该目录
+    # 自身 L0 路径冲突，会被相互覆盖、inputs_hash 链锁震荡。
+    bad = "ke://u/7/global/identity/.md"
+    good = "ke://u/7/global/identity/name.md"
+    await fs.write(bad, _mem("identity", "病理：空 slug 的异常体"))
+    await fs.write(good, _mem("identity", "名字是李龙飞"))
+
+    await gen.regenerate(fs, [bad, good])
+
+    # 病理被 _is_memory_file 与 dir-loop 双重拒收 → 不产生独立 sibling abstract
+    # （注：dir_abs 是目录自身 L0，独立由步骤②生成；这里检查它聚合的是 good 而非 bad）
+    assert await fs.exists("ke://u/7/global/identity/name.abstract.md")
+    dir_abs = "ke://u/7/global/identity/.abstract.md"
+    assert await fs.exists(dir_abs)
+    _meta, dir_body = _split_frontmatter(await fs.read(dir_abs))
+    # 病理正文未被聚合进目录 L0 输入链
+    assert "病理：空 slug 的异常体" not in dir_body
+    # 仅 good 的文件 L0 被计入（_FixedLLM 已过滤目录调用）
+    assert llm.calls == 1
