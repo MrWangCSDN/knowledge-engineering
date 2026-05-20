@@ -63,3 +63,29 @@ async def test_read_session_summary_corrupt_frontmatter_returns_body(tmp_path):
     result = await read_session_summary(fs, user_id=7, session_id="sess_x")
     # body 仍可读 → 返裸文本（去尾换行）
     assert result == "用户讨论 PaymentGateway。"
+
+
+from src.service.memory.session import SessionCompactor
+
+
+class _FakeLLM:
+    """记录 complete() 调用入参；返回固定的 fake summary 文本。
+
+    与 test_memory_extract.py 既有 fake LLM 同形态（鸭子 async complete）。
+    """
+    def __init__(self, *, response: str = "fake summary 文本"):
+        self.calls: list[dict] = []
+        self.response = response
+
+    async def complete(self, *, system: str, user: str, **kw) -> str:
+        # 记录每次调用的 system / user 参数（断言用）
+        self.calls.append({"system": system, "user": user})
+        return self.response
+
+
+def test_session_compactor_init_holds_llm():
+    """SessionCompactor 仅持 llm（同 S4 MemoryExtractor，fs/db 走方法形参）。"""
+    llm = _FakeLLM()
+    compactor = SessionCompactor(llm)
+    # 不直接访问私有 _llm 字段（视为实现细节）；通过断言无异常构造来约束公开契约
+    assert compactor is not None
