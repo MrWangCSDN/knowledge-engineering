@@ -255,7 +255,8 @@ class MemoryRecaller:
                 if kind == "file":
                     parts.append(body)
                 else:
-                    # kind == "dir"：派生同目录 .overview.md 路径
+                    # kind != "file"（dir 或异常值如 None/损坏的 property）：
+                    # 派生同目录 .overview.md 路径；下方 endswith 兜底再细分
                     dir_l0_uri = props.get("uri") or ""
                     if not dir_l0_uri.endswith("/" + _ABSTRACT_SUFFIX):
                         # 防御：理论上 dir 类 uri 必以 "/.abstract.md" 结尾

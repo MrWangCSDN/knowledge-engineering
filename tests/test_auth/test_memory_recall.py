@@ -570,3 +570,87 @@ async def test_recall_returns_empty_when_no_hits(tmp_path):
     # 完全没有 index_changed 任何 uri
     block = await rec.recall_memory_block(fs, "anything", user_id=7, top_k=5)
     assert block == ""
+
+
+@pytest.mark.asyncio
+async def test_recall_weaviate_query_error_returns_empty_string(tmp_path, caplog):
+    """Important I1：Weaviate near_vector 抛错 → recall_memory_block 返 ""（不抛）。
+    锁定 §4.5 自包失败语义；T4 移除 caller-side 防御 try 后仍由 S3 自身保证。"""
+    fs = _fs(tmp_path)
+
+    class _BoomQueryClient(_FakeWeaviateClient):
+        """fake：collections.get(name).with_tenant(t).query.near_vector 抛错。"""
+
+        def __init__(self):
+            super().__init__()
+            # 覆盖 memory_l0 的 with_tenant 路径让 near_vector 抛错
+            class _BoomTenantQuery:
+                def fetch_object_by_id(self, uuid):
+                    return None
+                def near_vector(self, near_vector, limit=5):
+                    raise RuntimeError("weaviate query boom")
+
+            class _BoomView:
+                def __init__(self):
+                    self.data = _FakeTenantData({})       # data 路径可用（避免 index 抛错）
+                    self.query = _BoomTenantQuery()
+
+            class _BoomCollection:
+                def with_tenant(self, tenant):
+                    return _BoomView()
+
+            self.collections._cols["memory_l0"] = _BoomCollection()
+
+    rec = MemoryRecaller(embedder=_FakeEmbedder(), weaviate_client=_BoomQueryClient())
+
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="src.service.memory.recall"):
+        block = await rec.recall_memory_block(fs, "anything", user_id=7, top_k=5)
+
+    # near_vector 抛错被外层 try 吞 → 返 ""，主答零开销路径
+    assert block == ""
+    # 日志显式记 "weaviate query failed"
+    assert any("weaviate query failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_recall_per_hit_assemble_error_isolated(tmp_path, caplog):
+    """Important I2：单 hit 装配抛错（如 properties=None）→ 该 hit 跳过、
+    其他 hits 仍参与 block 装配。锁定 §4.5 per-hit 隔离契约。"""
+    fs = _fs(tmp_path)
+    rec, emb, wv = _make_recaller()
+
+    # 正常索引一个 file L0（healthy hit）
+    abs_uri = "ke://u/7/global/identity/healthy.abstract.md"
+    h = _sha256_hex("健康记忆\n")
+    await fs.write(abs_uri, _file_l0_md(h, "健康记忆"))
+    await rec.index_changed(fs, [abs_uri])
+
+    # Monkey-patch near_vector：在结果前插入一个 properties=None 的损坏 hit
+    coll = wv.collections.get("memory_l0")
+    real_with_tenant = coll.with_tenant
+
+    def _patched_with_tenant(tenant):
+        view = real_with_tenant(tenant)
+        real_near_vector = view.query.near_vector
+
+        def _patched_near_vector(near_vector, limit=5):
+            real_result = real_near_vector(near_vector, limit=limit)
+            # 在第一位插入损坏 hit（properties=None → props.get 抛 AttributeError）
+            bad_hit = _FakeHit(uuid="bad", properties=None, vector=[0.0] * 1024, distance=0.0)
+            real_result.objects = [bad_hit] + list(real_result.objects)
+            return real_result
+
+        view.query.near_vector = _patched_near_vector
+        return view
+
+    coll.with_tenant = _patched_with_tenant
+
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="src.service.memory.recall"):
+        block = await rec.recall_memory_block(fs, "memory", user_id=7, top_k=5)
+
+    # 损坏 hit 被隔离，健康 hit 仍出现在 block
+    assert "健康记忆" in block
+    # 日志显式记 "hit assemble failed"（per-hit 隔离生效）
+    assert any("hit assemble failed" in r.message for r in caplog.records)
