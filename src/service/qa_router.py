@@ -554,8 +554,8 @@ def _make_memory_writer(
     async def _writer(answer: str) -> None:
         # 1. S4：ReAct 抽取 + 文件写入 + S2/S3 链
         try:
-            # 局部 import：避免顶部循环依赖（recall.py / extract.py / memgen.py
-            # → service.py），与 service.recall_memory_block 同模式
+            # 局部 import：保持模块顶部 import 轻量（启动期不拉 Weaviate / embedder
+            # 模块；只在 post-turn 实际调用时延迟加载），与 service.recall_memory_block 同模式
             import os
             from src.service.memory.vfs import MemoryFS
             from src.service.memory.memgen import MemoryGen

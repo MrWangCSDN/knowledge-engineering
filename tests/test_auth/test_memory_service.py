@@ -9,7 +9,7 @@ from src.service.qa_engine.sse_emitter import stream_qa_answer
 from src.service.memory.service import (
     maybe_compact_session,
 )
-from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
+from src.service.db_models_homepage import QASessionMemory
 
 
 class _CapturingLLM:
@@ -131,6 +131,7 @@ async def test_stream_passes_memory_block_and_calls_on_memory():
 
     async def _on_memory(answer: str):
         called["on_memory"] = True
+        called["answer"] = answer
 
     chunks = []
     async for ev in stream_qa_answer(
@@ -143,6 +144,9 @@ async def test_stream_passes_memory_block_and_calls_on_memory():
     assert synth.seen_memory_block == "用户偏好：简短"
     assert called["on_memory"] is True
     assert any("event: done" in c for c in chunks)
+    # 锁定 answer_text 构造契约：sse_emitter 必须把 answer.sections 拼接传给 on_memory
+    # （单 section "c" → answer_text 应为 "c"）
+    assert called["answer"] == "c"
 
 
 # ───────── memory.service 逻辑（Fake DB/LLM）─────────
@@ -165,22 +169,16 @@ class _FakeMsg:
 
 
 class _FakeMemDB:
-    def __init__(self, user_rows=None, session_row=None, msg_rows=None, project_rows=None):
-        self._user_rows = user_rows or []
+    def __init__(self, session_row=None, msg_rows=None):
         self._session_row = session_row
         self._msg_rows = msg_rows or []
-        self._project_rows = project_rows or []
         self.added = []
         self.committed = False
 
     async def execute(self, stmt):
         ent = stmt.column_descriptions[0]["entity"]
-        if ent is QAUserMemory:
-            return _FakeResult(self._user_rows)
         if ent is QASessionMemory:
             return _FakeResult([self._session_row] if self._session_row else [])
-        if ent is QAProjectMemory:
-            return _FakeResult(self._project_rows)
         return _FakeResult(self._msg_rows)
 
     def add(self, obj): self.added.append(obj)
