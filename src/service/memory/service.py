@@ -6,92 +6,15 @@
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any
 
 from sqlalchemy import select
 
-from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
-from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM, _USER_MEM_INTENT_SYSTEM
+from src.service.db_models_homepage import QASessionMemory, QAMessage
+from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM
 
 _log = logging.getLogger(__name__)
-
-
-# 显式记忆触发词（关键词起步；spec §15 开放问题留 P1 用关键词）
-# 命中后剥掉触发词 + 紧随的冒号/空白，剩余即记忆内容。
-# ⚠️ 顺序约定：若将来新增触发词是已有词的「超串」（如「顺便记一下」含「记一下」），
-#    必须把更具体的放前面，否则被较短前缀先匹配（当前 5 个互不为前缀，安全）。
-_TRIGGERS = ("请记住", "记住", "记一下", "记下", "帮我记住")
-
-
-# 句尾后缀判定前先剥掉的尾部空白与中英文标点（不影响前缀分支）。含中英文分号。
-_TRAILING_PUNCT = " 　\t。，、！？.!?,；;"
-# 内容右侧清理集（冒号分隔约定残留 + 尾部标点）；DRY：前缀/后缀两分支复用。
-_CONTENT_RSTRIP = " :：\t，、," + _TRAILING_PUNCT
-# endswith 匹配必须最长触发词优先：「记住」是「请记住」「帮我记住」的后缀，
-# 按 _TRIGGERS 原序匹配会把「帮我记住」误剥成「帮我」+「记住」。
-# startswith 分支不受影响（5 个触发词互不为前缀，原序安全）。
-_TRIGGERS_BY_LEN = tuple(sorted(_TRIGGERS, key=len, reverse=True))
-
-
-def detect_explicit_memory(question: str) -> str | None:
-    """从用户问题里检测显式记忆意图（§22.3：句首前缀 或 句尾后缀）。
-
-    前缀命中：content = 触发词之后；再剥 rest 末尾多余触发词（如「记住A 请记住」→「A」），
-    但内容恰为触发词本身时不剥空（len 守卫，保旧行为「请记住记住」→「记住」）。
-    句尾后缀命中：q 去右侧空白与中英文标点后 endswith(触发词) → content = 其之前部分。
-    endswith 匹配按触发词长度降序（_TRIGGERS_BY_LEN），避免「帮我记住」被「记住」抢匹配。
-    两侧 content 再清理；空 → None。前缀优先（都命中按前缀）。
-    未命中 → None。"任意位置包含"不算（"我不需要你记住" 不误判）。
-    """
-    q = (question or "").strip()
-    if not q:
-        return None
-    for trig in _TRIGGERS:
-        if q.startswith(trig):
-            rest = q[len(trig):].lstrip(" :：\t").strip()
-            # 前缀命中后剥掉 rest 自身末尾多余的触发词（如「记住A 请记住」→「A」）；
-            # 内容恰为触发词本身（len 不大于触发词）则不剥（「请记住记住」→「记住」）。
-            rest_tail = rest.rstrip(_TRAILING_PUNCT)
-            for t2 in _TRIGGERS_BY_LEN:
-                if rest_tail.endswith(t2) and len(rest_tail) > len(t2):
-                    rest = rest_tail[: -len(t2)].rstrip(_CONTENT_RSTRIP).strip()
-                    break
-            else:
-                rest = rest_tail.strip()
-            return rest or None
-    q_tail = q.rstrip(_TRAILING_PUNCT)
-    for trig in _TRIGGERS_BY_LEN:
-        if q_tail.endswith(trig) and len(q_tail) > len(trig):
-            rest = q_tail[: -len(trig)].rstrip(_CONTENT_RSTRIP).strip()
-            return rest or None
-    return None
-
-
-# 工程级显式触发词。不含冒号——靠 lstrip 容错「：/:/空格」分隔。
-# ⚠️ 这些是「记住」的超串，调用方（_make_memory_writer）必须先调本检测器、
-#    后调通用 detect_explicit_memory，否则「记住这个工程：X」会被误判为 user 级。
-_PROJECT_TRIGGERS = ("记住这个工程", "记住本工程", "记住该工程", "工程记住")
-
-
-
-def detect_explicit_project_memory(question: str) -> str | None:
-    """检测工程级显式记忆意图（「记住这个工程：…」）。
-
-    命中 → 剥前缀 + 起始冒号/空白，返回内容；未命中/空 → None。
-
-    ⚠️ 调用契约：必须先于 detect_explicit_memory 调用。三个触发词
-    「记住这个工程/记住本工程/记住该工程」都是「记住」的超串——若先调通用
-    detect_explicit_memory，会把工程输入误判为 user 级写入（内容还带「这个工程：」垃圾前缀）。
-    """
-    q = (question or "").strip()
-    for trig in _PROJECT_TRIGGERS:
-        if q.startswith(trig):
-            rest = q[len(trig):].lstrip(" :：\t").strip()
-            return rest or None
-    return None
 
 
 async def recall_memory_block(
@@ -142,119 +65,6 @@ async def recall_memory_block(
         # MemoryRecaller 内部各步已自记 debug log，本层覆盖 wrapper 构造期的 ConnectionError 等。
         _log.debug("recall_memory_block wrapper failed: %r", exc)
         return ""
-
-
-# 去 LLM 输出的 ```json … ``` / ``` … ``` / ````json … ```` 围栏（1~4 反引号、可选 json 标签）
-_CODE_FENCE_RE = re.compile(r"^`{1,4}(?:json)?\s*(.*?)\s*`{1,4}$", re.DOTALL)
-
-
-_VALID_KINDS = ("identity", "preference", "style_feedback")
-
-
-async def parse_user_memory_intent(llm: Any, content: str) -> dict:
-    """轻量 LLM 解析显式记忆意图（§22.4）。返回
-    {tier:'user'|'skip', kind:'identity'|'preference'|'style_feedback',
-     content:str, supersedes_kind:'identity'|None}。
-    任何异常/非法 JSON/字段非法 → 兜底 {user, preference, 原 content, None}（绝不丢、绝不抛）。
-    """
-    fallback = {
-        "tier": "user", "kind": "preference",
-        "content": content, "supersedes_kind": None,
-    }
-    try:
-        raw = await llm.complete(system=_USER_MEM_INTENT_SYSTEM, user=content)
-    except Exception:
-        return fallback
-    s = (raw or "").strip()
-    _m = _CODE_FENCE_RE.match(s)
-    if _m:
-        s = _m.group(1).strip()
-    try:
-        obj = json.loads(s)
-    except Exception:
-        return fallback
-    if not isinstance(obj, dict):
-        return fallback
-    tier = obj.get("tier")
-    kind = obj.get("kind")
-    c = obj.get("content")
-    sk = obj.get("supersedes_kind")
-    if tier not in ("user", "skip"):
-        return fallback
-    if kind not in _VALID_KINDS:
-        return fallback
-    if not isinstance(c, str) or not c.strip():
-        return fallback
-    if sk not in ("identity", None):
-        sk = None
-    return {"tier": tier, "kind": kind, "content": c.strip(), "supersedes_kind": sk}
-
-
-async def write_explicit_memory(
-    db: Any, *, user_id: int, session_id: str, content: str,
-    kind: str = "preference", supersedes_kind: str | None = None,
-) -> None:
-    """落一条用户级显式记忆（§22.5）。
-
-    kind=='identity' 或 supersedes_kind=='identity'：先把该 user 所有
-    kind='identity' AND status='active' 行 status→'archived'（软删，宪法禁永久删），
-    再 INSERT 新行 —— identity 单例，新名字取代旧名字。
-    kind in ('preference','style_feedback')：仅追加（多条并存）。
-    归档+插入同一次 commit。kind 默认 'preference'（旧调用零改动，不破坏）。
-
-    入参契约：supersedes_kind=='identity' 的 OR 分支是前向兼容位；当前 §22.4 解析器
-    对身份事实总是同时置 kind='identity' 与 supersedes_kind='identity'。调用方若要触发
-    身份取代，**必须**令 kind='identity'（勿用 kind='preference'+supersedes_kind='identity'，
-    那会归档旧 identity 却插入一条 preference，导致 0 条 active identity）。
-    并发：本函数在 post-turn 单会话后台回调内调用，同 user 并发写竞争窗口可忽略，
-    不加锁（记忆为辅助路径，瞬时重复下一次身份写自愈）。
-    自身不吞异常（同 recall_memory_block 契约）；router 调用点已 try/except。
-    """
-    if kind == "identity" or supersedes_kind == "identity":
-        res = await db.execute(
-            select(QAUserMemory).where(
-                QAUserMemory.user_id == user_id,
-                QAUserMemory.kind == "identity",
-                QAUserMemory.status == "active",
-            )
-        )
-        for r in res.scalars().all():
-            # guard 仅对测试 _FakeMemDB 生效（它不解析/套用 WHERE，返回全部 user_rows）；
-            # 真实 ORM 行 kind/status 是 NOT NULL 映射列、且已被上面的 WHERE 限定，
-            # 不需要 getattr。WHERE 子句的回归由 test_write_identity_select_has_where_filter 锁定。
-            if getattr(r, "kind", None) == "identity" and getattr(r, "status", None) == "active":
-                r.status = "archived"
-    db.add(
-        QAUserMemory(
-            user_id=user_id,
-            kind=kind,
-            content=content,
-            source="explicit",
-            source_session_id=session_id,
-            status="active",
-        )
-    )
-    await db.commit()
-
-
-async def write_explicit_project_memory(
-    db: Any, *, project_id: str, user_id: int, session_id: str, content: str
-) -> None:
-    """落一条工程级显式记忆（S1：scope=private，source=explicit，status=active）。
-    注：自身不吞异常（同 recall/user-write 契约）；调用点 try/except。
-    """
-    db.add(
-        QAProjectMemory(
-            project_id=project_id,
-            user_id=user_id,
-            scope="private",
-            content=content,
-            source="explicit",
-            source_session_id=session_id,
-            status="active",
-        )
-    )
-    await db.commit()
 
 
 _FOCUS_MAX = 10  # 聚焦实体上限，控 prompt 体积

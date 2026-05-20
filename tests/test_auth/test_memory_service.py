@@ -7,12 +7,7 @@ from src.service.qa_engine.synthesizer import QASynthesizer
 from src.service.qa_engine.retriever import RetrievedContext
 from src.service.qa_engine.sse_emitter import stream_qa_answer
 from src.service.memory.service import (
-    detect_explicit_memory,
-    write_explicit_memory,
     maybe_compact_session,
-    detect_explicit_project_memory,
-    write_explicit_project_memory,
-    parse_user_memory_intent,
 )
 from src.service.db_models_homepage import QAUserMemory, QASessionMemory, QAMessage, QAProjectMemory
 
@@ -134,7 +129,7 @@ async def test_stream_passes_memory_block_and_calls_on_memory():
     synth = _SpySynth()
     called = {"on_memory": False}
 
-    async def _on_memory():
+    async def _on_memory(answer: str):
         called["on_memory"] = True
 
     chunks = []
@@ -151,24 +146,6 @@ async def test_stream_passes_memory_block_and_calls_on_memory():
 
 
 # ───────── memory.service 逻辑（Fake DB/LLM）─────────
-
-
-# --- detect_explicit_memory：纯函数，关键词起步 ---
-
-def test_detect_trigger_strips_prefix():
-    assert detect_explicit_memory("记住我喜欢简短的回答") == "我喜欢简短的回答"
-    assert detect_explicit_memory("请记住：用 Java 不要 Kotlin") == "用 Java 不要 Kotlin"
-    assert detect_explicit_memory("记一下 我关注支付域") == "我关注支付域"
-
-
-def test_detect_no_trigger_returns_none():
-    assert detect_explicit_memory("下单流程怎么走") is None
-    assert detect_explicit_memory("解释下快排") is None
-
-
-def test_detect_trigger_but_empty_content_returns_none():
-    assert detect_explicit_memory("记住") is None
-    assert detect_explicit_memory("记住：   ") is None
 
 
 # --- Fake DB / LLM ---
@@ -215,19 +192,6 @@ class _FakeMemLLM:
     def __init__(self, reply="本次目标：排查下单超时；已确认瓶颈在 PaymentGateway"):
         self._reply = reply
     async def complete(self, *, system, user, **kw): return self._reply
-
-
-@pytest.mark.asyncio
-async def test_write_explicit_adds_user_memory_row():
-    db = _FakeMemDB()
-    await write_explicit_memory(db, user_id=7, session_id="s1", content="我用 Java")
-    assert len(db.added) == 1
-    row = db.added[0]
-    assert isinstance(row, QAUserMemory)
-    assert row.user_id == 7 and row.content == "我用 Java"
-    assert row.kind == "preference" and row.source == "explicit"
-    assert row.source_session_id == "s1"
-    assert db.committed is True
 
 
 @pytest.mark.asyncio
@@ -387,37 +351,6 @@ async def test_stream_meta_no_context_usage_when_none():
     assert "context_usage" not in meta
 
 
-# ───────── 工程级 S1（spec §19）─────────
-
-
-def test_detect_project_trigger_strips_prefix():
-    assert detect_explicit_project_memory("记住这个工程：orders_v2 是现行表") == "orders_v2 是现行表"
-    assert detect_explicit_project_memory("记住本工程 用 Java 21") == "用 Java 21"
-    assert detect_explicit_project_memory("工程记住：回调有重试") == "回调有重试"
-
-
-def test_detect_project_no_trigger_or_empty():
-    assert detect_explicit_project_memory("记住我喜欢简短") is None
-    assert detect_explicit_project_memory("下单流程怎么走") is None
-    assert detect_explicit_project_memory("记住这个工程：   ") is None
-
-
-@pytest.mark.asyncio
-async def test_write_explicit_project_adds_row():
-    db = _FakeMemDB()
-    await write_explicit_project_memory(
-        db, project_id="deposit", user_id=7, session_id="s1", content="orders_v2 现行表"
-    )
-    rows = [o for o in db.added if isinstance(o, QAProjectMemory)]
-    assert len(rows) == 1
-    r = rows[0]
-    assert r.project_id == "deposit" and r.user_id == 7
-    assert r.content == "orders_v2 现行表"
-    assert r.scope == "private" and r.source == "explicit" and r.status == "active"
-    assert r.source_session_id == "s1"
-    assert db.committed is True
-
-
 # ───────── chit-chat 会话级多轮：history 接入（spec §20）─────────
 
 class _CapUserLLM:
@@ -571,250 +504,3 @@ async def test_compact_existing_fixed_fake_still_works_regression():
     assert db.committed is True
 
 
-# ───────── §22.3：detect_explicit_memory 前缀或句尾后缀 ─────────
-
-def test_detect_prefix_still_works_no_regression():
-    assert detect_explicit_memory("记住我喜欢简短回答") == "我喜欢简短回答"
-    assert detect_explicit_memory("请记住：我用 Java") == "我用 Java"
-
-
-def test_detect_suffix_trailing_trigger():
-    # 用户实测说法：触发词在句尾
-    assert detect_explicit_memory("我改名叫李龙飞 请记住") == "我改名叫李龙飞"
-    assert detect_explicit_memory("以后叫我李龙飞 记住") == "以后叫我李龙飞"
-
-
-def test_detect_suffix_strips_trailing_punctuation():
-    assert detect_explicit_memory("我改名叫李龙飞，请记住。") == "我改名叫李龙飞"
-    assert detect_explicit_memory("我喜欢简短回答！记一下！") == "我喜欢简短回答"
-
-
-def test_detect_prefix_priority_when_both():
-    # 前缀优先：句首是触发词则按前缀剥
-    assert detect_explicit_memory("记住我改名叫李龙飞 请记住") == "我改名叫李龙飞"
-
-
-def test_detect_none_and_empty():
-    assert detect_explicit_memory("今天天气不错") is None
-    assert detect_explicit_memory("请记住") is None        # 只有触发词无内容
-    assert detect_explicit_memory("请记住。") is None       # 触发词+标点无内容
-    assert detect_explicit_memory("") is None
-    assert detect_explicit_memory("我不需要你记住这个东西") is None  # 触发词在中间不算
-
-
-# ───────── §22.3 review 收尾：endswith 最长优先 + content==trigger 不过剥 + ；; ─────────
-
-def test_detect_suffix_bangwo_jizhu_longest_first():
-    # Critical：「帮我记住」是「记住」的超后缀；顺序匹配会误剥成「…帮我」
-    assert detect_explicit_memory("我喜欢直接回答 帮我记住") == "我喜欢直接回答"
-    assert detect_explicit_memory("以后回答都简短点，帮我记住。") == "以后回答都简短点"
-
-
-def test_detect_prefix_bangwo_jizhu():
-    assert detect_explicit_memory("帮我记住我用 Python") == "我用 Python"
-
-
-def test_detect_content_equals_trigger_not_overstripped():
-    # Important：内容本身就是触发词，不能被尾部触发词剥空（回归旧行为）
-    assert detect_explicit_memory("请记住记住") == "记住"
-    assert detect_explicit_memory("记住 记住") == "记住"
-
-
-def test_detect_suffix_semicolon_punct():
-    # Minor：；; 也应作尾部标点剥掉
-    assert detect_explicit_memory("我叫李龙飞；请记住；") == "我叫李龙飞"
-    assert detect_explicit_memory("我用 Java; 记住;") == "我用 Java"
-
-
-# ───────── §22.4：parse_user_memory_intent 解析 + 兜底 ─────────
-
-
-class _JsonLLM:
-    def __init__(self, reply): self._reply = reply
-    async def complete(self, *, system, user, **kw): return self._reply
-
-
-class _RaiseLLM:
-    async def complete(self, *, system, user, **kw): raise RuntimeError("llm down")
-
-
-@pytest.mark.asyncio
-async def test_parse_valid_json():
-    llm = _JsonLLM('{"tier":"user","kind":"identity",'
-                    '"content":"用户的名字是李龙飞","supersedes_kind":"identity"}')
-    r = await parse_user_memory_intent(llm, "我改名叫李龙飞")
-    assert r == {"tier": "user", "kind": "identity",
-                 "content": "用户的名字是李龙飞", "supersedes_kind": "identity"}
-
-
-@pytest.mark.asyncio
-async def test_parse_strips_code_fence():
-    llm = _JsonLLM('```json\n{"tier":"user","kind":"preference",'
-                   '"content":"用户偏好简短回答","supersedes_kind":null}\n```')
-    r = await parse_user_memory_intent(llm, "我喜欢简短回答")
-    assert r["kind"] == "preference" and r["supersedes_kind"] is None
-
-
-@pytest.mark.asyncio
-async def test_parse_skip():
-    llm = _JsonLLM('{"tier":"skip","kind":"preference","content":"x","supersedes_kind":null}')
-    r = await parse_user_memory_intent(llm, "嗯嗯")
-    assert r["tier"] == "skip"
-
-
-@pytest.mark.asyncio
-async def test_parse_invalid_json_falls_back():
-    # 非 JSON → 兜底：原样 content 当 preference，不丢意图
-    llm = _JsonLLM("好的我记住了")
-    r = await parse_user_memory_intent(llm, "我喜欢简短回答")
-    assert r == {"tier": "user", "kind": "preference",
-                 "content": "我喜欢简短回答", "supersedes_kind": None}
-
-
-@pytest.mark.asyncio
-async def test_parse_llm_raises_falls_back():
-    r = await parse_user_memory_intent(_RaiseLLM(), "我用 Java")
-    assert r == {"tier": "user", "kind": "preference",
-                 "content": "我用 Java", "supersedes_kind": None}
-
-
-@pytest.mark.asyncio
-async def test_parse_bad_enum_or_missing_keys_falls_back():
-    llm = _JsonLLM('{"tier":"weird","kind":"nope"}')   # 非法枚举/缺字段
-    r = await parse_user_memory_intent(llm, "我用 Java")
-    assert r == {"tier": "user", "kind": "preference",
-                 "content": "我用 Java", "supersedes_kind": None}
-
-
-@pytest.mark.asyncio
-async def test_parse_non_dict_json_falls_back():
-    # 合法 JSON 但非 dict（list / 裸字符串 / 数字）→ 兜底
-    for reply in ('[1, 2, 3]', '"juststr"', '42'):
-        r = await parse_user_memory_intent(_JsonLLM(reply), "我用 Go")
-        assert r == {"tier": "user", "kind": "preference",
-                     "content": "我用 Go", "supersedes_kind": None}
-
-
-@pytest.mark.asyncio
-async def test_parse_weird_supersedes_kind_coerced_none():
-    llm = _JsonLLM('{"tier":"user","kind":"preference",'
-                   '"content":"用户偏好简短","supersedes_kind":"weird"}')
-    r = await parse_user_memory_intent(llm, "我喜欢简短")
-    assert r["supersedes_kind"] is None and r["kind"] == "preference"
-
-
-@pytest.mark.asyncio
-async def test_parse_whitespace_content_falls_back():
-    llm = _JsonLLM('{"tier":"user","kind":"preference",'
-                   '"content":"   ","supersedes_kind":null}')
-    r = await parse_user_memory_intent(llm, "原始话")
-    assert r == {"tier": "user", "kind": "preference",
-                 "content": "原始话", "supersedes_kind": None}
-
-
-# ───────── §22.5：write_explicit_memory identity 单例取代 / preference 累加 ─────────
-
-def _um(kind, content, status="active"):
-    return QAUserMemory(user_id=7, kind=kind, content=content,
-                        source="explicit", source_session_id="s0", status=status)
-
-
-@pytest.mark.asyncio
-async def test_write_default_still_preference_no_regression():
-    # 既有调用（不传 kind）行为不变：追加一条 preference
-    db = _FakeMemDB()
-    await write_explicit_memory(db, user_id=7, session_id="s1", content="我用 Java")
-    assert len(db.added) == 1
-    assert db.added[0].kind == "preference" and db.added[0].status == "active"
-
-
-@pytest.mark.asyncio
-async def test_write_identity_supersedes_old_identity_only():
-    old_id = _um("identity", "用户的名字是王山河")
-    pref = _um("preference", "用户偏好简短回答")
-    db = _FakeMemDB(user_rows=[old_id, pref])
-    await write_explicit_memory(
-        db, user_id=7, session_id="s2", content="用户的名字是李龙飞",
-        kind="identity", supersedes_kind="identity",
-    )
-    assert old_id.status == "archived"          # 旧 identity 归档
-    assert pref.status == "active"              # preference 不受影响
-    new_rows = [o for o in db.added if isinstance(o, QAUserMemory)]
-    assert len(new_rows) == 1
-    assert new_rows[0].kind == "identity"
-    assert new_rows[0].content == "用户的名字是李龙飞"
-    assert new_rows[0].status == "active"
-    assert db.committed is True
-
-
-@pytest.mark.asyncio
-async def test_write_preference_appends_no_archive():
-    old_pref = _um("preference", "用户偏好简短回答")
-    db = _FakeMemDB(user_rows=[old_pref])
-    await write_explicit_memory(
-        db, user_id=7, session_id="s3", content="用户只看支付域",
-        kind="preference", supersedes_kind=None,
-    )
-    assert old_pref.status == "active"          # 旧 preference 不归档（累加）
-    assert len([o for o in db.added if isinstance(o, QAUserMemory)]) == 1
-
-
-# ───────── §22.5 review 收尾：锁 SQL WHERE + 零/多旧 identity ─────────
-
-class _CapSelectDB(_FakeMemDB):
-    """记录传给 execute 的 QAUserMemory 查询语句，用于断言 WHERE 子句存在
-    （_FakeMemDB 本身不套 WHERE；这层捕获让 WHERE 回归可被测试发现）。"""
-    def __init__(self, user_rows=None):
-        super().__init__(user_rows=user_rows)
-        self.last_user_select = None
-
-    async def execute(self, stmt):
-        ent = stmt.column_descriptions[0]["entity"]
-        if ent is QAUserMemory:
-            self.last_user_select = stmt
-        return await super().execute(stmt)
-
-
-@pytest.mark.asyncio
-async def test_write_identity_select_has_where_filter():
-    # 锁生产 SQL：身份写必须按 user_id + kind='identity' + status='active' 过滤；
-    # 若 WHERE 被误删，此测试失败（_FakeMemDB 的 Python guard 兜不住这条断言）
-    old_id = _um("identity", "用户的名字是王山河")
-    db = _CapSelectDB(user_rows=[old_id])
-    await write_explicit_memory(
-        db, user_id=7, session_id="s9", content="用户的名字是李龙飞",
-        kind="identity", supersedes_kind="identity",
-    )
-    assert db.last_user_select is not None
-    sql = str(db.last_user_select).lower()
-    assert "where" in sql
-    assert "user_id" in sql and "kind" in sql and "status" in sql
-    assert old_id.status == "archived"
-
-
-@pytest.mark.asyncio
-async def test_write_identity_no_prior_just_inserts():
-    db = _FakeMemDB(user_rows=[])
-    await write_explicit_memory(
-        db, user_id=7, session_id="s10", content="用户的名字是李龙飞",
-        kind="identity", supersedes_kind="identity",
-    )
-    rows = [o for o in db.added if isinstance(o, QAUserMemory)]
-    assert len(rows) == 1 and rows[0].kind == "identity"
-    assert rows[0].content == "用户的名字是李龙飞" and rows[0].status == "active"
-    assert db.committed is True
-
-
-@pytest.mark.asyncio
-async def test_write_identity_archives_all_prior_actives():
-    # 生产 bug 场景：历史遗留 2 条 active identity → 新身份写必须全部归档
-    a = _um("identity", "名字A")
-    b = _um("identity", "名字B")
-    db = _FakeMemDB(user_rows=[a, b])
-    await write_explicit_memory(
-        db, user_id=7, session_id="s11", content="用户的名字是李龙飞",
-        kind="identity", supersedes_kind="identity",
-    )
-    assert a.status == "archived" and b.status == "archived"
-    new = [o for o in db.added if isinstance(o, QAUserMemory)]
-    assert len(new) == 1 and new[0].kind == "identity" and new[0].status == "active"

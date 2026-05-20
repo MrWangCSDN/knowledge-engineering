@@ -42,12 +42,7 @@ from src.service.qa_engine.prompts import _TITLE_SUMMARY_SYSTEM
 from src.service.qa_engine.sse_emitter import stream_qa_answer
 from src.service.memory.service import (
     recall_memory_block,
-    detect_explicit_memory,
-    write_explicit_memory,
-    parse_user_memory_intent,
     maybe_compact_session,
-    detect_explicit_project_memory,
-    write_explicit_project_memory,
 )
 
 # v2.0 Task 5：引入权限 dependency 工厂
@@ -536,57 +531,73 @@ def _make_title_generator(*, db, session_id, question, llm, is_new_session):
     return _gen
 
 
-def _make_memory_writer(*, db, llm, user_id, session_id, question, project_id=None, force_compact: bool = False):
+def _make_memory_writer(
+    *,
+    db,
+    llm,
+    user_id: int,
+    session_id: str,
+    question: str,
+    project_id: str | None = None,
+    force_compact: bool = False,
+):
     """构造 on_memory 回调（闭包）。done 之后异步执行：
 
-    1. 显式记忆意图 → 工程级（「记住这个工程：…」，project_id 存在时优先）否则用户级（「记住…」）；project_id=None 为向后兼容/非 router 调用点路径
-    2. 会话消息达阈值 → 压缩会话工作状态（覆盖式 upsert）。
+    1. S4 ReAct 抽取本轮可记忆事实 → 写文件 .md → S2.regenerate + S3.index_changed
+    2. 会话消息达阈值 → 压缩会话工作状态（§22 暂留 DB tier，S5 后续迁文件）。
 
     全程异常静默（记忆是辅助，绝不影响主答）。
-    设计：[[记忆系统-设计]] §6。
-    注：会话压缩只统计已持久化的 QAMessage；若本轮 persist_messages 失败，
-    本轮消息不计入（下一轮自然纠正，非数据损坏）。
+    设计：[[文件式记忆重构-设计]] §5.5。
+    新签名：闭包返回 async def _writer(answer: str) — sse_emitter 传 assistant
+    答案文本给闭包，ReAct 需要 user + assistant 两侧文本。
     """
-    async def _writer() -> None:
-        # 1. 显式写入（先工程后通用：工程触发词是「记住」超串，必须先判）
-        write_kind = "project"  # 默认归因 project（含项目检测阶段）
+    async def _writer(answer: str) -> None:
+        # 1. S4：ReAct 抽取 + 文件写入 + S2/S3 链
         try:
-            proj_content = (
-                detect_explicit_project_memory(question)
-                if project_id is not None else None
+            # 局部 import：避免顶部循环依赖（recall.py / extract.py / memgen.py
+            # → service.py），与 service.recall_memory_block 同模式
+            import os
+            from src.service.memory.vfs import MemoryFS
+            from src.service.memory.memgen import MemoryGen
+            from src.service.memory.recall import (
+                MemoryRecaller, MemoryL0Store, _DefaultEmbedder,
             )
-            if proj_content:
-                await write_explicit_project_memory(
-                    db, project_id=project_id, user_id=user_id,
-                    session_id=session_id, content=proj_content,
-                )
-            else:
-                write_kind = "user"
-                content = detect_explicit_memory(question)
-                if content:
-                    intent = await parse_user_memory_intent(llm, content)
-                    if intent.get("tier") == "user":
-                        await write_explicit_memory(
-                            db, user_id=user_id, session_id=session_id,
-                            content=intent["content"],
-                            kind=intent["kind"],
-                            supersedes_kind=intent.get("supersedes_kind"),
-                        )
-                    else:
-                        # tier=='skip'：解析判定不值得长期记 → 不写。留 debug 痕便于
-                        # 排查"用户说了记住却没记住"（区分 skip / detect-None / 写失败）。
-                        _log.debug(
-                            "user memory intent tier=%s, skip write for session %s",
-                            intent.get("tier"), session_id,
-                        )
+            from src.service.memory.extract import MemoryExtractor
+
+            # 构造 fs（默认 root 由 KE_MEM_ROOT 环境变量或仓库根派生）
+            fs = MemoryFS()
+            # MemoryGen + Weaviate 客户端（沿用 service.recall_memory_block 的
+            # env 读取方式；S7 hardening 把这些提到 module-level singleton）
+            memgen = MemoryGen(llm)
+            url = os.getenv("WEAVIATE_URL", "http://127.0.0.1:8080")
+            grpc_port = int(os.getenv("WEAVIATE_GRPC_PORT", "50051"))
+            api_key = os.getenv("WEAVIATE_API_KEY") or None
+            store = MemoryL0Store(
+                url=url, grpc_port=grpc_port,
+                collection_name="memory_l0", dimension=1024, api_key=api_key,
+            )
+            recaller = MemoryRecaller(
+                embedder=_DefaultEmbedder(),
+                weaviate_client=store._client,
+            )
+            extractor = MemoryExtractor(llm)
+            # 拼本轮文本（user + assistant）喂 ReAct
+            turn_text = f"用户：{question}\n助理：{answer}"
+            await extractor.extract_and_persist(
+                fs, memgen, recaller,
+                user_id=user_id,
+                turn_text=turn_text,
+            )
         except Exception:
             _log.debug(
-                "explicit %s memory write failed for session %s, silently ignored",
-                write_kind, session_id, exc_info=True,
+                "S4 ReAct extract failed for session %s, silently ignored",
+                session_id, exc_info=True,
             )
-        # 2. 会话压缩（固定 N 轮；service 内部已 try/except 兜底）
+        # 2. 会话压缩（§22 暂留 DB tier，S5 后续迁文件）
         try:
-            await maybe_compact_session(db, llm, session_id=session_id, force=force_compact)
+            await maybe_compact_session(
+                db, llm, session_id=session_id, force=force_compact,
+            )
         except Exception:
             pass
 

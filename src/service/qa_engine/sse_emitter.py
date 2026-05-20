@@ -60,10 +60,11 @@ OnTitleCallback = Callable[
 ]
 
 # on_memory 回调：done + session_title 之后调用（镜像 on_title 模式）。
-# router 用它来：解析显式记忆意图 → 写 qa_user_memory + 视情况压缩会话记忆。
-# 返回 None；失败静默（记忆是辅助，绝不影响主答）。
+# router 用它来：ReAct 抽取本轮可记忆事实 → 写文件 .md → S2.regenerate + S3.index_changed
+# + 视情况压缩会话记忆。返回 None；失败静默（记忆是辅助，绝不影响主答）。
+# 入参 answer_text：assistant 本轮答案的拼接文本（S4 ReAct 需要看 user+assistant 两侧）。
 OnMemoryCallback = Callable[
-    [],
+    [str],
     Awaitable[None],
 ]
 
@@ -328,7 +329,12 @@ async def stream_qa_answer(
     # 这里失败（客户端断开 / 写库异常）静默——记忆是辅助功能，绝不影响主答。
     if on_memory is not None:
         try:
-            await on_memory()
+            # 拼 assistant 输出文本：所有 section content 用双换行连接
+            # S4 ReAct 需要看 user + assistant 本轮全文
+            answer_text = "\n\n".join(
+                (s.get("content") or "") for s in answer.sections
+            )
+            await on_memory(answer_text)
         except Exception:
             pass
 
