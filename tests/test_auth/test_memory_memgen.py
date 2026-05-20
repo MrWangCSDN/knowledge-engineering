@@ -432,3 +432,83 @@ async def test_pathological_md_named_slug_does_not_collide_with_dir_l0(tmp_path)
     assert "病理：空 slug 的异常体" not in dir_body
     # 仅 good 的文件 L0 被计入（_FixedLLM 已过滤目录调用）
     assert llm.calls == 1
+
+
+# ── Task 4：S6 整树自愈 + 端到端幂等（§3.7⑥④）───────────────────
+@pytest.mark.asyncio
+async def test_s6_whole_tree_one_regenerate_self_heals(tmp_path):
+    """模拟 S6 迁移：直接经 MemoryFS 批量写一棵树（无 L0/L1），
+    调一次 regenerate(整树 uri 列表) → 全部 L0/L1 正确生成。
+    """
+    fs = _fs(tmp_path)
+    llm = _RoutingLLM()
+    gen = MemoryGen(llm)
+    tree = {
+        "ke://u/9/global/identity/name.md": _mem("identity", "名字是李龙飞"),
+        "ke://u/9/global/identity/alias.md": _mem("identity", "别名老李"),
+        "ke://u/9/global/preference/lang.md": _mem("preference", "偏好中文"),
+        "ke://u/9/project/p1/preference/scope.md":
+            _mem("preference", "只看支付域"),
+    }
+    for uri, content in tree.items():
+        await fs.write(uri, content)
+
+    await gen.regenerate(fs, list(tree.keys()))
+
+    # 每个记忆文件 L0
+    for uri in tree:
+        assert await fs.exists(uri[: -len(".md")] + ".abstract.md"), uri
+    # 每个被触及目录 L0+L1（含租户根 ke://u/9）
+    for d in (
+        "ke://u/9/global/identity",
+        "ke://u/9/global/preference",
+        "ke://u/9/global",
+        "ke://u/9/project/p1/preference",
+        "ke://u/9/project/p1",
+        "ke://u/9/project",
+        "ke://u/9",
+    ):
+        assert await fs.exists(d + "/.abstract.md"), d
+        assert await fs.exists(d + "/.overview.md"), d
+    # 自底向上一致性：租户根 .overview.md 的 inputs_hash 与其 .abstract.md 相同
+    am, _ = _split_frontmatter(await fs.read("ke://u/9/.abstract.md"))
+    om, _ = _split_frontmatter(await fs.read("ke://u/9/.overview.md"))
+    assert am["inputs_hash"] == om["inputs_hash"]
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_idempotent_zero_incremental_llm(tmp_path):
+    """整树跑两次：第二次哈希全命中 → fake LLM 零新增调用、全部文件逐字节不变。"""
+    fs = _fs(tmp_path)
+    llm = _RoutingLLM()
+    gen = MemoryGen(llm)
+    tree = {
+        "ke://u/9/global/identity/name.md": _mem("identity", "名字是李龙飞"),
+        "ke://u/9/global/preference/lang.md": _mem("preference", "偏好中文"),
+    }
+    for uri, content in tree.items():
+        await fs.write(uri, content)
+    await gen.regenerate(fs, list(tree.keys()))
+    calls_1 = len(llm.calls)
+    assert calls_1 > 0
+
+    # 收集全部生成文件快照
+    def _all_gen_uris():
+        return [
+            "ke://u/9/global/identity/name.abstract.md",
+            "ke://u/9/global/preference/lang.abstract.md",
+            "ke://u/9/global/identity/.abstract.md",
+            "ke://u/9/global/identity/.overview.md",
+            "ke://u/9/global/preference/.abstract.md",
+            "ke://u/9/global/preference/.overview.md",
+            "ke://u/9/global/.abstract.md",
+            "ke://u/9/global/.overview.md",
+            "ke://u/9/.abstract.md",
+            "ke://u/9/.overview.md",
+        ]
+    snap = {p: await fs.read(p) for p in _all_gen_uris()}
+
+    await gen.regenerate(fs, list(tree.keys()))
+    assert len(llm.calls) == calls_1               # 零增量 LLM 调用
+    for p, v in snap.items():
+        assert await fs.read(p) == v               # 逐字节不变
