@@ -1,13 +1,16 @@
 """文件式记忆 S5：会话级 working_summary 文件化压缩器 + 读侧 composer。
 
 设计：[[文件式记忆重构-设计]] §6（§6.0–§6.9）。纯逻辑，不依赖 FastAPI；
-DB 用 duck-typed AsyncSession（真跑用 SQLAlchemy，单测用 Fake），
 LLM 用 duck-typed provider（鸭子 async complete(system,user,**kw)->str）。
 
 S5 公开 API（§6.2）：
-- ``SessionCompactor(llm).compact(fs, db, *, user_id, session_id, ...)`` — 写侧
+- ``SessionCompactor(llm).compact(fs, *, user_id, session_id, ...)`` — 写侧
 - ``read_session_summary(fs, *, user_id, session_id) -> str`` — 读侧
 - ``_summary_uri(user_id, session_id) -> str`` — URI 派生 helper
+
+S6 新增 API（§7.3）：
+- ``write_message_to_fs(fs, *, user_id, session_id, msg_id, role, content, ...)`` — message 写侧
+- ``read_messages_for_session(fs, *, user_id, session_id) -> list[_FsMessage]`` — message 读侧
 
 `maybe_compact_session` (service.py) 的 1:1 语义替换：算法与守卫 verbatim 保留
 （§6.4 数据流），仅把 DB↔fs 交换。
@@ -15,11 +18,9 @@ S5 公开 API（§6.2）：
 from __future__ import annotations
 
 import logging
-from typing import Any
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from sqlalchemy import select
-
-from src.service.db_models_homepage import QAMessage
 from src.service.memory.vfs import MemoryFS, MemoryNotFound
 from src.service.memory.memgen import _render_frontmatter, _split_frontmatter
 from src.service.memory.service import _extract_focus_entity_ids
@@ -90,119 +91,235 @@ class SessionCompactor:
     async def compact(
         self,
         fs: MemoryFS,
-        db: Any,
         *,
         user_id: int,
         session_id: str,
         every_n_messages: int = 6,
         force: bool = False,
     ) -> None:
-        """post-turn 触发的会话压缩。算法 §6.4（T2 实现完整体）。
+        """post-turn 触发的会话压缩。
+
+        设计：[[文件式记忆重构-设计]] §7.5（S6：删 db 参数，step 1 改 fs.ls）。
+        保留 §6.4 verbatim 8 步算法 + 守卫语义；仅替换 DB↔fs 数据源。
+
+        S6 后 backward-incompatible 签名变更：删 `db` 参数（step 1 不再读 DB）。
+        调用方（qa_router._make_memory_writer 闭包）同步改 `compactor.compact(fs, user_id=..., session_id=..., force=...)`。
 
         Args:
-            fs: S1 文件存储层（duck-type async API）
-            db: SQLAlchemy AsyncSession（duck-type；S5 仅读 QAMessage，S6 才迁文件）
+            fs: S1 文件存储层（duck-type async API）— 既读 messages 也写 summary
             user_id: KE Integer ≥1，租户 ID
             session_id: KE String(64)，业务会话串
             every_n_messages: floor 阈值；msg_count < N 时早退（§6.4 step 2）
             force: True 表示上下文压力触发（spec §18），降低 floor 至 2、min_delta 至 1
         """
         try:
-            # ─── step 1: 拉本 session 所有 messages（仍 DB；QAMessage 文件化属 S6） ───
-            # select(QAMessage).where(...).order_by(...) 沿用 service.py 既有写法
-            msg_res = await db.execute(
-                select(QAMessage)
-                .where(QAMessage.session_id == session_id)
-                .order_by(QAMessage.created_at)
+            # ─── step 1: 拉本 session 全部 messages（S6 后：fs 而非 DB） ───
+            # read_messages_for_session 按 created_at 升序返；目录不存在返 []
+            messages = await read_messages_for_session(
+                fs, user_id=user_id, session_id=session_id
             )
-            # .scalars().all() 把 Row 对象拆为列扁平 list（ORM 单实体 select 标准用法）
-            messages = msg_res.scalars().all()
             msg_count = len(messages)
 
-            # ─── step 2: floor 判定（与旧版 maybe_compact_session 同：force 降门槛到 2） ───
-            # force=True（上下文压力 spec §18）：越过固定 N floor，但仍要求 msg_count ≥ 2
+            # ─── step 2: floor 判定（与 S5 同：force 降门槛到 2） ───
             floor = 2 if force else every_n_messages
             if msg_count < floor:
-                # 消息数不足 floor → 不调 LLM、不读 fs、不写 fs（成本守卫）
                 return
 
-            # ─── step 3: 读旧 summary.md（不存在 → 首压，prev_turn_count=0, prev_summary="") ───
+            # ─── step 3: 读旧 summary.md（不存在 → 首压） ───
             uri = _summary_uri(user_id, session_id)
             prev_turn_count = 0
             prev_summary = ""
             try:
-                # fs.read 不存在抛 MemoryNotFound（vfs.py read 契约）
                 raw = await fs.read(uri)
-                # S2 helper 拆 frontmatter；非法 YAML 已被 S2 内部容错为空 dict {}
                 fm, body = _split_frontmatter(raw)
-                # body 是 frontmatter 闭合后的部分（或无 frontmatter 时即全文）
                 prev_summary = (body or "").strip()
-                # fm 由 _split_frontmatter 保证是 dict（空 YAML / 损坏 → {}），
-                # 故只需检查 turn_count 字段类型 + ≥0 取值（防手工误改产出 -5 等）
                 tc = fm.get("turn_count")
                 if isinstance(tc, int) and tc >= 0:
                     prev_turn_count = tc
             except MemoryNotFound:
-                # 首压路径：summary.md 还不存在 → prev_turn_count 维持 0
                 pass
 
-            # ─── step 4: delta 判定（自上次压缩起新增 ≥ N；force 降到 ≥ 1） ───
-            # 与旧版同：避免「过阈后每轮压缩 = 成本 bug」（消息每轮 +2，过 6 后会每轮跑 LLM）
+            # ─── step 4: delta 判定 ───
             min_delta = 1 if force else every_n_messages
             if msg_count - prev_turn_count < min_delta:
                 return
 
-            # ─── step 5: 拼 convo：§21 递归累积（旧 summary + 仅自水位线起的新增消息） ───
-            # messages[prev_turn_count:] 取自上次压缩水位线起的新增 messages
-            # 旧 summary 已被 LLM 浓缩 → 不再二次浓缩老消息，token 输入恒有界
+            # ─── step 5: 拼 convo（§21 递归累积） ───
             new_msgs = messages[prev_turn_count:]
             parts: list[str] = []
             if prev_summary:
                 parts.append("【已有会话摘要】\n" + prev_summary)
-            # 守卫已保证 msg_count - prev_turn_count >= min_delta >= 1 → new_msgs 必非空；
-            # 仍以 if 守一层，与 prev_summary 段对称且对未来阈值改动稳健
             if new_msgs:
                 parts.append(
                     "【新增对话】\n"
                     + "\n".join(
-                        # [role] 前缀 + content 截 200 字（与旧版一致）；
-                        # 截断防单条消息撑爆 LLM context；m.content 可能 None → 默认 ""
                         f"[{m.role}] {(m.content or '')[:200]}" for m in new_msgs
                     )
                 )
-            # 两段间用 \n\n 分隔（同旧版 service.py:152）
             convo = "\n\n".join(parts)
 
             # ─── step 6: LLM 调用 ───
             summary = await self._llm.complete(system=_SESSION_COMPACT_SYSTEM, user=convo)
-            # strip 防 LLM 返带前后空白；None 防鸭子 LLM 实现失误返 None
             summary = (summary or "").strip()
             if not summary:
-                # LLM 返空 → 不写文件（旧 summary.md 维持，下轮 delta 守卫重试）
                 return
 
-            # ─── step 7: focus_entity_ids 聚合（复用 service.py 既有 helper，S4/S5 共用） ───
-            # messages[-12:] 取末 12 条（最近 ~6 轮）做 focus 主题判定；
-            # _extract_focus_entity_ids 内部已防御 missing/bad metadata，不抛
+            # ─── step 7: focus_entity_ids 聚合 ───
             focus = _extract_focus_entity_ids(messages[-12:])
 
-            # ─── step 8: 写新 summary.md（frontmatter + body，复用 S2 helper） ───
+            # ─── step 8: 写新 summary.md ───
             fm_new = {
-                "turn_count": msg_count,                  # 新水位线
-                "focus_entity_ids": focus,                # 截 _FOCUS_MAX=10
-                "updated_at": _now_iso_z(),               # ISO 8601 Z（S4 helper 复用）
+                "turn_count": msg_count,
+                "focus_entity_ids": focus,
+                "updated_at": _now_iso_z(),
             }
-            # _render_frontmatter(meta, body) 真签名：返 "---\n{YAML}---\n{body}"
-            # 调用方约定 body 自带末尾换行（S2 _render_frontmatter docstring 明示）
             content = _render_frontmatter(fm_new, summary + "\n")
-            # fs.write 原子写（S1 os.replace POSIX rename）；并发安全
             await fs.write(uri, content)
 
         except Exception:
-            # 中层失败语义（§6.5）：整体 try/except → debug 留痕 + return None，绝不抛
-            # 记忆是辅助（§4.3），主答绝不受影响
             _log.debug(
                 "SessionCompactor.compact failed for session %s, silently ignored",
                 session_id, exc_info=True,
             )
             return
+
+
+# ─── S6: fs-back message helpers（§7.3）──────────────────────────────────────
+
+
+@dataclass
+class _FsMessage:
+    """fs-back message 鸭子类型（duck-type 等价于已删的 QAMessage ORM）。
+
+    设计：[[文件式记忆重构-设计]] §7.3。
+    满足 SessionCompactor.compact step 5 + _extract_focus_entity_ids 的属性访问契约：
+    - role / content / msg_metadata / created_at
+
+    S6 后 `SessionCompactor.compact step 1` 读 fs 返 `list[_FsMessage]` 替代
+    DB ORM rows；下游代码（step 5 / step 7）按属性访问对接 — 鸭子兼容。
+    """
+    role: str
+    content: str | None
+    msg_metadata: dict | None
+    created_at: datetime
+
+
+def _messages_dir_uri(user_id: int, session_id: str) -> str:
+    """URI 派生：ke://u/{uid}/session/{sid}/messages（无尾 /）。"""
+    # 与 _summary_uri 同模式；末段不含文件名 — 用于 fs.ls 目录扫描
+    return f"ke://u/{user_id}/session/{session_id}/messages"
+
+
+def _message_uri(user_id: int, session_id: str, msg_id: str) -> str:
+    """URI 派生：ke://u/{uid}/session/{sid}/messages/{msg_id}.md。
+
+    msg_id 复用 KE 既有 String(64)（如 "msg_xyz789"），跨 session 唯一。
+    """
+    return f"ke://u/{user_id}/session/{session_id}/messages/{msg_id}.md"
+
+
+async def write_message_to_fs(
+    fs: MemoryFS,
+    *,
+    user_id: int,
+    session_id: str,
+    msg_id: str,
+    role: str,
+    content: str | None,
+    sections: list[dict] | None = None,
+    msg_metadata: dict | None = None,
+    created_at: datetime | None = None,
+) -> None:
+    """写一条 message 到 fs（per-message file）。
+
+    设计：[[文件式记忆重构-设计]] §7.3 + §7.4。
+    `qa_router persist_messages` callback 用此 helper 替换 DB add/commit。
+
+    路径：ke://u/{uid}/session/{sid}/messages/{msg_id}.md
+    frontmatter: role + created_at(ISO Z) + 可选 sections + 可选 msg_metadata
+    body: content + "\\n"（与 S5 SessionCompactor.compact step 8 同约定）
+
+    Args:
+        fs: S1 文件存储层
+        user_id / session_id / msg_id: 路径派生
+        role: "user" / "assistant"
+        content: 文本内容（user 必有；assistant 可为 None — 6 段式在 sections）
+        sections: assistant 才有的 6 段式结构化内容
+        msg_metadata: assistant 才有的 entry_points / cited_entities / token_usage 等
+        created_at: 不传则用当前 UTC 时间（datetime.now(timezone.utc)）
+    """
+    # 默认时间 = 当前 UTC；调用方可传入精确时间
+    if created_at is None:
+        created_at = datetime.now(timezone.utc)
+    # 拼 frontmatter dict；可选字段仅在非 None 时入 frontmatter（保持 YAML 干净）
+    fm: dict = {
+        "role": role,
+        # ISO 8601 Z 字符串（与 S4 _now_iso_z 同格式）
+        "created_at": created_at.strftime("%Y-%m-%dT%H:%M:%SZ") if created_at.tzinfo else created_at.isoformat(),
+    }
+    if sections is not None:
+        fm["sections"] = sections
+    if msg_metadata is not None:
+        fm["msg_metadata"] = msg_metadata
+    # body 末尾换行（S2 _render_frontmatter docstring 约定）
+    body = (content or "") + "\n"
+    raw = _render_frontmatter(fm, body)
+    uri = _message_uri(user_id, session_id, msg_id)
+    await fs.write(uri, raw)
+
+
+async def read_messages_for_session(
+    fs: MemoryFS, *, user_id: int, session_id: str,
+) -> list[_FsMessage]:
+    """读 session 全部 message 文件，按 created_at 升序返。
+
+    设计：[[文件式记忆重构-设计]] §7.3。drop-in 替换 SessionCompactor.compact
+    step 1 的 DB `select QAMessage`（S6 后唯一 message 真相源）。
+
+    路径不存在（session 无消息）→ 返 []（首压路径 / 新 session）。
+    单 message 文件损坏 → _log.debug 跳过该消息（与 S2 同模式）。
+    """
+    dir_uri = _messages_dir_uri(user_id, session_id)
+    try:
+        filenames = await fs.ls(dir_uri)
+    except MemoryNotFound:
+        # 目录不存在 = session 还没写过任何 message → 返空
+        return []
+    except Exception as exc:
+        _log.debug("read_messages_for_session ls failed: %r", exc)
+        return []
+
+    out: list[_FsMessage] = []
+    for fname in filenames:
+        if not fname.endswith(".md"):
+            continue
+        file_uri = f"{dir_uri}/{fname}"
+        try:
+            raw = await fs.read(file_uri)
+            fm, body = _split_frontmatter(raw)
+            role = fm.get("role")
+            if not isinstance(role, str) or not role:
+                _log.debug("read_messages_for_session: skip missing role in %s", file_uri)
+                continue
+            created_at_str = fm.get("created_at")
+            if not isinstance(created_at_str, str):
+                _log.debug("read_messages_for_session: skip missing created_at in %s", file_uri)
+                continue
+            # Python 3.12 datetime.fromisoformat 原生支持 Z 后缀
+            created_at = datetime.fromisoformat(created_at_str)
+            msg_metadata = fm.get("msg_metadata")
+            if msg_metadata is not None and not isinstance(msg_metadata, dict):
+                msg_metadata = None
+            content_text = body.strip() if isinstance(body, str) else None
+            out.append(_FsMessage(
+                role=role,
+                content=content_text,
+                msg_metadata=msg_metadata,
+                created_at=created_at,
+            ))
+        except Exception as exc:
+            _log.debug("read_messages_for_session: skip corrupt file %s: %r", file_uri, exc)
+            continue
+
+    out.sort(key=lambda m: m.created_at)
+    return out
