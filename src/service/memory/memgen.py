@@ -144,12 +144,15 @@ class MemoryGen:
     # ── 分类辅助 ──────────────────────────────────────────────────
     @staticmethod
     def _is_memory_file(uri: str) -> bool:
-        """记忆文件 = 以 .md 结尾，且不是 .abstract.md / .overview.md，且
-        slug 非空（拒绝末段恰为 ``.md`` 的病理 URI——否则其 abs_uri 会与该
-        目录自身 ``.abstract.md`` 冲突；S4 规范 slug 为非空 kebab）。
+        """记忆文件 = ``ke://u/`` 前缀 + 以 .md 结尾，且不是
+        .abstract.md / .overview.md，且 slug 非空（拒绝末段恰为 ``.md``
+        的病理 URI——否则其 abs_uri 会与该目录自身 ``.abstract.md`` 冲突；
+        S4 规范 slug 为非空 kebab）。前缀检查与 _ancestor_dirs 对称，
+        让分类契约对非 ke://u/ 错配输入也明确拒收（而非到 fs.read 才报错）。
         """
         return (
-            uri.endswith(_MD_SUFFIX)
+            uri.startswith("ke://u/")
+            and uri.endswith(_MD_SUFFIX)
             and not uri.endswith(_ABSTRACT_SUFFIX)
             and not uri.endswith(_OVERVIEW_NAME)
             and not uri.endswith("/" + _MD_SUFFIX)   # 末段恰为 ".md" → 空 slug
@@ -271,12 +274,21 @@ class MemoryGen:
         need_ovr = await self._stale(fs, ovr_uri, inputs_hash)
         if need_abs:
             a = await self._llm.complete(system=_MEM_L0_SYSTEM, user=joined)
+            # 与 _gen_file_l0 对称防护：空/纯空白响应不得固化（其 inputs_hash 命中
+            # 后此后永久跳过 = 粘滞坏态，§3.3/§3.5 自愈受损）。抛错 → 上层隔离
+            # 记 debug、下轮重试；L1 提示更长更易触发截断/拒答，风险更高。
+            a_clean = a.strip()
+            if not a_clean:
+                raise ValueError(f"empty dir L0 summary for {dir_uri!r}")
             await fs.write(abs_uri, _render_frontmatter(
-                {"inputs_hash": inputs_hash}, a.strip() + "\n"))
+                {"inputs_hash": inputs_hash}, a_clean + "\n"))
         if need_ovr:
             o = await self._llm.complete(system=_MEM_L1_SYSTEM, user=joined)
+            o_clean = o.strip()
+            if not o_clean:
+                raise ValueError(f"empty dir L1 overview for {dir_uri!r}")
             await fs.write(ovr_uri, _render_frontmatter(
-                {"inputs_hash": inputs_hash}, o.strip() + "\n"))
+                {"inputs_hash": inputs_hash}, o_clean + "\n"))
         if not need_abs and not need_ovr:
             _log.debug("dir L0/L1 hash hit, skip %r", dir_uri)
 

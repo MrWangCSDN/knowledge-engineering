@@ -512,3 +512,78 @@ async def test_end_to_end_idempotent_zero_incremental_llm(tmp_path):
     assert len(llm.calls) == calls_1               # 零增量 LLM 调用
     for p, v in snap.items():
         assert await fs.read(p) == v               # 逐字节不变
+
+
+@pytest.mark.asyncio
+async def test_dir_l0_l1_empty_llm_response_not_persisted(tmp_path, caplog):
+    """目录 L0/L1 拿到空/纯空白响应不得固化（与 _gen_file_l0 对称防护）：
+    否则其 inputs_hash 命中源输入 → 此后永久跳过 = 粘滞坏态，破坏 §3.3/
+    §3.5 自愈。L1 提示更长更易触发 LLM 截断/拒答 → 风险更高。
+    """
+    fs = _fs(tmp_path)
+
+    class _DirEmptyOnFirst:
+        """文件 L0 正常；首个目录调用返回纯空白（验证目录隔离 + 不固化）。"""
+        def __init__(self):
+            self._first_dir_done = False
+
+        async def complete(self, *, system: str, user: str, **kw) -> str:
+            # 文件 L0 用户输入为记忆正文，不以 "## " 起首
+            if not user.startswith("## "):
+                return "FILE_L0_OK"
+            # 首个目录调用返回纯空白 → 触发 _gen_dir_l0_l1 的 ValueError 隔离
+            if not self._first_dir_done:
+                self._first_dir_done = True
+                return "   \n  "
+            return "DIR_OK"
+
+    gen = MemoryGen(_DirEmptyOnFirst())
+    uri = "ke://u/7/global/identity/name.md"
+    await fs.write(uri, _mem("identity", "名字是李龙飞"))
+
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="src.service.memory.memgen"):
+        await gen.regenerate(fs, [uri])
+
+    # 首个目录调用空白响应 → 抛错被隔离 → identity 目录 L0 / L1 未写出
+    # （inputs_hash 未固化 → 下轮可重试自愈）
+    assert not await fs.exists("ke://u/7/global/identity/.abstract.md")
+    assert not await fs.exists("ke://u/7/global/identity/.overview.md")
+    assert any("dir L0/L1 failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_dir_failure_in_one_subtree_does_not_block_other(tmp_path, caplog):
+    """两独立子树：一支目录 LLM 抛错被隔离 → 另一支 L0/L1 仍生成（§3.5
+    真正的跨目录隔离；既有单子树用例无法证明因「其他目录」无可用子项）。
+    """
+    fs = _fs(tmp_path)
+
+    class _OneSubtreeBoom:
+        """identity 子树的目录调用抛错；preference 子树正常。"""
+        async def complete(self, *, system: str, user: str, **kw) -> str:
+            # 文件 L0 不以 "## " 起 → 始终成功
+            if not user.startswith("## "):
+                return "FILE_L0_OK"
+            # 目录聚合输入分节为 "## {key}\n{v}"：identity 直接子项仅 name.md
+            # （key=name）；据此识别 identity 子树（及其祖先尚未含 preference）
+            if "## name" in user and "## lang" not in user:
+                raise RuntimeError("identity subtree boom")
+            return "DIR_OK"
+
+    gen = MemoryGen(_OneSubtreeBoom())
+    a = "ke://u/7/global/identity/name.md"
+    b = "ke://u/7/global/preference/lang.md"
+    await fs.write(a, _mem("identity", "名字是李龙飞"))
+    await fs.write(b, _mem("preference", "偏好中文"))
+
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="src.service.memory.memgen"):
+        await gen.regenerate(fs, [a, b])
+
+    # preference 子树未被连累：其目录 L0 + L1 都生成
+    assert await fs.exists("ke://u/7/global/preference/.abstract.md")
+    assert await fs.exists("ke://u/7/global/preference/.overview.md")
+    # identity 子树被隔离：log 含 "dir L0/L1 failed"，其 .abstract.md 未写出
+    assert not await fs.exists("ke://u/7/global/identity/.abstract.md")
+    assert any("dir L0/L1 failed" in r.message for r in caplog.records)
