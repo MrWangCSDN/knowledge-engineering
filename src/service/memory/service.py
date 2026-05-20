@@ -9,10 +9,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import select
-
-from src.service.db_models_homepage import QASessionMemory, QAMessage
-from src.service.qa_engine.prompts import _SESSION_COMPACT_SYSTEM
 
 _log = logging.getLogger(__name__)
 
@@ -95,86 +91,3 @@ def _extract_focus_entity_ids(messages: Any) -> list[str]:
                     if len(out) >= _FOCUS_MAX:
                         return out
     return out
-
-
-async def maybe_compact_session(
-    db: Any, llm: Any, *, session_id: str, every_n_messages: int = 6,
-    force: bool = False,
-) -> None:
-    """会话级压缩：每「自上次压缩以来新增 ≥ every_n_messages 条消息」压缩一次。
-
-    设计：[[记忆系统-设计]] §4.3（P1 固定 N 轮，N=6 条≈3 轮问答）。
-    turn_count 记录上次压缩时的 message_count；用「增量 ≥ N」判定，
-    而非「过阈值后每轮都压」——否则消息每轮 +2，过阈后每轮都会调 LLM（成本 bug）。
-    任何异常都吞掉并 debug 记录（记忆是辅助，绝不影响主答）。
-    force=True（上下文压力，spec §18）：越过固定 N floor，但仍要求自上次压缩起 ≥1 条新增。
-    """
-    try:
-        msg_res = await db.execute(
-            select(QAMessage)
-            .where(QAMessage.session_id == session_id)
-            .order_by(QAMessage.created_at)
-        )
-        messages = msg_res.scalars().all()
-        msg_count = len(messages)
-        floor = 2 if force else every_n_messages
-        if msg_count < floor:
-            return
-
-        sm_res = await db.execute(
-            select(QASessionMemory).where(QASessionMemory.session_id == session_id)
-        )
-        sm = sm_res.scalars().one_or_none()
-
-        # 距上次压缩的新增量不足 N → 跳过（实现「每 N 条压一次」而非「过阈后每轮压」）
-        prev = (sm.turn_count or 0) if sm is not None else 0
-        min_delta = 1 if force else every_n_messages
-        if msg_count - prev < min_delta:
-            return
-
-        # §21 递归累积：输入 = 上一版摘要 + 仅自水位线(prev)以来的新增消息。
-        # 早期事实进早期摘要后被永久滚动保留（对齐 Claude Code 携带摘要再摘要）；
-        # 输入恒有界（旧摘要 ≤ 摘要上限 + 新增量有界），无 token 膨胀。
-        prev_summary = (sm.working_summary or "").strip() if sm is not None else ""
-        new_msgs = messages[prev:]
-        parts: list[str] = []
-        if prev_summary:
-            parts.append("【已有会话摘要】\n" + prev_summary)
-        # 守卫已保证 msg_count - prev >= min_delta >= 1 → new_msgs 必非空；
-        # 仍以 if 守一层，与 prev_summary 段对称且对未来阈值改动稳健（记忆辅助路径绝不抛）。
-        if new_msgs:
-            parts.append(
-                "【新增对话】\n"
-                + "\n".join(
-                    f"[{m.role}] {(m.content or '')[:200]}" for m in new_msgs
-                )
-            )
-        convo = "\n\n".join(parts)
-        summary = await llm.complete(system=_SESSION_COMPACT_SYSTEM, user=convo)
-        summary = (summary or "").strip()
-        if not summary:
-            return
-
-        focus = _extract_focus_entity_ids(messages[-12:])
-
-        if sm is None:
-            db.add(
-                QASessionMemory(
-                    session_id=session_id,
-                    working_summary=summary,
-                    turn_count=msg_count,
-                    focus_entity_ids=focus,
-                )
-            )
-        else:
-            sm.working_summary = summary
-            sm.turn_count = msg_count
-            sm.focus_entity_ids = focus
-        await db.commit()
-    except Exception:
-        # 压缩失败绝不影响主流程（spec §4.3）；debug 留痕便于排查（不影响主答）
-        _log.debug(
-            "maybe_compact_session failed for session %s, silently ignored",
-            session_id, exc_info=True,
-        )
-        return
