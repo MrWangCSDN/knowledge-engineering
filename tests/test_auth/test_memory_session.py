@@ -66,8 +66,8 @@ async def test_read_session_summary_corrupt_frontmatter_returns_body(tmp_path):
 
 from src.service.memory.session import SessionCompactor
 
-from dataclasses import dataclass, field
-from typing import Any as _Any
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -80,7 +80,7 @@ class _FakeMessage:
     role: str
     content: str
     msg_metadata: dict | None = None
-    created_at: _Any = None
+    created_at: Any = None
 
 
 class _FakeMsgScalars:
@@ -221,8 +221,8 @@ async def test_compact_recursive_folds_prior_summary_and_only_new_msgs(tmp_path)
     # 旧消息（前 6 条）不入 convo（已被 prev_summary 浓缩）
     assert "老消息 0" not in user_input
     assert "老消息 5" not in user_input
-    # 新消息（后 6 条）入 convo
-    assert "新消息 6-讨论西瓜" in user_input or "新消息 11-讨论西瓜" in user_input
+    # 新消息（后 6 条）入 convo — 严格验证 all 6 都在（防 messages[6:] 切片 off-by-one bug）
+    assert all(f"新消息 {i}-讨论西瓜" in user_input for i in range(6, 12))
 
     # 写后 turn_count=12
     raw = await fs.read(uri)
