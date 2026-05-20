@@ -487,7 +487,7 @@ async def get_session_detail(
                 "session_id": session_id,
                 "role": m.role,
                 "content": m.content,
-                "sections": getattr(m, "sections", None),
+                "sections": m.sections,
                 "metadata": m.msg_metadata,
                 "created_at": _iso(m.created_at),
             }
@@ -509,7 +509,12 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> None:
-    """删除会话 → 级联删 messages → 级联删 feedback。"""
+    """删除会话：从 DB 删 qa_sessions 行；fs 端 message 文件保留 orphan（S7 清理）。
+
+    S6 注：qa_messages / qa_feedback 表已删（§7.6），DB 不再级联消息/反馈；
+    fs 端 ke://u/{uid}/session/{sid}/messages/ 文件在 session 被删后成 orphan，
+    暂留待 S7 引入 fs 端级联清理（同 §7.11 #N 注记）。
+    """
     sess = await db.get(QASession, session_id)
     if not sess or sess.project_id != project_id or sess.user_id != user.id:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -771,7 +776,6 @@ async def post_feedback(
     session_id: str,
     message_id: str,
     body: FeedbackRequest,
-    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> None:
     """对一条 assistant 消息打反馈（覆盖式 upsert）。
@@ -838,11 +842,19 @@ async def export_message(
         raise HTTPException(status_code=404, detail="会话不存在")
 
     # 4) 从 fs 读 session 所有消息（S6：qa_messages 表已删，改读 fs）
+    # hoisted imports：单次 import + 单 fs 实例，steps 4/5 共用
     try:
-        from src.service.memory.session import read_messages_for_session, _message_uri
+        from src.service.memory.session import (
+            read_messages_for_session, _message_uri, _split_frontmatter, _FsMessage,
+        )
         from src.service.memory.vfs import MemoryFS as _MemFS
-        _fs = _MemFS()
-        all_msgs = await read_messages_for_session(_fs, user_id=user.id, session_id=session_id)
+        fs = _MemFS()
+    except Exception:
+        # 极罕见 import 失败 → 404
+        raise HTTPException(status_code=404, detail="消息不存在")
+
+    try:
+        all_msgs = await read_messages_for_session(fs, user_id=user.id, session_id=session_id)
     except Exception:
         all_msgs = []
 
@@ -850,14 +862,9 @@ async def export_message(
     # S6 后 message_id 仍用于路径 ke://u/{uid}/session/{sid}/messages/{msg_id}.md
     target_msg = None
     try:
-        from src.service.memory.session import _message_uri
-        from src.service.memory.vfs import MemoryFS as _MemFS2
-        import json as _json
-        raw = await _MemFS2().read(_message_uri(user.id, session_id, message_id))
+        raw = await fs.read(_message_uri(user.id, session_id, message_id))
         # 简单解析 frontmatter（复用 session._split_frontmatter 同逻辑）
-        from src.service.memory.session import _split_frontmatter
         fm, body_text = _split_frontmatter(raw)
-        from src.service.memory.session import _FsMessage
         target_msg_sections = fm.get("sections") or []
         target_msg = _FsMessage(
             role=fm.get("role", ""),

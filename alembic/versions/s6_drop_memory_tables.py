@@ -42,6 +42,10 @@ def downgrade() -> None:
 
     不提供数据恢复 — upgrade 已不可逆地删除了所有行；若需恢复数据，
     请手工从备份还原。
+
+    注：updated_at 列仅设 server_default=func.now()，**不**设 onupdate —
+    与原 migration 文件一致（onupdate 是 ORM-layer feature，op.create_table 不支持）。
+    若 downgrade 后 ORM 复活，需 onupdate 行为，应手工 ALTER 或经 ORM 自动管理。
     """
     import sqlalchemy as sa
 

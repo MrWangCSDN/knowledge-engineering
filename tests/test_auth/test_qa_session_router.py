@@ -263,7 +263,12 @@ def test_post_feedback_404_on_unknown_message(client, seeded_session):
 
 
 def test_post_feedback_validates_vote(client, seeded_session):
-    """vote 只能是 up / down（Pydantic 422 在 endpoint 体执行前触发）。"""
+    """vote 只能是 up / down（Pydantic 422 在 endpoint 体执行前触发）。
+
+    S6 注：post_feedback 已暂返 404 stub（qa_feedback 表已删，S7 迁文件后恢复完整契约）；
+    本测试验证的是 Pydantic body validation（vote enum 校验），独立于 endpoint 体 stub
+    状态，未来 S7 恢复完整契约后本测试断言不变（仍 422）。
+    """
     token, _ = _login(client)
     r = client.post(
         f"/projects/deposit/qa/sessions/{seeded_session}/messages/msg_a_1/feedback",
