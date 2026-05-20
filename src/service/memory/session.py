@@ -193,7 +193,7 @@ class _FsMessage:
 
     设计：[[文件式记忆重构-设计]] §7.3。
     满足 SessionCompactor.compact step 5 + _extract_focus_entity_ids 的属性访问契约：
-    - role / content / msg_metadata / created_at
+    - role / content / msg_metadata / created_at / sections
 
     S6 后 `SessionCompactor.compact step 1` 读 fs 返 `list[_FsMessage]` 替代
     DB ORM rows；下游代码（step 5 / step 7）按属性访问对接 — 鸭子兼容。
@@ -202,6 +202,7 @@ class _FsMessage:
     content: str | None
     msg_metadata: dict | None
     created_at: datetime
+    sections: list | None = None
 
 
 def _messages_dir_uri(user_id: int, session_id: str) -> str:
@@ -317,12 +318,16 @@ async def read_messages_for_session(
             msg_metadata = fm.get("msg_metadata")
             if msg_metadata is not None and not isinstance(msg_metadata, dict):
                 msg_metadata = None
+            sections = fm.get("sections")
+            if sections is not None and not isinstance(sections, list):
+                sections = None
             content_text = body.strip() if isinstance(body, str) else None
             out.append(_FsMessage(
                 role=role,
                 content=content_text,
                 msg_metadata=msg_metadata,
                 created_at=created_at,
+                sections=sections,
             ))
         except Exception as exc:
             _log.debug("read_messages_for_session: skip corrupt file %s: %r", file_uri, exc)

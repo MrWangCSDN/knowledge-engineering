@@ -21,7 +21,6 @@ from src.service.auth_router import router as auth_router
 from src.service.db import Base, get_db
 from src.service.db_models_homepage import (
     Project as ProjectModel,
-    QAMessage,
     QASession,
     UserProjectAccess,  # v2.0 Task 5：RBAC 测试需要直接操作成员表
 )
@@ -238,8 +237,22 @@ def test_explain_meta_event_includes_skill_decision(client, seed_ready_project):
 # ───────── 持久化 ─────────
 
 @pytest.mark.asyncio
-async def test_explain_persists_user_and_assistant_messages(session_maker, seed_ready_project):
-    """问完一次后 qa_sessions + qa_messages 表应该有 1 个 session 和 2 条消息。"""
+async def test_explain_persists_user_and_assistant_messages(session_maker, seed_ready_project, monkeypatch):
+    """问完一次后 qa_sessions 应有 1 个 session；fs 应收到 2 次 write_message_to_fs 调用。
+
+    S6 改造（§7.4）：原断言 query qa_messages 表 → 改为 mock 计数验证
+    write_message_to_fs 被调用 2 次（user + assistant）。
+    同时验证 qa_session.message_count 在 DB 侧被更新（QASession 仍在 DB）。
+    """
+    # S6：patch write_message_to_fs 为计数 mock（Option B）
+    call_count = [0]
+    async def _counting_write(*args, **kw):
+        call_count[0] += 1
+    monkeypatch.setattr(
+        "src.service.memory.session.write_message_to_fs",
+        _counting_write,
+    )
+
     app = _build_app(session_maker)
     client = TestClient(app)
     token = _login(client)
@@ -253,54 +266,81 @@ async def test_explain_persists_user_and_assistant_messages(session_maker, seed_
         body = "".join(r.iter_text())  # 消费完整流，触发持久化
     assert "event: done" in body
 
-    # 验证 DB 状态
+    # 验证 write_message_to_fs 被调 2 次（user + assistant）
+    assert call_count[0] == 2, f"期望 write_message_to_fs 调 2 次，实际 {call_count[0]}"
+
+    # 验证 qa_session DB 侧状态（QASession 仍在 DB，S6 不涉）
     async with session_maker() as db:
         sess_count = (await db.execute(select(QASession))).scalars().all()
-        msg_count = (await db.execute(select(QAMessage))).scalars().all()
         assert len(sess_count) == 1
-        assert len(msg_count) == 2  # user + assistant
         assert sess_count[0].project_id == seed_ready_project
-        # 标题取问题前 30 字
+        # 标题含问题关键词（由 _make_title_generator 用 llm.complete 生成）
         assert "存款开户" in (sess_count[0].title or "")
+        # message_count 被更新为 2
+        assert sess_count[0].message_count == 2
 
 
 # ───────── v1.5 docx 导出 ─────────
 
 
 @pytest.mark.asyncio
-async def test_export_message_as_docx(session_maker, seed_ready_project):
+async def test_export_message_as_docx(session_maker, seed_ready_project, monkeypatch):
     """GET /sessions/{sid}/messages/{mid}/export?format=docx
        → 返回 200 + word docx binary + Content-Disposition: attachment。
+
+    S6 改造（§7.4）：消息改写 fs；不再查 DB qa_messages。
+    测试策略：用 write_message_to_fs 直接写 fs，再调 export endpoint 验证读取。
     """
+    from datetime import datetime, timezone
+    import asyncio
+
     app = _build_app(session_maker)
     client = TestClient(app)
     token = _login(client)
 
-    # 1) 先发一个问题让 DB 里有 user + assistant 消息
-    with client.stream(
-        "POST",
-        f"/projects/{seed_ready_project}/qa/explain",
-        headers=_auth(token),
-        json={"question": "测试问题"},
-    ) as r:
-        "".join(r.iter_text())  # 消费完触发持久化
+    # 1) 获取 user_id（alice）
+    me_r = client.get("/auth/me", headers=_auth(token))
+    user_id = me_r.json()["id"]
 
-    # 2) 找 assistant 消息的 id
+    # 2) 在 DB 里创建 session（export endpoint 查 QASession）
+    session_id = "sess_export_test_1"
     async with session_maker() as db:
-        msgs = (await db.execute(
-            select(QAMessage).where(QAMessage.role == "assistant")
-        )).scalars().all()
-        assert len(msgs) == 1
-        assistant_msg = msgs[0]
-        session_id = assistant_msg.session_id
+        db.add(QASession(
+            id=session_id,
+            project_id=seed_ready_project,
+            user_id=user_id,
+            title="测试导出",
+            message_count=2,
+        ))
+        await db.commit()
 
-    # 3) 调导出 endpoint
+    # 3) 把 user + assistant 消息写到 fs
+    user_msg_id = "msg_export_user_1"
+    assistant_msg_id = "msg_export_asst_1"
+    now = datetime.now(timezone.utc)
+    sections = [{"type": "overview", "title": "概述", "content": "测试答案内容", "references": []}]
+
+    from src.service.memory.session import write_message_to_fs
+    from src.service.memory.vfs import MemoryFS
+
+    fs = MemoryFS()
+    await write_message_to_fs(
+        fs, user_id=user_id, session_id=session_id,
+        msg_id=user_msg_id, role="user", content="测试问题", created_at=now,
+    )
+    await write_message_to_fs(
+        fs, user_id=user_id, session_id=session_id,
+        msg_id=assistant_msg_id, role="assistant", content=None,
+        sections=sections, created_at=now,
+    )
+
+    # 4) 调导出 endpoint
     r = client.get(
-        f"/projects/{seed_ready_project}/qa/sessions/{session_id}/messages/{assistant_msg.id}/export",
+        f"/projects/{seed_ready_project}/qa/sessions/{session_id}/messages/{assistant_msg_id}/export",
         headers=_auth(token),
         params={"format": "docx"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 200, f"期望 200，实际 {r.status_code}: {r.text}"
     # MIME 类型应该是 Word
     assert "officedocument.wordprocessingml" in r.headers["content-type"]
     # Content-Disposition 应该是 attachment + filename
@@ -418,11 +458,11 @@ async def test_explain_meta_context_usage_when_history_trimmed(
             pass
 
         async def compact(
-            self, fs, db, *,
+            self, fs, *,
             user_id, session_id,
             every_n_messages=6, force=False,
         ) -> None:
-            # noop mock：S5 SessionCompactor 整体替换，让 router 压力块→meta 测试
+            # noop mock：S6 SessionCompactor 整体替换，让 router 压力块→meta 测试
             # 不被真 fs/db 操作干扰；专项 compactor 覆盖在 test_memory_session.py
             return None
 
@@ -437,6 +477,13 @@ async def test_explain_meta_context_usage_when_history_trimmed(
     monkeypatch.setattr(
         "src.service.memory.session.read_session_summary",
         _empty_read,
+    )
+    # 同时 patch write_message_to_fs 为 no-op（避 fs write 副作用 in tests）
+    async def _noop_write(*args, **kw):
+        return None
+    monkeypatch.setattr(
+        "src.service.memory.session.write_message_to_fs",
+        _noop_write,
     )
 
     app = _build_app(session_maker)

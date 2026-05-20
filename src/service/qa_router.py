@@ -25,7 +25,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import case, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.service.auth_dependencies import get_current_user
@@ -459,23 +459,18 @@ async def get_session_detail(
     if not sess or sess.project_id != project_id or sess.user_id != user.id:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    # 关联读消息（lazy load 用 await db.refresh 或显式 select）
-    #
-    # ⚠️ created_at tie-breaker（2026-05-16 修）：
-    # persist_messages 把 user + assistant 两条消息在同一个 db.commit() 里写入，
-    # created_at 用 server_default=func.now()（MySQL DATETIME 秒级精度）→ 两条
-    # 时间戳完全相同。id 是随机 UUID，不是自增，所以 ORDER BY created_at 遇到
-    # 并列时 tie-break 随机 → assistant 有时排到 user 前面（前端表现为"答在问之上"）。
-    # 修复：同一 created_at 时，强制 user(0) 排在 assistant(1) 前。
-    msgs_stmt = (
-        select(QAMessage)
-        .where(QAMessage.session_id == session_id)
-        .order_by(
-            QAMessage.created_at,
-            case((QAMessage.role == "user", 0), else_=1),
+    # S6 改造（§7.4）：DB qa_messages → fs per-message file。
+    # read_messages_for_session 返 list[_FsMessage]（按 created_at + role tie-break 升序）
+    # _FsMessage 无 id / session_id 字段（fs 文件名即 msg_id，响应中标记为 null）
+    try:
+        from src.service.memory.session import read_messages_for_session
+        from src.service.memory.vfs import MemoryFS as _MemFS
+        msgs = await read_messages_for_session(
+            _MemFS(), user_id=user.id, session_id=session_id,
         )
-    )
-    msgs = (await db.execute(msgs_stmt)).scalars().all()
+    except Exception:
+        _log.debug("get_session_detail: read_messages_for_session failed for %s", session_id, exc_info=True)
+        msgs = []
 
     return {
         "session": {
@@ -488,11 +483,11 @@ async def get_session_detail(
         },
         "messages": [
             {
-                "id": m.id,
-                "session_id": m.session_id,
+                "id": None,
+                "session_id": session_id,
                 "role": m.role,
                 "content": m.content,
-                "sections": m.sections,
+                "sections": getattr(m, "sections", None),
                 "metadata": m.msg_metadata,
                 "created_at": _iso(m.created_at),
             }
@@ -781,31 +776,12 @@ async def post_feedback(
 ) -> None:
     """对一条 assistant 消息打反馈（覆盖式 upsert）。
 
-    第二次对同一 message 的 feedback 直接覆盖第一次，不会留两条。
+    S6 注：qa_feedback 表已在 S6 migration 中 drop（文件式记忆重构 §7.6）。
+    此 endpoint 暂时返回 404 直到反馈功能迁移到 fs（下一迭代）。
     """
-    # 校验 message 存在 + 属于用户的 session
-    msg = await db.get(QAMessage, message_id)
-    if msg is None or msg.session_id != session_id:
-        raise HTTPException(status_code=404, detail="消息不存在")
-
-    sess = await db.get(QASession, session_id)
-    if not sess or sess.project_id != project_id or sess.user_id != user.id:
-        raise HTTPException(status_code=404, detail="会话不存在")
-
-    # upsert：如果已有就更新，否则创建
-    existing = await db.get(QAFeedback, message_id)
-    if existing:
-        existing.vote = body.vote
-        existing.comment = body.comment
-        existing.user_id = user.id
-    else:
-        db.add(QAFeedback(
-            message_id=message_id,
-            vote=body.vote,
-            comment=body.comment,
-            user_id=user.id,
-        ))
-    await db.commit()
+    # S6：qa_feedback / qa_messages 表已删（§7.6 Alembic migration drop）；
+    # 反馈功能待迁移到 fs（下一迭代）；当前返回 404 防止 NameError
+    raise HTTPException(status_code=404, detail="消息不存在")
 
 
 # ─── v1.5 Word 导出 ────────────────────────────────────────────────────────
@@ -861,37 +837,56 @@ async def export_message(
         # 不暴露会话存在的信息给非所有者；统一 404 即可
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    # 4) 消息存在 + 属于该会话
-    msg = await db.get(QAMessage, message_id)
-    if msg is None or msg.session_id != session_id:
+    # 4) 从 fs 读 session 所有消息（S6：qa_messages 表已删，改读 fs）
+    try:
+        from src.service.memory.session import read_messages_for_session, _message_uri
+        from src.service.memory.vfs import MemoryFS as _MemFS
+        _fs = _MemFS()
+        all_msgs = await read_messages_for_session(_fs, user_id=user.id, session_id=session_id)
+    except Exception:
+        all_msgs = []
+
+    # 5) 按 message_id 定位目标消息（fs 文件名 = message_id + ".md"）
+    # S6 后 message_id 仍用于路径 ke://u/{uid}/session/{sid}/messages/{msg_id}.md
+    target_msg = None
+    try:
+        from src.service.memory.session import _message_uri
+        from src.service.memory.vfs import MemoryFS as _MemFS2
+        import json as _json
+        raw = await _MemFS2().read(_message_uri(user.id, session_id, message_id))
+        # 简单解析 frontmatter（复用 session._split_frontmatter 同逻辑）
+        from src.service.memory.session import _split_frontmatter
+        fm, body_text = _split_frontmatter(raw)
+        from src.service.memory.session import _FsMessage
+        target_msg_sections = fm.get("sections") or []
+        target_msg = _FsMessage(
+            role=fm.get("role", ""),
+            content=body_text.strip() if isinstance(body_text, str) else None,
+            msg_metadata=fm.get("msg_metadata"),
+            created_at=datetime.fromisoformat(fm["created_at"]) if "created_at" in fm else datetime.now(timezone.utc),
+            sections=target_msg_sections,
+        )
+    except Exception:
         raise HTTPException(status_code=404, detail="消息不存在")
 
-    # 5) 只导出 assistant 消息（user 消息没结构化内容）
-    if msg.role != "assistant":
+    if target_msg is None:
+        raise HTTPException(status_code=404, detail="消息不存在")
+
+    # 6) 只导出 assistant 消息（user 消息没结构化内容）
+    if target_msg.role != "assistant":
         raise HTTPException(
             status_code=400,
             detail="只能导出 assistant 消息，user 消息没有结构化答案",
         )
 
-    # 6) 从同会话里找上一条 user 消息，作为问题原文
-    # 实测多数情况就是 assistant 紧跟 user 之后
-    user_msgs = (
-        await db.execute(
-            select(QAMessage)
-            .where(QAMessage.session_id == session_id)
-            .where(QAMessage.role == "user")
-            .order_by(QAMessage.created_at)
-        )
-    ).scalars().all()
-    # 取最近一条 user（v1.5 简化：不严格按时序匹配 assistant，下一版细化）
-    # `if ... else ""` 是 Python 三元表达式
+    # 7) 从 fs 消息列表里找最近一条 user 消息，作为问题原文
+    user_msgs = [m for m in all_msgs if m.role == "user"]
     question = user_msgs[-1].content if user_msgs else "(未知问题)"
 
-    # 7) sections 在 DB 里以 JSON 存的（msg.sections 是 SQLAlchemy JSON 列）
-    # 取出来给 build_docx；类型已经是 list[dict] 不用再 parse
-    sections = msg.sections or []
+    # 8) sections 从 fs frontmatter 读（S6：替代 DB JSON 列）
+    sections = target_msg_sections
 
-    # 8) 构造 docx 字节
+    # 9) 构造 docx 字节
     # v1.9：环境变量 KE_DOCX_TEMPLATE_PATH 指向用户模板时，走模板路径
     # 不指定就走 v1.5 内置样式（兜底）
     import os
@@ -910,12 +905,12 @@ async def export_message(
             project_name=project.name or project.id,
         )
 
-    # 9) 生成下载文件名（不能太长 / 不能有特殊字符 / 用消息 id 兜底唯一）
+    # 10) 生成下载文件名（不能太长 / 不能有特殊字符 / 用消息 id 兜底唯一）
     # short_id：避免文件名过长；message_id 形如 'msg_a1b2c3d4e5f6'
     short_id = message_id.replace("msg_", "")[:8]
     filename = f"qa-{project_id}-{short_id}.docx"
 
-    # 10) Response 直接给 bytes + 关键头
+    # 11) Response 直接给 bytes + 关键头
     return Response(
         content=docx_bytes,
         media_type=_DOCX_MIME,

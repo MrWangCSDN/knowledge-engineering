@@ -1,15 +1,15 @@
-"""验证首页相关 ORM 模型定义（5 张表）。
+"""验证首页相关 ORM 模型定义（QAMessage/QAFeedback 已在 S6 删除）。
 
 跟 test_models.py 一致，只断言 metadata 信息（table_name、columns、constraints），
 不需要真起 DB engine。
+
+S6 注：QAMessage / QAFeedback 已删（§7.1），对应测试函数一并删除。
 """
 from src.service.db_models_homepage import (
     Project,
     GitCredential,
     UserProjectAccess,
     QASession,
-    QAMessage,
-    QAFeedback,
 )
 
 
@@ -91,49 +91,6 @@ def test_qa_session_has_lookup_index():
     """plan 要求 (project_id, user_id, updated_at DESC) 这条复合索引。"""
     index_names = {idx.name for idx in QASession.__table__.indexes}
     assert "idx_qa_sessions_project_user" in index_names
-
-
-# ───────── qa_messages ─────────
-
-def test_qa_message_table_name():
-    assert QAMessage.__tablename__ == "qa_messages"
-
-
-def test_qa_message_columns():
-    """metadata 列名注意：Python 属性叫 msg_metadata，DB 列名是 metadata。
-    (SQLAlchemy DeclarativeBase 自带 metadata 属性，会冲突，所以用 mapped_column('metadata') 重命名。)"""
-    cols = {c.name for c in QAMessage.__table__.columns}
-    assert cols == {
-        "id", "session_id", "role", "content",
-        "sections", "metadata", "created_at",
-    }
-
-
-def test_qa_message_has_session_cascade_fk():
-    fks = list(QAMessage.__table__.foreign_keys)
-    sess_fks = [fk for fk in fks if fk.column.table.name == "qa_sessions"]
-    assert len(sess_fks) == 1
-    assert sess_fks[0].ondelete == "CASCADE"
-
-
-# ───────── qa_feedback ─────────
-
-def test_qa_feedback_table_name():
-    assert QAFeedback.__tablename__ == "qa_feedback"
-
-
-def test_qa_feedback_columns():
-    cols = {c.name for c in QAFeedback.__table__.columns}
-    assert cols == {"message_id", "vote", "comment", "user_id", "created_at"}
-
-
-def test_qa_feedback_message_id_pk_and_cascade():
-    cols = {c.name: c for c in QAFeedback.__table__.columns}
-    assert cols["message_id"].primary_key is True
-    fks = list(QAFeedback.__table__.foreign_keys)
-    msg_fks = [fk for fk in fks if fk.column.table.name == "qa_messages"]
-    assert len(msg_fks) == 1
-    assert msg_fks[0].ondelete == "CASCADE"
 
 
 # ───────── git_credentials（v2.0 新增字段）─────────
