@@ -386,10 +386,9 @@ async def test_compact_persists_focus_entity_ids(tmp_path):
     from src.service.memory.memgen import _split_frontmatter
     meta, body = _split_frontmatter(raw)
     # focus_entity_ids 按 _extract_focus_entity_ids 的首见顺序去重收集
+    # 严格顺序断言：a1.cited_entities[0]=ent_alpha 先入；a2.cited_entities[0]=ent_beta 次；a2.entry_points[0]=ent_gamma 末
     focus = meta.get("focus_entity_ids", [])
-    assert "ent_alpha" in focus
-    assert "ent_beta" in focus
-    assert "ent_gamma" in focus
+    assert focus == ["ent_alpha", "ent_beta", "ent_gamma"]
 
 
 @pytest.mark.asyncio
@@ -407,9 +406,9 @@ async def test_compact_cross_tenant_isolation(tmp_path):
     # user_id=1 写
     await compactor.compact(fs, db, user_id=1, session_id="sess_x", every_n_messages=6)
 
-    # user_id=1 自己读得到
+    # user_id=1 自己读得到（严格 equality — read 路径 deterministic，body 就是 LLM 输出）
     r1 = await read_session_summary(fs, user_id=1, session_id="sess_x")
-    assert "user1 的会话摘要" in r1
+    assert r1 == "user1 的会话摘要"
 
     # user_id=2 读同 session_id 拿不到（路径前缀不同）
     r2 = await read_session_summary(fs, user_id=2, session_id="sess_x")
@@ -425,7 +424,7 @@ async def test_compact_fs_write_failure_silently_logged(tmp_path, monkeypatch):
     fs = MemoryFS(root=str(tmp_path))
 
     # monkeypatch fs.write 抛任意异常
-    async def _explode(*args, **kw):
+    async def _explode(*args):
         raise OSError("simulated disk error")
     monkeypatch.setattr(fs, "write", _explode)
 
@@ -438,9 +437,8 @@ async def test_compact_fs_write_failure_silently_logged(tmp_path, monkeypatch):
     # （pytest 默认 fail 在未捕获异常 → 不需要 try/except wrap）
     await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
 
-    # 文件未写（fs.write 被 mock 抛）
-    # 注：此处不能 fs.exists 检查，因为 fs.write mock 后 fs.exists 仍是真的
-    # 改为：LLM 仍被调用 1 次（说明 step 1-6 都跑过）
+    # 选 LLM 调用计数而非 fs.exists 检查，因为前者强证算法走到 step 6（LLM 调用是 fs.write 的 precondition）；
+    # fs.exists 仅证"文件不存在"，不区分"早退跳过 step 6/7/8"还是"step 6 跑了但 step 8 fs.write 中层 catch 兜住"
     assert len(llm.calls) == 1
 
 
