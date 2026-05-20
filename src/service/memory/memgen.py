@@ -127,8 +127,13 @@ class MemoryGen:
             except Exception as exc:           # noqa: BLE001 单条目隔离
                 _log.debug("regenerate: file L0 failed %r: %r", uri, exc)
 
-        # ② 目录 L0/L1：Task 3 实现
-        pass
+        # ② 祖先目录：按路径深度降序（深先浅后），逐级 L0+L1（§3.3）
+        for dir_uri in self._ancestor_dirs(files):
+            try:
+                await self._gen_dir_l0_l1(fs, dir_uri)
+            except Exception as exc:           # noqa: BLE001 单条目隔离
+                _log.debug("regenerate: dir L0/L1 failed %r: %r",
+                           dir_uri, exc)
 
     # ── 分类辅助 ──────────────────────────────────────────────────
     @staticmethod
@@ -173,3 +178,98 @@ class MemoryGen:
             abs_uri,
             _render_frontmatter({"src_hash": src_hash}, clean + "\n"),
         )
+
+    # ── 祖先目录收集 ──────────────────────────────────────────────
+    @staticmethod
+    def _ancestor_dirs(file_uris: list[str]) -> list[str]:
+        """变更文件的祖先目录集合，按深度降序（深先浅后；同深按 uri 字典序）。
+
+        file uri = ``ke://u/{uid}/m1/.../name.md`` → 目录依次为
+        ``ke://u/{uid}/m1/.../m_k``（k=层数..0；k=0 即租户根
+        ``ke://u/{uid}``，S1 隔离根，不再上溯到 ``ke://u``）。子目录 L0
+        必须先于父目录生成 → 故按深度降序。
+        """
+        dirs: set[str] = set()
+        prefix = "ke://u/"
+        for uri in file_uris:
+            head, _, _name = uri.rpartition("/")   # 去掉末段 name.md
+            if not head.startswith(prefix):
+                continue
+            rest = head[len(prefix):]              # "{uid}[/m1/...]"
+            segs = rest.split("/")                  # ["{uid}", "m1", ...]
+            uid = segs[0]
+            mids = segs[1:]                          # 目录层（不含 uid）
+            # k 从全长到 0：逐级父目录，含租户根（mids[:0] → ke://u/{uid}）
+            for k in range(len(mids), -1, -1):
+                d = prefix + uid
+                if mids[:k]:
+                    d += "/" + "/".join(mids[:k])
+                dirs.add(d)
+        # 深度 = uri 中 '/' 计数（越深越先）；同深按 uri 升序保证可测/确定
+        return sorted(dirs, key=lambda d: (-d.count("/"), d))
+
+    # ── 步骤②：目录 L0(.abstract.md) + L1(.overview.md) ────────────
+    async def _gen_dir_l0_l1(self, fs: MemoryFS, dir_uri: str) -> None:
+        """聚合该目录「直接子项 L0」→ 生成目录 .abstract.md(L0)+
+        .overview.md(L1)。直接子项 L0 = 子记忆文件 ``{slug}.abstract.md``
+        ∪ 子目录 ``.abstract.md``（§3.3）。二者输入同 → 同一 inputs_hash；
+        各自 frontmatter 内 inputs_hash 命中则跳过（零 LLM）。
+        """
+        try:
+            entries = await fs.ls(dir_uri)         # 已 sorted；不存在→MemoryNotFound
+        except MemoryNotFound:
+            _log.debug("dir gone, skip %r", dir_uri)
+            return
+        # 收集 (子项名, 子 L0 正文) —— 子项名用于排序与导航图分节标题
+        pairs: list[tuple[str, str]] = []
+        for name in entries:                        # entries 已排序
+            if name in (_ABSTRACT_SUFFIX, _OVERVIEW_NAME):
+                continue                            # 本目录自身 L0/L1
+            if name.endswith(_ABSTRACT_SUFFIX):
+                continue                            # 子文件 L0，经其 .md 计入，勿重复
+            if name.endswith(_MD_SUFFIX):
+                # 子记忆文件 {slug}.md → 其 L0 = {slug}.abstract.md
+                key = name[: -len(_MD_SUFFIX)]
+                child_l0 = f"{dir_uri}/{key}{_ABSTRACT_SUFFIX}"
+            else:
+                # 否则视为子目录（路径 scheme §3.2：非 .md 段即目录）
+                key = name
+                child_l0 = f"{dir_uri}/{name}/{_ABSTRACT_SUFFIX}"
+            try:
+                _m, child_body = _split_frontmatter(await fs.read(child_l0))
+            except MemoryNotFound:
+                # 子 L0 缺失（其生成失败/未就绪）→ 本轮略过该子项；
+                # 下一轮其 L0 就绪后 inputs_hash 变 → 自动重生（自愈，§3.3）
+                _log.debug("child L0 missing, omit %r", child_l0)
+                continue
+            pairs.append((key, child_body.strip()))
+        if not pairs:
+            _log.debug("no child L0, skip dir %r", dir_uri)
+            return
+        # 按子项名排序后拼接：确定性 → 同输入恒同 inputs_hash（§3.3）
+        pairs.sort(key=lambda kv: kv[0])
+        joined = "\n\n".join(f"## {k}\n{v}" for k, v in pairs)
+        inputs_hash = _sha256_hex(joined)
+        abs_uri = f"{dir_uri}/{_ABSTRACT_SUFFIX}"
+        ovr_uri = f"{dir_uri}/{_OVERVIEW_NAME}"
+        need_abs = await self._stale(fs, abs_uri, inputs_hash)
+        need_ovr = await self._stale(fs, ovr_uri, inputs_hash)
+        if need_abs:
+            a = await self._llm.complete(system=_MEM_L0_SYSTEM, user=joined)
+            await fs.write(abs_uri, _render_frontmatter(
+                {"inputs_hash": inputs_hash}, a.strip() + "\n"))
+        if need_ovr:
+            o = await self._llm.complete(system=_MEM_L1_SYSTEM, user=joined)
+            await fs.write(ovr_uri, _render_frontmatter(
+                {"inputs_hash": inputs_hash}, o.strip() + "\n"))
+        if not need_abs and not need_ovr:
+            _log.debug("dir L0/L1 hash hit, skip %r", dir_uri)
+
+    @staticmethod
+    async def _stale(fs: MemoryFS, uri: str, want_hash: str) -> bool:
+        """目标不存在、或其 frontmatter ``inputs_hash`` ≠ want → 需重生。"""
+        if not await fs.exists(uri):
+            return True
+        meta, _ = _split_frontmatter(await fs.read(uri))
+        # str() 防御 YAML 把全数字 hash 解析成 int；缺键 str(None)!=hash → 重生
+        return str(meta.get("inputs_hash")) != want_hash

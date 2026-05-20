@@ -76,6 +76,12 @@ class _FixedLLM:
 
     async def complete(self, *, system: str, user: str, **kw) -> str:
         # 关键字参（*）与 KE provider 鸭子接口一致
+        # 仅按「文件 L0」计数/记录：目录聚合输入恒以 "## " 开头（_gen_dir_l0_l1
+        # 的 joined = "## {k}\n{v}..." ），跳过不计；Task 3 步骤②起 regenerate
+        # 含目录 LLM 调用，本计数器保留对 Task 2 文件 L0 用例「llm.calls==1」
+        # 等断言的语义不变。目录 L0/L1 行为由 Task 3 的 _RoutingLLM 覆盖。
+        if user.startswith("## "):
+            return self.ret
         self.calls += 1
         self.last_system = system
         self.last_user = user
@@ -225,3 +231,154 @@ async def test_file_l0_legacy_unquoted_numeric_src_hash_no_crash_regenerates(tmp
     assert str(meta["src_hash"]) == _sha256_hex("用户的名字是李龙飞\n")
     assert "新摘要" in body
     assert llm.calls == 1
+
+
+# ── Task 3：目录 L0+L1（步骤②）──────────────────────────────────
+class _RoutingLLM:
+    """按 system 路由返回，并记录 (system, user) 调用序列（验证自底向上序）。"""
+    def __init__(self):
+        from src.service.qa_engine.prompts import _MEM_L0_SYSTEM, _MEM_L1_SYSTEM
+        self._L0, self._L1 = _MEM_L0_SYSTEM, _MEM_L1_SYSTEM
+        self.calls = []  # list[tuple[str tag, str user]]
+
+    async def complete(self, *, system: str, user: str, **kw) -> str:
+        tag = "L0" if system == self._L0 else "L1"
+        self.calls.append((tag, user))
+        # 回显 user 摘要，便于断言「父确实看到子的 L0」
+        return f"{tag}:{user[:40]}"
+
+
+def _mem(kind, body):
+    return f"---\nkind: {kind}\n---\n{body}\n"
+
+
+@pytest.mark.asyncio
+async def test_multi_files_same_dir_overview_aggregates_child_l0(tmp_path):
+    fs = _fs(tmp_path)
+    llm = _RoutingLLM()
+    gen = MemoryGen(llm)
+    u1 = "ke://u/7/global/identity/name.md"
+    u2 = "ke://u/7/global/identity/role.md"
+    await fs.write(u1, _mem("identity", "名字是李龙飞"))
+    await fs.write(u2, _mem("identity", "角色是架构师"))
+
+    await gen.regenerate(fs, [u1, u2])
+
+    # 每文件各有 L0
+    assert await fs.exists("ke://u/7/global/identity/name.abstract.md")
+    assert await fs.exists("ke://u/7/global/identity/role.abstract.md")
+    # identity 目录有 .abstract.md(L0) + .overview.md(L1)，同一 inputs_hash
+    am, ab = _split_frontmatter(
+        await fs.read("ke://u/7/global/identity/.abstract.md"))
+    om, ob = _split_frontmatter(
+        await fs.read("ke://u/7/global/identity/.overview.md"))
+    assert am["inputs_hash"] == om["inputs_hash"]
+    # 聚合输入按子项名排序拼接（name 在 role 前）：两子 L0 都进入了 user
+    # 首个 L1 = 最深目录（identity）的 L1：两子项 name/role 在其聚合输入中完整呈现；
+    # _RoutingLLM 截断 user[:40] 会令更浅祖先的 L1 user 多级传播后被截掉「## role」
+    # 末尾字符，故此处显式取最深一级（即首个）L1 调用。
+    l1_user = [u for tag, u in llm.calls if tag == "L1"][0]
+    assert "## name" in l1_user and "## role" in l1_user
+    assert l1_user.index("## name") < l1_user.index("## role")
+    assert "名字是李龙飞" in l1_user and "角色是架构师" in l1_user
+    assert "L1:" in ob and "L0:" in ab
+
+
+@pytest.mark.asyncio
+async def test_bottom_up_deep_before_shallow_parent_sees_child_l0(tmp_path):
+    fs = _fs(tmp_path)
+    llm = _RoutingLLM()
+    gen = MemoryGen(llm)
+    # 深层文件：ke://u/7/global/identity/name.md
+    # 祖先目录（深→浅）：.../global/identity → .../global → ke://u/7
+    uri = "ke://u/7/global/identity/name.md"
+    await fs.write(uri, _mem("identity", "名字是李龙飞"))
+
+    await gen.regenerate(fs, [uri])
+
+    # 三级目录各有 L0+L1
+    for d in ("ke://u/7/global/identity",
+              "ke://u/7/global",
+              "ke://u/7"):
+        assert await fs.exists(d + "/.abstract.md"), d
+        assert await fs.exists(d + "/.overview.md"), d
+
+    # 自底向上：identity 目录的 L0/L1 调用，必早于 global，更早于 ke://u/7
+    l1_users = [u for tag, u in llm.calls if tag == "L1"]
+    # 第 1 个 L1 = identity（其 user 含子文件 name 的 L0 回显）
+    assert "名字是李龙飞" in l1_users[0]
+    # global 的 L1（第 2 个）user 含 identity 目录的 L0 回显（"L0:" 前缀）
+    assert "L0:" in l1_users[1]
+    # ke://u/7 的 L1（第 3 个）user 含 global 目录 L0 回显
+    assert "L0:" in l1_users[2]
+    assert len(l1_users) == 3
+
+
+@pytest.mark.asyncio
+async def test_dir_idempotent_then_only_changed_chain_regenerates(tmp_path):
+    fs = _fs(tmp_path)
+    llm = _RoutingLLM()
+    gen = MemoryGen(llm)
+    a = "ke://u/7/global/identity/name.md"
+    b = "ke://u/7/global/preference/lang.md"
+    await fs.write(a, _mem("identity", "名字是李龙飞"))
+    await fs.write(b, _mem("preference", "偏好中文"))
+    await gen.regenerate(fs, [a, b])
+    calls_after_first = len(llm.calls)
+
+    # 完全相同输入再跑：哈希全命中，零新增 LLM 调用、文件不变
+    snap = {
+        p: await fs.read(p)
+        for p in ("ke://u/7/global/identity/.overview.md",
+                  "ke://u/7/global/.overview.md",
+                  "ke://u/7/.overview.md")
+    }
+    await gen.regenerate(fs, [a, b])
+    assert len(llm.calls) == calls_after_first
+    for p, v in snap.items():
+        assert await fs.read(p) == v
+
+    # 只改 identity 链路：仅 identity 与其祖先（global、ke://u/7）重生；
+    # preference 目录 .overview.md 不变（inputs_hash 未变）
+    pref_before = await fs.read("ke://u/7/global/preference/.overview.md")
+    await fs.write(a, _mem("identity", "改名为王山河"))
+    await gen.regenerate(fs, [a])
+    assert len(llm.calls) > calls_after_first
+    assert await fs.read(
+        "ke://u/7/global/preference/.overview.md") == pref_before
+    nm, _ = _split_frontmatter(
+        await fs.read("ke://u/7/global/identity/.abstract.md"))
+    # identity 的 inputs_hash 变了（子 name.md 的 L0 变了）
+    assert nm["inputs_hash"] == _sha256_hex(
+        "## name\n" + _split_frontmatter(
+            await fs.read("ke://u/7/global/identity/name.abstract.md"))[1].strip())
+
+
+@pytest.mark.asyncio
+async def test_dir_llm_error_isolated_other_dirs_still_generated(tmp_path, caplog):
+    fs = _fs(tmp_path)
+
+    class _OnlyDirBoom:
+        """文件 L0 正常；目录 L0/L1 第一次调用抛错（验证目录层失败隔离）。"""
+        async def complete(self, *, system: str, user: str, **kw) -> str:
+            # 目录聚合输入恒以 "## " 开头（"## {子项名}\n..."）；
+            # 据此区分文件 L0（记忆正文）与目录 L0/L1（聚合输入）
+            if user.startswith("## "):
+                # 首个目录调用抛错，验证被隔离且不连累后续
+                if not getattr(self, "_boomed", False):
+                    self._boomed = True
+                    raise RuntimeError("dir boom")
+            return "OK"
+
+    gen = MemoryGen(_OnlyDirBoom())
+    uri = "ke://u/7/global/identity/name.md"
+    await fs.write(uri, _mem("identity", "名字是李龙飞"))
+
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="src.service.memory.memgen"):
+        await gen.regenerate(fs, [uri])
+
+    # 文件 L0 成功（_OnlyDirBoom 对非 "## " 输入返回 OK）
+    assert await fs.exists("ke://u/7/global/identity/name.abstract.md")
+    # identity 目录首调抛错被隔离、记 debug；regenerate 未抛出
+    assert any("dir L0/L1 failed" in r.message for r in caplog.records)
