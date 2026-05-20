@@ -143,3 +143,98 @@ class MemoryExtractor:
     def __init__(self, llm: Any) -> None:
         # 仅持有 llm；fs/memgen/recaller 走 extract_and_persist 形参（§5.1）
         self._llm = llm
+
+    # ── 公开唯一 API ─────────────────────────────────────────────
+    async def extract_and_persist(
+        self,
+        fs: MemoryFS,
+        memgen: MemoryGen,
+        recaller: MemoryRecaller,
+        *,
+        user_id: int,
+        turn_text: str,
+    ) -> None:
+        """ReAct 抽取本轮记忆 → 写 .md → 一次性串接 S2.regenerate + S3.index_changed。
+
+        §5.7 失败语义：本方法自身清晰抛错（LLM/JSON 调用失败 raise）；
+        单条 memory 写入失败独立 try/except 隔离（_log.debug 跳过该条）；
+        「记忆失败不影响主答」由调用方 _writer 闭包包 try/except 兜。
+        """
+        # 1) 调 LLM 跑 ReAct 抽取（_MEM_EXTRACT_SYSTEM 在 prompts.py）
+        raw = await self._llm.complete(
+            system=_MEM_EXTRACT_SYSTEM,
+            user=turn_text,
+        )
+        # 2) 解析 JSON（容错过滤；非法 JSON / dict 无 memories 抛 ValueError）
+        memories = _parse_react_json(raw)
+        # 3) 空列表（绝大多数闲聊轮）→ 零 fs.write、零 S2/S3 调用，直接 return
+        if not memories:
+            _log.debug("extract: empty memories for user %d (闲聊轮)", user_id)
+            return
+        # 4) 收集本轮所有写入的 uri（含 supersede 归档路径），最终一次性传给 S2/S3
+        changed_uris: list[str] = []
+        # 5) 对每条 memory 独立 try/except 写入（单条失败不连累其他；§5.7 隔离）
+        for mem in memories:
+            try:
+                await self._write_one_memory(fs, user_id, mem, changed_uris)
+            except Exception as exc:           # noqa: BLE001 单条目隔离
+                _log.debug(
+                    "extract: memory write failed kind=%s content=%r: %r",
+                    mem.get("kind"), mem.get("content"), exc,
+                )
+        # 6) 若有任何 .md 被写入 / mv，调一次 S2.regenerate + 一次 S3.index_changed
+        #    （非每条调一次：batched 大幅省 LLM 与 embedding 调用）
+        if changed_uris:
+            await memgen.regenerate(fs, changed_uris)
+            # S3.index_changed 只消费 .abstract.md uri；S2 已产出它们。
+            # 从 changed_uris（.md 记忆文件）推导出对应的 abstract uri 列表：
+            #   ① 每条文件 .abstract.md：{slug}.md → {slug}.abstract.md
+            #   ② 每个祖先目录 .abstract.md：{dir}/.abstract.md
+            # _ancestor_dirs 是 MemoryGen 的静态方法，可直接复用。
+            abstract_uris: list[str] = [
+                u[: -len(_MD_SUFFIX)] + _ABSTRACT_SUFFIX
+                for u in changed_uris
+            ]
+            for dir_uri in memgen._ancestor_dirs(changed_uris):
+                abstract_uris.append(dir_uri + "/" + _ABSTRACT_SUFFIX)
+            await recaller.index_changed(fs, abstract_uris)
+
+    async def _write_one_memory(
+        self,
+        fs: MemoryFS,
+        user_id: int,
+        memory: dict,
+        changed_uris: list[str],
+    ) -> None:
+        """写入单条 memory（非 supersede 路径）；supersede 由 Task 3 接管。
+
+        路径：ke://u/{uid}/global/{kind}/{slug}.md
+        frontmatter：{kind, slug, source: "react", created_at: <ISO Z>}
+        body：content + "\\n"
+        """
+        kind = memory["kind"]
+        content = memory["content"]
+        # Task 3 会接管 supersedes_kind 路径；本 Task 仅处理 None
+        if memory.get("supersedes_kind") == "identity":
+            # T3 实现；本 Task 暂跳过（不写、不抛 — 避免误用）
+            _log.debug(
+                "extract: identity-supersede deferred to T3 (mem skipped this version)"
+            )
+            return
+        # 路径
+        slug = _compute_slug(content)
+        uri = f"ke://u/{user_id}/global/{kind}/{slug}.md"
+        # frontmatter（dict 保序：kind 在前，便于人读）
+        meta = {
+            "kind": kind,
+            "slug": slug,
+            "source": _SOURCE_REACT,
+            "created_at": _now_iso_z(),
+        }
+        # body：content + "\n"（与 §22 既有惯例一致）
+        body = content + "\n"
+        # _render_frontmatter 是 S2 已有的：序列化 frontmatter 拼回 markdown
+        text = _render_frontmatter(meta, body)
+        # 写入（fs.write 是原子的：tempfile.mkstemp + os.replace）
+        await fs.write(uri, text)
+        changed_uris.append(uri)

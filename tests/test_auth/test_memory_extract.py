@@ -141,3 +141,189 @@ def test_parse_react_json_strips_multiline_code_fence_dotall():
     assert out[0]["kind"] == "preference"
     assert out[0]["content"] == "用户偏好中文"
     assert out[0]["supersedes_kind"] is None
+
+
+# ── Task 2：extract_and_persist 非 supersede 路径 ──────────────────
+# 跨 S3/S4 fake stack 复用：S3 既有 _FakeEmbedder/_FakeWeaviateClient
+# 在 test_memory_recall.py 里完整实现；S4 测试直接 import 不重复。
+from tests.test_auth.test_memory_recall import (
+    _FakeEmbedder,
+    _FakeWeaviateClient,
+)
+# S2 真 MemoryGen + S3 真 MemoryRecaller（接受 fake 协作者）
+from src.service.memory.memgen import MemoryGen
+from src.service.memory.recall import MemoryRecaller
+
+
+class _FixedJSONLLM:
+    """固定返回 JSON 字符串的 fake LLM。记录调用次数 + 最近 system/user 入参。"""
+    def __init__(self, ret: str):
+        # ret 应是 ReAct 抽取的 JSON 字符串（或带代码栅栏）
+        self.ret = ret
+        # 计数（验证 LLM 被调用次数；S2 MemoryGen 也用 LLM，需区分）
+        self.calls = 0
+        self.last_system = None
+        self.last_user = None
+
+    async def complete(self, *, system: str, user: str, **kw) -> str:
+        # 关键字参（*）与 KE provider 鸭子接口一致
+        self.calls += 1
+        self.last_system = system
+        self.last_user = user
+        # 同一 fake LLM 也被 MemoryGen 用来生成 L0/L1 摘要；
+        # 但 S4 仅看自己抽取的返回，MemoryGen 拿这个 JSON 当作 L0/L1 内容也无妨
+        # （测试不强检查 L0/L1 文本质量；只验证写入 + 哈希链路）
+        return self.ret
+
+
+def _make_extract_stack(tmp_path, react_json: str):
+    """构造一个完整 S2+S3+S4 测试栈：fake LLM + 真 MemoryFS + 真 MemoryGen + 真 MemoryRecaller。"""
+    llm = _FixedJSONLLM(react_json)
+    fs = _fs(tmp_path)
+    memgen = MemoryGen(llm)
+    embedder = _FakeEmbedder()
+    wv = _FakeWeaviateClient()
+    recaller = MemoryRecaller(embedder=embedder, weaviate_client=wv)
+    extractor = MemoryExtractor(llm)
+    return extractor, fs, memgen, recaller, llm, embedder, wv
+
+
+@pytest.mark.asyncio
+async def test_extract_empty_memories_zero_writes(tmp_path):
+    """场景①：LLM 返回 {"memories":[]} → 零 fs.write、零 S2/S3 调用、直接 return。"""
+    extractor, fs, memgen, recaller, llm, emb, wv = _make_extract_stack(
+        tmp_path, '{"memories":[]}'
+    )
+    # 跑抽取
+    await extractor.extract_and_persist(
+        fs, memgen, recaller, user_id=7, turn_text="用户：你好\n助理：你好！"
+    )
+    # 验证：LLM 调了 1 次（ReAct 自身），但 S2 MemoryGen 没被调（无记忆要写）
+    # → fake LLM 总 calls 应恰为 1
+    assert llm.calls == 1
+    # fs 里 user 7 的 global 目录不存在（无任何写入）
+    assert not await fs.exists("ke://u/7/global")
+    # tenant 7 在 Weaviate 中无对象
+    coll = wv.collections.get("memory_l0")
+    assert coll.tenants.get("7", {}) == {}
+    # embedder 零调用
+    assert emb.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_extract_single_preference_writes_md_and_chains(tmp_path):
+    """场景②：LLM 返回 1 条 preference → 1 个 .md 写入 + S2.regenerate + S3.index_changed 各调一次。"""
+    react_json = (
+        '{"memories":[{"kind":"preference",'
+        '"content":"用户偏好中文回答","supersedes_kind":null}]}'
+    )
+    extractor, fs, memgen, recaller, llm, emb, wv = _make_extract_stack(
+        tmp_path, react_json
+    )
+    await extractor.extract_and_persist(
+        fs, memgen, recaller, user_id=7, turn_text="用户：我喜欢中文回答"
+    )
+    # 验证：记忆 .md 已写
+    slug = _compute_slug("用户偏好中文回答")
+    pref_uri = f"ke://u/7/global/preference/{slug}.md"
+    assert await fs.exists(pref_uri)
+    # frontmatter 字段
+    raw = await fs.read(pref_uri)
+    meta, body = _split_frontmatter(raw)
+    assert meta["kind"] == "preference"
+    assert meta["slug"] == slug
+    assert meta["source"] == "react"
+    # created_at 应为 ISO 8601 Z 形式（YYYY-MM-DDTHH:MM:SSZ）
+    import re
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", str(meta["created_at"]))
+    # body == content + "\n"
+    assert body.strip() == "用户偏好中文回答"
+    # S2 自底向上生成了 .abstract.md（preference 目录 + 父目录们）
+    assert await fs.exists(f"ke://u/7/global/preference/{slug}.abstract.md")
+    assert await fs.exists("ke://u/7/global/preference/.abstract.md")
+    # S3 把 .abstract.md 灌入 Weaviate tenant 7
+    coll = wv.collections.get("memory_l0")
+    assert len(coll.tenants["7"]) >= 1  # 至少文件 L0；可能还有目录 L0
+
+
+@pytest.mark.asyncio
+async def test_extract_multi_memory_all_non_identity(tmp_path):
+    """场景④（无 supersede 版）：preference + style_feedback 两条，全非 identity →
+    各写一个 .md + 一次 batched S2/S3 调用（不是每条调一次）。
+    """
+    react_json = (
+        '{"memories":['
+        '{"kind":"preference","content":"用户偏好中文","supersedes_kind":null},'
+        '{"kind":"style_feedback","content":"用户嫌代码格式啰嗦","supersedes_kind":null}'
+        ']}'
+    )
+    extractor, fs, memgen, recaller, llm, emb, wv = _make_extract_stack(
+        tmp_path, react_json
+    )
+    await extractor.extract_and_persist(
+        fs, memgen, recaller, user_id=7,
+        turn_text="用户：我喜欢中文，但你之前的代码太啰嗦",
+    )
+    # 两个 .md 都写入了
+    pref_slug = _compute_slug("用户偏好中文")
+    sf_slug = _compute_slug("用户嫌代码格式啰嗦")
+    assert await fs.exists(f"ke://u/7/global/preference/{pref_slug}.md")
+    assert await fs.exists(f"ke://u/7/global/style_feedback/{sf_slug}.md")
+
+
+@pytest.mark.asyncio
+async def test_extract_llm_json_parse_failure_raises(tmp_path):
+    """场景⑤：LLM 返回非 JSON 字符串 → extract_and_persist 抛 ValueError（不静默）。
+    §5.7 引擎自身清晰抛错；由调用方 _writer 闭包包 try/except 兜。
+    """
+    extractor, fs, memgen, recaller, llm, emb, wv = _make_extract_stack(
+        tmp_path, "this is not json at all"
+    )
+    with pytest.raises(ValueError):
+        await extractor.extract_and_persist(
+            fs, memgen, recaller, user_id=7, turn_text="anything"
+        )
+    # fs 无任何写入
+    assert not await fs.exists("ke://u/7/global")
+
+
+@pytest.mark.asyncio
+async def test_extract_single_write_failure_isolated(tmp_path, caplog):
+    """场景⑥：单条 fs.write 失败 → 该条记 _log.debug 跳过、其他条继续。
+    模拟方式：让 LLM 返回的某条 content 触发 fs 错（比如 mock fs.write 对某 uri 抛错）。
+    """
+    react_json = (
+        '{"memories":['
+        '{"kind":"preference","content":"良性内容 A","supersedes_kind":null},'
+        '{"kind":"preference","content":"会触发 write fail 的内容","supersedes_kind":null},'
+        '{"kind":"preference","content":"良性内容 C","supersedes_kind":null}'
+        ']}'
+    )
+    extractor, fs, memgen, recaller, llm, emb, wv = _make_extract_stack(
+        tmp_path, react_json
+    )
+    # Monkey-patch fs.write：对 "fail" 内容的 slug 路径抛 IOError，其他放行
+    bad_slug = _compute_slug("会触发 write fail 的内容")
+    real_write = fs.write
+
+    async def _fail_on_bad(uri, content):
+        if bad_slug in uri:
+            raise IOError("simulated write failure")
+        await real_write(uri, content)
+
+    fs.write = _fail_on_bad
+
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="src.service.memory.extract"):
+        await extractor.extract_and_persist(
+            fs, memgen, recaller, user_id=7, turn_text="anything"
+        )
+
+    # 良性内容 A 与 C 写入成功；bad 跳过（被隔离）
+    a_slug = _compute_slug("良性内容 A")
+    c_slug = _compute_slug("良性内容 C")
+    assert await fs.exists(f"ke://u/7/global/preference/{a_slug}.md")
+    assert await fs.exists(f"ke://u/7/global/preference/{c_slug}.md")
+    assert not await fs.exists(f"ke://u/7/global/preference/{bad_slug}.md")
+    # caplog 含 "write failed" 调试日志
+    assert any("memory write failed" in r.message for r in caplog.records)
