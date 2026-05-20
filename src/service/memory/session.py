@@ -299,7 +299,10 @@ async def read_messages_for_session(
 
     out: list[_FsMessage] = []
     for fname in filenames:
-        if not fname.endswith(".md"):
+        # S7 加 .feedback.md 过滤：feedback sibling 文件（msg_xyz.feedback.md，§8.4）
+        # 文件名也 endswith ".md" 但不是 message — 否则误读为 message 导致 _FsMessage
+        # 解析失败（缺 role 字段被 inner skip path 兜底，但走错路径有性能浪费）
+        if not fname.endswith(".md") or fname.endswith(".feedback.md"):
             continue
         file_uri = f"{dir_uri}/{fname}"
         try:
