@@ -399,8 +399,14 @@ async def test_extract_slug_idempotent_same_content_no_rewrite(tmp_path):
     await extractor.extract_and_persist(
         fs, memgen, recaller, user_id=7, turn_text="用户：我喜欢中文（重复）"
     )
-    # .md 文件内容不变（覆盖写但内容相同）
-    assert await fs.read(uri) == first_md
+    # .md body 不变（覆盖写但 content 相同）；用 _split_frontmatter 比对 body 而非
+    # 整个 .md，因为 frontmatter 中 created_at 是 _now_iso_z() 秒级精度 — 跨秒边界
+    # 两次 extract 会得到不同字符串。S2 哈希链路只关心 body（src_hash = body 的 SHA-256），
+    # 比 body 才是正确的不变量检查。
+    second_md = await fs.read(uri)
+    _, first_body = _split_frontmatter(first_md)
+    _, second_body = _split_frontmatter(second_md)
+    assert first_body == second_body
     # embedder 调用次数零增量（S3 哈希命中）
     assert emb.calls == first_emb_calls
     # LLM 调用次数：S4 ReAct 调用 +1（每轮一次）；S2 因为 src_hash 命中不调 → 仅 +1

@@ -207,7 +207,11 @@ class MemoryExtractor:
         memory: dict,
         changed_uris: list[str],
     ) -> None:
-        """写入单条 memory（非 supersede 路径）；supersede 由 Task 3 接管。
+        """写入单条 memory（含 identity-supersede 归档前置）。
+
+        identity 类（supersedes_kind="identity"）：先 _supersede_identity 归档同
+        kind 旧 .md 到 archive/ 子目录、把 src+dst 加入 changed_uris；再写新 .md。
+        其他类（preference / style_feedback）：直接写新 .md，不触归档。
 
         路径：ke://u/{uid}/global/{kind}/{slug}.md
         frontmatter：{kind, slug, source: "react", created_at: <ISO Z>}
@@ -256,11 +260,12 @@ class MemoryExtractor:
         """
         # 用户的 identity 目录路径
         base = f"ke://u/{user_id}/global/identity"
-        # ls 取直接子项；目录不存在抛 MemoryNotFound（首次写 identity 时正常）
+        # ls 取直接子项；目录不存在抛 MemoryNotFound（首次写 identity 时正常）；
+        # 目录路径解析到非目录抛 MemoryPathError（上游脏数据极端情况）→ 同样视为
+        # "无旧可归档"，让新 .md 正常写入；不传播以免单轮记忆整条丢失
         try:
             entries = await fs.ls(base)
-        except MemoryNotFound:
-            # 目录不存在 → 无旧 identity 可归档（首次写 identity）
+        except (MemoryNotFound, MemoryPathError):
             return []
 
         changed: list[str] = []
@@ -283,8 +288,9 @@ class MemoryExtractor:
             dst = f"{base}/{_ARCHIVE_DIRNAME}/{name}"
             try:
                 await fs.mv(src, dst)
-            except (MemoryNotFound, MemoryPathError) as exc:
-                # mv 失败（如目标已存在）— 单条目隔离，记 debug 跳过
+            except Exception as exc:           # noqa: BLE001 单条 mv 隔离，与 extract_and_persist 外层模式一致
+                # mv 失败（vfs 异常 / 文件系统错误如 OSError / 权限等）— 单条目隔离，记 debug 跳过；
+                # 不传播以免 for-loop 中断、_supersede_identity 整体抛错丢失 partial changed 列表
                 _log.debug(
                     "extract: archive mv failed src=%r dst=%r: %r",
                     src, dst, exc,
