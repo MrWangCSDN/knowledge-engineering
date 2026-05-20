@@ -414,3 +414,31 @@ async def test_compact_cross_tenant_isolation(tmp_path):
     # user_id=2 读同 session_id 拿不到（路径前缀不同）
     r2 = await read_session_summary(fs, user_id=2, session_id="sess_x")
     assert r2 == ""
+
+
+@pytest.mark.asyncio
+async def test_compact_fs_write_failure_silently_logged(tmp_path, monkeypatch):
+    """失败隔离：mock fs.write 抛 → compact 中层 catch → _log.debug → return（不抛）。
+
+    §6.5 关键不变量：summary.md 缺失/损坏永不阻塞 SSE 流。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+
+    # monkeypatch fs.write 抛任意异常
+    async def _explode(*args, **kw):
+        raise OSError("simulated disk error")
+    monkeypatch.setattr(fs, "write", _explode)
+
+    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
+    db = _FakeDB(msgs)
+    llm = _FakeLLM(response="摘要")
+    compactor = SessionCompactor(llm)
+
+    # 关键断言：不抛 → compact 中层 catch 兜住
+    # （pytest 默认 fail 在未捕获异常 → 不需要 try/except wrap）
+    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+
+    # 文件未写（fs.write 被 mock 抛）
+    # 注：此处不能 fs.exists 检查，因为 fs.write mock 后 fs.exists 仍是真的
+    # 改为：LLM 仍被调用 1 次（说明 step 1-6 都跑过）
+    assert len(llm.calls) == 1
