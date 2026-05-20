@@ -320,3 +320,36 @@ async def test_compact_llm_returns_empty_skips_write(tmp_path):
     assert len(llm.calls) == 1
     # 文件未写
     assert not await fs.exists("ke://u/7/session/sess_x/summary.md")
+
+
+@pytest.mark.asyncio
+async def test_compact_with_corrupt_frontmatter_self_heals(tmp_path):
+    """frontmatter 损坏自愈：手写非法 YAML → prev_turn_count=0 → 重写干净文件（场景 7）。
+
+    场景：S5 部署初期 / 手工编辑误 / partial write 崩溃产出半损坏文件。
+    _split_frontmatter 容错为空 dict {} → tc 字段缺失 → prev_turn_count 维持 0
+    → delta 守卫按首压路径走（msg_count >= floor + msg_count - 0 >= min_delta）
+    → 重新压缩 → 写干净 frontmatter（与 S2 自愈同模式）。
+    """
+    fs = MemoryFS(root=str(tmp_path))
+    uri = "ke://u/7/session/sess_x/summary.md"
+
+    # 手写损坏 YAML 文件（绕开 _render_frontmatter）
+    bad = "---\n: : : invalid yaml :::\n---\n旧 body\n"
+    await fs.write(uri, bad)
+
+    msgs = _msgs(*[("user", f"q{i}") for i in range(6)])
+    db = _FakeDB(msgs)
+    llm = _FakeLLM(response="自愈后新摘要")
+    compactor = SessionCompactor(llm)
+
+    await compactor.compact(fs, db, user_id=7, session_id="sess_x", every_n_messages=6)
+
+    # LLM 被调用（说明自愈走通）
+    assert len(llm.calls) == 1
+    # 文件重写为干净 frontmatter
+    raw = await fs.read(uri)
+    from src.service.memory.memgen import _split_frontmatter
+    meta, body = _split_frontmatter(raw)
+    assert meta["turn_count"] == 6  # 新水位线
+    assert "自愈后新摘要" in body
