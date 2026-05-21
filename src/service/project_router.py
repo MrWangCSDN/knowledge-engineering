@@ -23,6 +23,7 @@ from src.service.auth_dependencies import get_current_user
 from src.service.auth_models import User
 from src.service.db import get_db
 from src.service.db_models_homepage import Project as ProjectModel
+from src.service.db_models_homepage import UserProjectAccess
 from src.service.project_models import (
     IndexingProgress,
     Project,
@@ -80,14 +81,27 @@ def _to_pydantic(p: ProjectModel) -> Project:
 @router.get("", response_model=ProjectListResponse)
 async def list_projects(
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> ProjectListResponse:
     """列出当前用户可访问的工程。
 
-    v1：所有登录用户都能看到所有工程。
-    v2：根据 user_project_access 表过滤。
+    v2：admin 看全部；普通用户按 user_project_access 表过滤 — 与 qa_router
+    既有 `Depends(require_project_role)` 的 RBAC 语义对齐（前端 dropdown 列出
+    的工程都能用，不会出现"列了但点了 403"的 UX 错配）。
     """
-    stmt = select(ProjectModel).order_by(ProjectModel.created_at.desc())
+    if user.is_admin:
+        stmt = select(ProjectModel).order_by(ProjectModel.created_at.desc())
+    else:
+        # 普通用户：join user_project_access 过滤；按 created_at desc 保持原排序
+        stmt = (
+            select(ProjectModel)
+            .join(
+                UserProjectAccess,
+                ProjectModel.id == UserProjectAccess.project_id,
+            )
+            .where(UserProjectAccess.user_id == user.id)
+            .order_by(ProjectModel.created_at.desc())
+        )
     result = await db.execute(stmt)
     projects = result.scalars().all()
     return ProjectListResponse(projects=[_to_pydantic(p) for p in projects])
