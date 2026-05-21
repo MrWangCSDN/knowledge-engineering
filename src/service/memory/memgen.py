@@ -238,6 +238,12 @@ class MemoryGen:
         for name in entries:                        # entries 已排序
             if name in (_ABSTRACT_SUFFIX, _OVERVIEW_NAME):
                 continue                            # 本目录自身 L0/L1
+            # S4 supersede 归档目录（identity/archive/）不参与 L0 重生成 ——
+            # archive/ 下是旧版被取代的 identity，若计入 abstract 会让 LLM
+            # 同时看到"赵六"和"王五"生成"两个用户名"类污染 → 召回时旧名复活
+            # （2026-05-21 bug：S4 supersede 已工作，但 S2 没过滤 archive/）
+            if name == "archive":
+                continue
             if name.endswith(_ABSTRACT_SUFFIX):
                 continue                            # 子文件 L0，经其 .md 计入，勿重复
             if name.endswith(_MD_SUFFIX):
