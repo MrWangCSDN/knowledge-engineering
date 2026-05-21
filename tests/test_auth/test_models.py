@@ -8,10 +8,12 @@ def test_user_table_name():
 
 def test_user_columns():
     cols = {c.name for c in User.__table__.columns}
+    # 2026-05-21 加 preferred_model 列（多模型切换功能 / users.preferred_model 持久化用户偏好）
     assert cols == {
         "id", "email", "username", "hashed_password",
         "is_active", "is_admin", "failed_attempts", "locked_until",
         "created_at", "updated_at",
+        "preferred_model",
     }
 
 

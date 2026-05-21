@@ -32,6 +32,15 @@ class MeResponse(BaseModel):
     username: str
     is_admin: bool
     created_at: datetime
+    # 用户偏好的 LLM 模型 id（如 'qwen-plus' / 'MiniMax-M2'）。
+    # None = 未设置 → 前端用 DEFAULT_MODEL_ID 兜底；详见 llm_factory.SUPPORTED_MODELS。
+    preferred_model: str | None = None
+
+
+class UpdatePreferredModelRequest(BaseModel):
+    """PATCH /auth/me/model body。"""
+    # model_id 必填；后端会用 llm_factory.is_supported_model 做白名单校验
+    model_id: str = Field(..., min_length=1, max_length=64, description="模型 id，如 qwen-plus / MiniMax-M2")
 
 
 class LogoutResponse(BaseModel):

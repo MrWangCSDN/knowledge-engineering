@@ -19,6 +19,7 @@ from src.service.auth_models import User
 from src.service.auth_schemas import (
     LoginRequest, LoginResponse,
     LogoutResponse, MeResponse, RefreshResponse,
+    UpdatePreferredModelRequest,
 )
 from src.service.db import get_db
 
@@ -111,6 +112,35 @@ async def refresh(
 
 @router.get("/me", response_model=MeResponse)
 async def me(user: User = Depends(get_current_user)) -> MeResponse:
+    return MeResponse.model_validate(user)
+
+
+@router.patch("/me/model", response_model=MeResponse)
+async def update_preferred_model(
+    body: UpdatePreferredModelRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> MeResponse:
+    """更新当前用户的偏好 LLM 模型。
+
+    校验：model_id 必须在 llm_factory.SUPPORTED_MODELS 白名单内，否则返 400；
+    防御未知 model 写入 DB（前端 dropdown 已限制，但后端必须独立校验）。
+    """
+    # 局部 import 避 qa_engine → service 反向依赖（与既有模式一致）
+    from src.service.qa_engine.llm_factory import is_supported_model
+
+    if not is_supported_model(body.model_id):
+        # 400 = 客户端错误；详情给出具体哪个 id 失败，便于前端日志排查
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的模型 id: {body.model_id!r}",
+        )
+
+    # 更新字段 + commit；SQLAlchemy 2.x onupdate 自动维护 updated_at
+    user.preferred_model = body.model_id
+    await db.commit()
+    # commit 后对象处于"过期"状态，refresh 拿最新值（含 onupdate 触发的时间戳）
+    await db.refresh(user)
     return MeResponse.model_validate(user)
 
 

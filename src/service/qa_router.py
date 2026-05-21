@@ -132,6 +132,11 @@ class ExplainRequest(BaseModel):
     history: Optional[list[dict]] = None
     """上下文历史（最近 N 条消息，前端按需传）。"""
 
+    model: Optional[str] = Field(None, max_length=64)
+    """本轮使用的 LLM 模型 id（如 'qwen-plus' / 'MiniMax-M2'）。
+    缺省 / null → 走 user.preferred_model → 再缺省走 DEFAULT_MODEL_ID。
+    白名单校验在 llm_factory.get_llm_provider 内做（未知 id 自动回退默认）。"""
+
 
 # ─── 主路由：SSE 流式问答 ──────────────────────────────────────────────────
 
@@ -230,6 +235,25 @@ async def explain(
             status_code=503,
             detail="QA 引擎未就绪（app.state.qa_synthesizer 缺失）",
         )
+
+    # 3b. 多模型支持（2026-05-21）：按用户偏好 / body 覆盖切换 LLM provider
+    # 优先级：body.model（本轮一次性覆盖） > user.preferred_model（用户持久偏好）> None（factory 兜底默认）
+    # 失败语义：未知 model_id 由 llm_factory.get_llm_provider 静默回退默认（不抛错破坏主流程）
+    try:
+        from src.service.qa_engine.llm_factory import get_llm_provider
+        chosen_model_id = body.model or getattr(user, "preferred_model", None)
+        chosen_llm = get_llm_provider(chosen_model_id)
+        # 浅复制 synthesizer 替 .llm —— 不依赖具体子类（QASynthesizer / ReActSynthesizer）构造签名；
+        # synthesizer 实例的其他字段（tool_registry / max_iterations / 配置项）通过浅复制全保留；
+        # 浅复制比修改 app.state 上的全局 synthesizer 安全：asyncio 并发时不同 request 各持各的副本，
+        # 修改 .llm 不会串到其他请求
+        import copy as _copy
+        synthesizer = _copy.copy(synthesizer)
+        synthesizer.llm = chosen_llm
+    except Exception as exc:
+        # 构造 chosen_llm 失败（如 MINIMAX_API_KEY 缺失但用户选了 MiniMax）→ 降级用 app.state 默认 synthesizer
+        # 这样主流程不挂；UI 可后续提示用户切回默认模型
+        _log.warning("explain: 切换模型失败，回退默认 synthesizer: %r", exc)
 
     # 4. 持久化回调（在 SSE 流末尾被调用）
     # captures: db, session_id, project_id, user
@@ -564,6 +588,10 @@ def _make_title_generator(*, db, session_id, question, llm, is_new_session):
                 system=_TITLE_SUMMARY_SYSTEM,
                 user=question,
             )
+            # 剥推理模型 <think>...</think> 段（MiniMax-M2 等会先输出思维链）；
+            # 普通模型 qwen-plus 不会产生 think 标签，此 strip 等价 identity
+            from src.service.qa_engine.synthesizer import strip_think
+            raw = strip_think(raw)
             title = (raw or "").strip().strip('"').strip("「」").strip()
             if not title:
                 return None

@@ -30,6 +30,10 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )
+    # 用户偏好的 LLM 模型 id（如 'qwen-plus' / 'MiniMax-M2'）。
+    # nullable=True：未设置时应用层（llm_factory.get_llm_provider）兜底用 DEFAULT_MODEL_ID。
+    # 由 alembic add_user_preferred_model 添加；详见 llm_factory.SUPPORTED_MODELS。
+    preferred_model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     def __repr__(self) -> str:
         return f"<User id={self.id} username={self.username!r} admin={self.is_admin}>"
