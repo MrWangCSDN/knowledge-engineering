@@ -19,6 +19,9 @@ dependencies = [
     "streamlit>=1.28.0",
     "streamlit-autorefresh>=0.0.6",
     "weaviate-client>=4.4",
+    # qa_engine.docx_exporter 用 python-docx 把 assistant 答案导出 Word；
+    # 2026-05-21 发现 dependencies 漏列（生产 clone 后 import api 即 ModuleNotFoundError），补上
+    "python-docx>=1.1",
 ]
 
 [project.optional-dependencies]
