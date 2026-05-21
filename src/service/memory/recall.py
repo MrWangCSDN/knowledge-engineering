@@ -191,7 +191,16 @@ class MemoryRecaller:
         fresh_hash = str(fresh_hash)
 
         # 查既有对象：命中且 hash 相同 → 跳过（零 embedding API 调用）
-        existing = view.query.fetch_object_by_id(obj_uuid)
+        # 注意：multi-tenancy collection 在 tenant 不存在时，query.fetch_object_by_id
+        # 抛 WeaviateQueryError("tenant not found")，即便 schema 配 auto_tenant_creation=True
+        # 也只对**写**操作自动建 tenant。新用户首次写记忆时若用 fetch 走 query path 会
+        # 把整个 _index_one 卡死在上层 try/except，导致 tenant 永远不被创建。
+        # 修：吞掉 fetch 期的任何异常 → 视为 existing=None，让流程继续到 insert（自动建 tenant）。
+        try:
+            existing = view.query.fetch_object_by_id(obj_uuid)
+        except Exception as exc:
+            _log.debug("index_changed: fetch_object_by_id failed %r (treat as not exist): %r", uri, exc)
+            existing = None
         if existing is not None and existing.properties.get("hash") == fresh_hash:
             _log.debug("index_changed: hash hit, skip %r", uri)
             return

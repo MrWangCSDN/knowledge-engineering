@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 # AsyncIterator: complete_stream 的返回值类型
 # Awaitable / Callable: on_token 回调类型
@@ -22,6 +23,30 @@ from src.service.qa_engine.prompts import (
     with_memory_block,
 )
 from src.service.qa_engine.retriever import RetrievedContext
+
+
+# ─── 推理模型 think 段剥离 ──────────────────────────────────────────────────
+# 设计：推理模型（MiniMax-M2 / DeepSeek-R1 / 类似）输出格式为
+# `<think>...思维链...</think>实际答案`，KE 只消费"实际答案"部分。
+# 剥离规则：所有 <think>...</think> 对内的内容（含标签本身）一律删除。
+# 兼容：未闭合的 <think>（流式中间状态）也剥到末尾，避免前端看到残段。
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+_OPEN_THINK_RE = re.compile(r"<think>.*?$", re.DOTALL | re.IGNORECASE)
+
+
+def strip_think(text: str | None) -> str:
+    """从 LLM 输出中剥掉 `<think>...</think>` 段（推理模型 chain-of-thought）。
+
+    输入 None / 空 → 返回 ""。
+    支持：闭合 think 段（最常见），以及流式中断 + 未闭合（开标签到末尾全砍）。
+    """
+    if not text:
+        return ""
+    # 先砍闭合 pair（DOTALL + 非贪婪）；多对都剥
+    cleaned = _THINK_RE.sub("", text)
+    # 兜底剥未闭合的（如流式中断在 think 段中间）
+    cleaned = _OPEN_THINK_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 # ─── LLM provider 抽象 ─────────────────────────────────────────────────────
@@ -83,10 +108,13 @@ class QASynthesizer:
         设计：[[chit-chat-闲聊路径-设计]] §4.3, §4.4；记忆注入见 [[记忆系统-设计]] §7。
         §20：带最近历史原文（旧轮由 memory_block 头部的 session summary 顶替，
         S5 已落实读侧 composer 在 qa_router 5b/5c 段）。"""
-        reply = await self.llm.complete(
+        raw = await self.llm.complete(
             system=with_memory_block(_CHIT_CHAT_SYSTEM, memory_block),
             user=build_chitchat_user_prompt(ctx.question, history),
         )
+        # 剥推理模型的 <think>...</think> 段（MiniMax-M2 等推理模型必需；
+        # 普通模型如 qwen-plus 不会产出 think 标签，strip_think 等价 identity）
+        reply = strip_think(raw)
         return SynthesizedAnswer(
             sections=[{
                 "type": "chit-chat",
@@ -112,13 +140,64 @@ class QASynthesizer:
         §20：带最近历史原文（旧轮由 memory_block 头部的 session summary 顶替，
         S5 已落实读侧 composer 在 qa_router 5b/5c 段）。"""
         parts: list[str] = []
+        # streaming token forwarding 期间用 stateful filter 剥 <think> 段
+        # —— 推理模型（MiniMax-M2）流式 token 顺序是 `<think>...</think>实际答案`，
+        # 不过滤的话前端会先打字机式渲染一大段推理链路，UX 极差。
+        # 状态机：
+        #   in_think=False  → 普通输出，token 全 forward + 进 parts
+        #   in_think=True   → 在 think 段内，token 全 skip
+        #   过渡：遇 `<think>` 进 think；遇 `</think>` 出 think（且把 `</think>` 后段也 forward）
+        # buffer：跨 chunk 拼接小段以检测被 chunk 切碎的标签（如 `<thi` + `nk>`）
+        in_think = False
+        buf = ""
         async for tok in self.llm.complete_stream(
             system=with_memory_block(_CHIT_CHAT_SYSTEM, memory_block),
             user=build_chitchat_user_prompt(ctx.question, history),
         ):
-            parts.append(tok)
+            buf += tok
+            # 在 buf 中循环扫开 / 闭标签，找到一个处理一个
+            while True:
+                if not in_think:
+                    # 找 <think> 开标签
+                    idx = buf.find("<think>")
+                    if idx == -1:
+                        # 没开标签：保留末尾可能截开标签的 ≤7 字（'<think>' 长度 = 7）
+                        # 把之前的部分作为正常输出 forward 出去
+                        safe_len = max(0, len(buf) - 7)
+                        if safe_len > 0:
+                            chunk = buf[:safe_len]
+                            parts.append(chunk)
+                            if on_token is not None:
+                                await on_token(chunk)
+                            buf = buf[safe_len:]
+                        break
+                    # 找到了 <think> 标签：前面的内容 forward
+                    if idx > 0:
+                        chunk = buf[:idx]
+                        parts.append(chunk)
+                        if on_token is not None:
+                            await on_token(chunk)
+                    # 进入 think 段：把 <think> 之后的留给下一轮判定
+                    buf = buf[idx + len("<think>"):]
+                    in_think = True
+                else:
+                    # 在 think 段：找 </think> 闭标签
+                    idx = buf.find("</think>")
+                    if idx == -1:
+                        # 没闭标签：丢掉 think 段内已知部分（保留末尾 ≤8 字 = '</think>' 长度，
+                        # 防被 chunk 切碎漏掉）
+                        keep = min(len(buf), 8)
+                        buf = buf[-keep:] if keep > 0 else ""
+                        break
+                    # 找到 </think>：跳过整个 think 段，从闭标签后继续
+                    buf = buf[idx + len("</think>"):]
+                    in_think = False
+        # 流结束后 buf 可能还有残余（最后一段 7 字内未确定是不是 <think> 开头）
+        # 若不在 think 段，把残余 forward 完
+        if not in_think and buf:
+            parts.append(buf)
             if on_token is not None:
-                await on_token(tok)
+                await on_token(buf)
         reply = "".join(parts)
         return SynthesizedAnswer(
             sections=[{

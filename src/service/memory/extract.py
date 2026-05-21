@@ -122,6 +122,12 @@ def _parse_react_json(raw: str) -> list[dict]:
         # supersedes_kind 仅允许 "identity" 或 None（§5.2 schema）
         if sk not in ("identity", None):
             sk = None
+        # 代码层兜底（§5.4 设计 invariant）：identity 类必须配 supersede 语义，
+        # 否则旧身份条目永不归档（"王山河→李龙飞" 类 bug 重现）。LLM 偶尔无视
+        # prompt 输出 supersedes_kind=null（实测 DashScope qwen 系列对此约束不
+        # 鲁棒），此处强制纠正：kind=="identity" → sk:="identity"。
+        if kind == "identity":
+            sk = "identity"
         out.append({
             "kind": kind,
             "content": content.strip(),
