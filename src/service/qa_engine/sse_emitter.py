@@ -192,9 +192,10 @@ async def stream_qa_answer(
     )
 
     # v1.6 token 流：跟 tool_call 类似，用 list 暂存 token，让 on_token 回调里压栈、主流程 yield
-    # v1.7：经过 TokenBatcher 攒批降事件密度（20 字 / 80ms）
+    # 2026-05-22：调到 (1字/10ms) — 等于完全禁用 batching，LLM 每来一个 token 立即压栈，
+    # 主流程 tick 也从 20ms 降到 5ms。配合前端 raw_stream 累计渲染，达到 ChatGPT 打字机体感。
     pending_tokens: list[str] = []
-    token_batcher = TokenBatcher(min_chars=20, max_ms=80)
+    token_batcher = TokenBatcher(min_chars=1, max_ms=10)
 
     async def _on_token(delta: str) -> None:
         """LLM 一吐 chunk 就经过 batcher；攒够了再压栈让主循环 yield SSE。"""
@@ -233,7 +234,7 @@ async def stream_qa_answer(
                 while pending_tokens:
                     delta = pending_tokens.pop(0)
                     yield format_sse("token", {"delta": delta})
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.005)   # 5ms tick：每秒最多 200 次 yield，达到逐字流式效果
             # task 完成后 buffer 里可能还有最后几个事件
             while pending_tool_events:
                 ev_type, ev_data = pending_tool_events.pop(0)
