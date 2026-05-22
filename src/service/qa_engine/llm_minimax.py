@@ -69,13 +69,69 @@ class MiniMaxProvider(DashScopeProvider):
                 "MINIMAX_API_KEY 未设置；请在 .env.local 配置或通过 export 注入",
             )
 
-    # 注：以下方法全部继承自 DashScopeProvider，不需重写：
-    #   - complete(system, user, **kwargs) → str
-    #   - complete_with_tools(messages, tools, **kwargs) → LLMToolResponse
-    #   - complete_stream(system, user, **kwargs) → AsyncIterator[str]
-    #   - complete_stream_with_tools(messages, tools, **kwargs) → AsyncIterator[Any]
-    #   - 各种 _parse_* / _process_* 静态工具
-    # MiniMax-M2 完全遵循 OpenAI 兼容 schema，无需特殊处理。
-    # 如未来发现某 MiniMax 模型 schema 偏离（如 tool_calls 字段名不同），
-    # 在此 override 对应方法即可。
-    _ = Any  # noqa: F841（保留 Any import 引用，免 ruff 误删；将来 override 时用得到）
+    # 注：complete / complete_with_tools / complete_stream_with_tools 继承自 DashScope。
+    # complete_stream 必须 override —— 处理 MiniMax-M2 的 <think>...</think> 推理链路 token，
+    # 在 yield 前剥掉（synthesizer 看不到 think 段，前端打字机零额外延迟）。
+
+    async def complete_stream(
+        self,
+        *,
+        system: str,
+        user: str,
+        **kwargs: Any,
+    ):
+        """流式 yield，stateful filter 剥 <think>...</think> 段。
+
+        状态机：
+            in_think=False  → 普通输出，逐 token yield
+            in_think=True   → 推理段内，token 全 skip
+        buffer：跨 chunk 拼接以检测被切碎的标签（`<thi` + `nk>` 类）。
+        快路径：buf 空 + 当前 tok 不含 '<' → 直接 yield 不进 buffer（零延迟）。
+        """
+        in_think = False
+        buf = ""
+        async for tok in super().complete_stream(system=system, user=user, **kwargs):
+            # 快路径：常规字符 + buf 为空 + 不在 think 段 → 直接 yield（最常见，零延迟）
+            if not in_think and not buf and "<" not in tok:
+                yield tok
+                continue
+
+            # 慢路径：进入 stateful buffer 处理 <think>...</think>
+            buf += tok
+            while True:
+                if not in_think:
+                    idx = buf.find("<think>")
+                    if idx == -1:
+                        # 没找到开标签：找最后一个 '<' 位置，之前的内容安全 yield
+                        # 仅保留可能含未完整 '<think>' 标签碎片的尾部
+                        last_lt = buf.rfind("<")
+                        if last_lt == -1:
+                            # buf 完全不含 '<' → 全 yield
+                            if buf:
+                                yield buf
+                            buf = ""
+                        else:
+                            chunk = buf[:last_lt]
+                            if chunk:
+                                yield chunk
+                            buf = buf[last_lt:]
+                        break
+                    # 找到 <think> 开标签：前面内容 yield，进入 think 段
+                    if idx > 0:
+                        yield buf[:idx]
+                    buf = buf[idx + len("<think>"):]
+                    in_think = True
+                else:
+                    # 在 think 段：找 </think> 闭标签
+                    idx = buf.find("</think>")
+                    if idx == -1:
+                        # 没闭标签：丢 think 段内已知部分，保留尾部 ≤8 字（'</think>' 长度）防碎片
+                        keep = min(len(buf), 8)
+                        buf = buf[-keep:] if keep > 0 else ""
+                        break
+                    # 找到 </think>：跳过整段，从闭标签后继续（可能马上又遇到普通文本）
+                    buf = buf[idx + len("</think>"):]
+                    in_think = False
+        # 流结束后 buf 可能还有残余（最后一段未确定是否标签起点）
+        if not in_think and buf:
+            yield buf

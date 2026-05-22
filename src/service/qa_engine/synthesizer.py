@@ -140,64 +140,19 @@ class QASynthesizer:
         §20：带最近历史原文（旧轮由 memory_block 头部的 session summary 顶替，
         S5 已落实读侧 composer 在 qa_router 5b/5c 段）。"""
         parts: list[str] = []
-        # streaming token forwarding 期间用 stateful filter 剥 <think> 段
-        # —— 推理模型（MiniMax-M2）流式 token 顺序是 `<think>...</think>实际答案`，
-        # 不过滤的话前端会先打字机式渲染一大段推理链路，UX 极差。
-        # 状态机：
-        #   in_think=False  → 普通输出，token 全 forward + 进 parts
-        #   in_think=True   → 在 think 段内，token 全 skip
-        #   过渡：遇 `<think>` 进 think；遇 `</think>` 出 think（且把 `</think>` 后段也 forward）
-        # buffer：跨 chunk 拼接小段以检测被 chunk 切碎的标签（如 `<thi` + `nk>`）
-        in_think = False
-        buf = ""
+        # 2026-05-22 重构：think 段剥离移到 provider 层（MiniMaxProvider.complete_stream
+        # 自己 yield 已 strip 后的 token），synthesizer 这里恢复 simple loop —— 每个 token
+        # 来即 forward，零额外延迟。
+        # 修复 bug：之前的 stateful filter "buf 留 7 字防标签碎片" 对 DashScope（qwen-plus）
+        # 等不输出 <think> 的模型多余，每个 SSE chunk 都被 hold → 前端看着"一片一片吐"
+        # 而非逐字打字机。MiniMax 自己处理 think filter，普通模型零开销。
         async for tok in self.llm.complete_stream(
             system=with_memory_block(_CHIT_CHAT_SYSTEM, memory_block),
             user=build_chitchat_user_prompt(ctx.question, history),
         ):
-            buf += tok
-            # 在 buf 中循环扫开 / 闭标签，找到一个处理一个
-            while True:
-                if not in_think:
-                    # 找 <think> 开标签
-                    idx = buf.find("<think>")
-                    if idx == -1:
-                        # 没开标签：保留末尾可能截开标签的 ≤7 字（'<think>' 长度 = 7）
-                        # 把之前的部分作为正常输出 forward 出去
-                        safe_len = max(0, len(buf) - 7)
-                        if safe_len > 0:
-                            chunk = buf[:safe_len]
-                            parts.append(chunk)
-                            if on_token is not None:
-                                await on_token(chunk)
-                            buf = buf[safe_len:]
-                        break
-                    # 找到了 <think> 标签：前面的内容 forward
-                    if idx > 0:
-                        chunk = buf[:idx]
-                        parts.append(chunk)
-                        if on_token is not None:
-                            await on_token(chunk)
-                    # 进入 think 段：把 <think> 之后的留给下一轮判定
-                    buf = buf[idx + len("<think>"):]
-                    in_think = True
-                else:
-                    # 在 think 段：找 </think> 闭标签
-                    idx = buf.find("</think>")
-                    if idx == -1:
-                        # 没闭标签：丢掉 think 段内已知部分（保留末尾 ≤8 字 = '</think>' 长度，
-                        # 防被 chunk 切碎漏掉）
-                        keep = min(len(buf), 8)
-                        buf = buf[-keep:] if keep > 0 else ""
-                        break
-                    # 找到 </think>：跳过整个 think 段，从闭标签后继续
-                    buf = buf[idx + len("</think>"):]
-                    in_think = False
-        # 流结束后 buf 可能还有残余（最后一段 7 字内未确定是不是 <think> 开头）
-        # 若不在 think 段，把残余 forward 完
-        if not in_think and buf:
-            parts.append(buf)
+            parts.append(tok)
             if on_token is not None:
-                await on_token(buf)
+                await on_token(tok)
         reply = "".join(parts)
         return SynthesizedAnswer(
             sections=[{
