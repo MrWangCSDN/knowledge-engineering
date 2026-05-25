@@ -102,6 +102,9 @@ class ReActSynthesizer:
         # OpenAI 格式的 tools schema：从 registry 里拿，转一次
         tools_schema = self._tools_to_openai_schema()
 
+        # 引用溯源（设计 §6）：累积 agent 查过的 entity_id（去重、按首次出现序）
+        cited_entities: list[str] = []
+
         # 上一轮 LLM 的响应；max_iterations 用完时拿它当 final fallback
         last_response: LLMToolResponse | None = None
 
@@ -114,7 +117,7 @@ class ReActSynthesizer:
             if not response.has_tool_calls():
                 raw = response.content or ""
                 sections = QASynthesizer._parse_sections(raw)
-                return SynthesizedAnswer(sections=sections, raw_output=raw)
+                return SynthesizedAnswer(sections=sections, raw_output=raw, cited_entities=cited_entities)
 
             # 有 tool_calls → 把"assistant 这一轮"加进 messages，记录它要调啥
             # OpenAI 协议要求 assistant 的 tool_calls 必须用特定结构回放
@@ -137,6 +140,10 @@ class ReActSynthesizer:
 
             # 依次执行每个 tool_call，结果作为 'role=tool' 消息追加
             for tc in response.tool_calls:
+                # 收集本次工具调用的 entity_id（引用溯源）
+                _eid = tc.arguments.get("entity_id")
+                if isinstance(_eid, str) and _eid and _eid not in cited_entities:
+                    cited_entities.append(_eid)
                 # 触发"starting"回调（让 SSE 立刻通知前端"LLM 正在调 X"）
                 # callback 是可选的；None 时直接跳过判断
                 if on_tool_call is not None:
@@ -175,7 +182,7 @@ class ReActSynthesizer:
                 "content": f"ReAct 循环达到 {self.max_iterations} 轮上限仍未收敛，请简化问题或拆分。",
                 "references": [],
             }]
-        return SynthesizedAnswer(sections=sections, raw_output=raw)
+        return SynthesizedAnswer(sections=sections, raw_output=raw, cited_entities=cited_entities)
 
     # ─── 内部 helper ─────────────────────────────────────────────────────
 
@@ -217,6 +224,9 @@ class ReActSynthesizer:
         ]
         tools_schema = self._tools_to_openai_schema()
         last_raw_output = ""
+
+        # 引用溯源（设计 §6）：累积 agent 查过的 entity_id（去重、按首次出现序）
+        cited_entities: list[str] = []
 
         # 判定 provider 能不能走真流：duck-typing
         has_real_stream = hasattr(self.llm, "complete_stream_with_tools") and callable(
@@ -264,7 +274,7 @@ class ReActSynthesizer:
                 if not has_real_stream and on_token is not None and round_content:
                     await self._pseudo_stream(round_content, on_token)
                 sections = QASynthesizer._parse_sections(round_content)
-                return SynthesizedAnswer(sections=sections, raw_output=round_content)
+                return SynthesizedAnswer(sections=sections, raw_output=round_content, cited_entities=cited_entities)
 
             # 有 tool_calls → 继续 ReAct 循环
             # 1) 把"assistant 这一轮"加进 messages
@@ -285,6 +295,10 @@ class ReActSynthesizer:
             })
             # 2) 依次执行
             for tc in round_tool_calls:
+                # 收集本次工具调用的 entity_id（引用溯源）
+                _eid = tc.arguments.get("entity_id")
+                if isinstance(_eid, str) and _eid and _eid not in cited_entities:
+                    cited_entities.append(_eid)
                 if on_tool_call is not None:
                     try:
                         await on_tool_call("starting", tc)
@@ -313,7 +327,7 @@ class ReActSynthesizer:
                 "content": f"ReAct 循环达到 {self.max_iterations} 轮上限仍未收敛，请简化问题或拆分。",
                 "references": [],
             }]
-        return SynthesizedAnswer(sections=sections, raw_output=raw)
+        return SynthesizedAnswer(sections=sections, raw_output=raw, cited_entities=cited_entities)
 
     @classmethod
     async def _pseudo_stream(

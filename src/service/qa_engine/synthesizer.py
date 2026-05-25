@@ -91,6 +91,9 @@ class SynthesizedAnswer:
     raw_output: str = ""
     """原始 LLM 输出（debug/记录用）。"""
 
+    cited_entities: list[str] = field(default_factory=list)
+    """agent 实际查过的 entity_id（去重，按首次出现序）；引用溯源用（设计 §6）。"""
+
 
 # ─── synthesizer ───────────────────────────────────────────────────────────
 

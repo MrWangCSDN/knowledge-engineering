@@ -631,3 +631,44 @@ async def test_synthesize_stream_forwards_thinking_to_on_thinking():
 
     assert "".join(thinking_chunks) == "先看调用方"
     assert "".join(token_chunks) == "## 概述\n答案正文"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_collects_cited_entities():
+    """agent 查过的 entity_id 被收集进 SynthesizedAnswer.cited_entities（去重、跨轮累积）。"""
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+    from src.service.qa_engine.tools.base import Tool, ToolRegistry
+    from src.service.qa_engine.llm_types import StreamTextDelta, ToolCall
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    # 注册一个假工具，handler 直接回 echo（不需真后端）
+    async def _echo_handler(inp):
+        return {"entity_id": inp.get("entity_id"), "ok": True}
+
+    reg = ToolRegistry()
+    reg.register(Tool(
+        name="ke_callees",
+        description="x",
+        input_schema={"type": "object", "properties": {"entity_id": {"type": "string"}}, "required": ["entity_id"]},
+        handler=_echo_handler,
+    ))
+
+    # fake LLM：第 1 轮调 ke_callees(method//A)，第 2 轮再调 ke_callees(method//B)，第 3 轮给 final
+    class _FakeLLM:
+        def __init__(self):
+            self._round = 0
+
+        async def complete_stream_with_tools(self, *, messages, tools):
+            self._round += 1
+            if self._round == 1:
+                yield ToolCall(id="c1", name="ke_callees", arguments={"entity_id": "method//A"})
+            elif self._round == 2:
+                yield ToolCall(id="c2", name="ke_callees", arguments={"entity_id": "method//B"})
+            else:
+                yield StreamTextDelta(text="## 概述\n答案")
+
+    synth = ReActSynthesizer(llm_provider=_FakeLLM(), tool_registry=reg, max_iterations=5)
+    ctx = RetrievedContext(question="q", project_id="proj-a")
+    answer = await synth.synthesize_stream(ctx, history=[])
+
+    assert answer.cited_entities == ["method//A", "method//B"]
