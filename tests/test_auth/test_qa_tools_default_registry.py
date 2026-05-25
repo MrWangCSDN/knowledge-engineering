@@ -40,3 +40,50 @@ async def test_default_registry_call_dispatches() -> None:
     out = await reg.call("ke_callees", {"entity_id": "A"})
 
     assert out == {"entity_id": "A", "callees": ["B"]}
+
+
+def test_default_registry_registers_optional_stores_when_provided():
+    """传入 code_store / method_interp_store 时，注册 ke_read_entity / ke_method_interp。"""
+    from src.service.qa_engine.tools import build_default_registry
+
+    class _FakeGraph:
+        def successors(self, e, rel_type=None): return []
+        def predecessors(self, e, rel_type=None): return []
+
+    class _FakeBiz:
+        def get_by_entity(self, entity_id, *, project_id, level=None): return None
+        def search_method_hits_by_text(self, *, text, project_id, limit=5): return []
+
+    class _FakeCodeStore:
+        def get_by_entity_id(self, entity_id): return None
+
+    class _FakeInterpStore:
+        def get_by_method_id(self, method_entity_id): return None
+
+    reg = build_default_registry(
+        graph=_FakeGraph(),
+        business_store=_FakeBiz(),
+        code_store=_FakeCodeStore(),
+        method_interp_store=_FakeInterpStore(),
+    )
+    names = {t.name for t in reg.list_tools()}
+    assert "ke_read_entity" in names
+    assert "ke_method_interp" in names
+
+
+def test_default_registry_skips_optional_stores_when_absent():
+    """不传 code_store / method_interp_store 时，不注册这两个工具（向后兼容）。"""
+    from src.service.qa_engine.tools import build_default_registry
+
+    class _FakeGraph:
+        def successors(self, e, rel_type=None): return []
+        def predecessors(self, e, rel_type=None): return []
+
+    class _FakeBiz:
+        def get_by_entity(self, entity_id, *, project_id, level=None): return None
+        def search_method_hits_by_text(self, *, text, project_id, limit=5): return []
+
+    reg = build_default_registry(graph=_FakeGraph(), business_store=_FakeBiz())
+    names = {t.name for t in reg.list_tools()}
+    assert "ke_read_entity" not in names
+    assert "ke_method_interp" not in names

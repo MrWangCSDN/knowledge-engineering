@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from typing import Any
+
 from src.service.qa_engine.tools.base import Tool, ToolNotFound, ToolRegistry
 from src.service.qa_engine.tools.ke_business_interp import build_ke_business_interp_tool
 from src.service.qa_engine.tools.ke_callees import build_ke_callees_tool
@@ -16,6 +18,8 @@ from src.service.qa_engine.tools.ke_callers import build_ke_callers_tool
 from src.service.qa_engine.tools.ke_search import build_ke_search_tool
 from src.service.qa_engine.tools.ke_table_access import build_ke_table_access_tool
 from src.service.qa_engine.tools.ke_impact import build_ke_impact_tool
+from src.service.qa_engine.tools.ke_read_entity import build_ke_read_entity_tool
+from src.service.qa_engine.tools.ke_method_interp import build_ke_method_interp_tool
 from src.service.qa_engine.retriever import BusinessStoreProto, GraphProto
 
 
@@ -30,6 +34,8 @@ __all__ = [
     "build_ke_business_interp_tool",
     "build_ke_table_access_tool",
     "build_ke_impact_tool",
+    "build_ke_read_entity_tool",
+    "build_ke_method_interp_tool",
     "build_default_registry",
 ]
 
@@ -38,25 +44,23 @@ def build_default_registry(
     *,
     graph: GraphProto,
     business_store: BusinessStoreProto,
+    code_store: Any | None = None,
+    method_interp_store: Any | None = None,
 ) -> ToolRegistry:
-    """构造预装了 5 个 ke_* 工具的 ToolRegistry。
+    """构造预装 ke_* 工具的 ToolRegistry。
 
-    api.py startup 用：
-        app.state.qa_tools = build_default_registry(
-            graph=neo4j_adapter,
-            business_store=weaviate_adapter,
-        )
-
-    :param graph: GraphProto 实现（Neo4jGraphAdapter / 测试 mock）
-    :param business_store: BusinessStoreProto 实现（WeaviateBusinessAdapter / 测试 mock）
-    :return: 包含 5 个工具的 ToolRegistry，可立即使用
+    graph + business_store 必填（核心工具）；code_store / method_interp_store 可选，
+    传入才注册 ke_read_entity / ke_method_interp（后端未连这两个 store 时优雅缺省）。
     """
     registry = ToolRegistry()
-    # 注册顺序 = list_tools() 输出顺序；这里按"用户最常用先"排
     registry.register(build_ke_search_tool(business_store))
     registry.register(build_ke_business_interp_tool(business_store))
     registry.register(build_ke_callees_tool(graph))
     registry.register(build_ke_callers_tool(graph))
     registry.register(build_ke_table_access_tool(graph))
     registry.register(build_ke_impact_tool(graph))
+    if code_store is not None:
+        registry.register(build_ke_read_entity_tool(code_store))
+    if method_interp_store is not None:
+        registry.register(build_ke_method_interp_tool(method_interp_store))
     return registry
