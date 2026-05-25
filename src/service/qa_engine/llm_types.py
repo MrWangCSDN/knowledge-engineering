@@ -57,3 +57,16 @@ class StreamTextDelta:
     以及零个或多个 ToolCall（每个 tool_calls 都装配完后 yield 一次）。
     """
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamThinkingDelta:
+    """LLM 流式响应里的一段"思考"增量（区别于答案正文 StreamTextDelta）。
+
+    来源：
+      - DashScope/qwen：delta.reasoning_content 字段
+      - MiniMax-M2：content 里的 <think>...</think> 段（Plan A-cont 处理）
+
+    上层 sse_emitter 按 isinstance 把它路由到 SSE `thinking` 事件 → 前端灰字渲染。
+    """
+    text: str
