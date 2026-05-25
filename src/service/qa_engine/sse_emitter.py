@@ -321,6 +321,7 @@ async def stream_qa_answer(
         "total_tokens": answer.token_usage,
         "cost_yuan": answer.cost_yuan,
         "latency_ms": latency_ms,
+        "cited_entities": answer.cited_entities,
     })
 
     # 8. session_title（v1，2026-05-16）：仅当 router 传了 on_title 且返回非空

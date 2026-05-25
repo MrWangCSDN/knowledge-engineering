@@ -101,6 +101,7 @@ class _StubAnswer:
     token_usage = 1
     cost_yuan = 0.0
     raw_output = "c"
+    cited_entities: list = []
 
 
 class _SpySynth:
