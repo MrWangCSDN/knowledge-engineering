@@ -57,3 +57,46 @@ def test_builder_failure_does_not_raise(monkeypatch):
     out = qa_router._inject_per_request_tool_registry(synth, "proj-a", object())
     # 失败兜底：registry 仍是原来的，没被清成 None
     assert out.tool_registry is original
+
+
+def test_build_tools_for_project_passes_optional_stores(monkeypatch):
+    """build_tools_for_project 把 app.state 的 code_store / method_interp_store
+    透传给 build_default_registry（有则注册对应工具）。"""
+    captured = {}
+
+    code_sentinel = object()
+    interp_sentinel = object()
+
+    def _fake_build_default_registry(*, graph, business_store, code_store=None, method_interp_store=None):
+        captured["code_store"] = code_store
+        captured["method_interp_store"] = method_interp_store
+        from src.service.qa_engine.tools.base import ToolRegistry
+        return ToolRegistry()
+
+    # 伪造 request.app.state：含 4 个后端
+    class _State:
+        weaviate_business_store = object()
+        neo4j_backend = object()
+        weaviate_code_store = code_sentinel
+        weaviate_method_interp_store = interp_sentinel
+
+    class _App:
+        state = _State()
+
+    class _Req:
+        app = _App()
+
+    # monkeypatch build_default_registry 捕获透传；adapter 构造换轻量替身（不真连后端）
+    # 注意：build_tools_for_project 内部是局部 import
+    #   `from src.service.qa_engine.tools import build_default_registry`
+    #   `from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateBusinessAdapter`
+    # 局部 import 在调用时按模块属性取值 → 必须 patch 这两个**源模块**的属性。
+    import src.service.qa_engine.tools as _tools_mod
+    import src.service.qa_engine.adapters as _adapters
+    monkeypatch.setattr(_tools_mod, "build_default_registry", _fake_build_default_registry)
+    monkeypatch.setattr(_adapters, "Neo4jGraphAdapter", lambda backend, project_id: object())
+    monkeypatch.setattr(_adapters, "WeaviateBusinessAdapter", lambda store: object())
+
+    qa_router.build_tools_for_project("proj-a", _Req())
+    assert captured["code_store"] is code_sentinel
+    assert captured["method_interp_store"] is interp_sentinel

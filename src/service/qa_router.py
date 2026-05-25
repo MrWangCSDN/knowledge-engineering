@@ -112,13 +112,22 @@ def build_tools_for_project(project_id: str, request: Request):
             "底层存储资源未就绪（weaviate_business_store / neo4j_backend）"
         )
 
+    # 可选 store（未连时为 None → build_default_registry 不注册对应工具）
+    code_store = getattr(request.app.state, "weaviate_code_store", None)
+    method_interp_store = getattr(request.app.state, "weaviate_method_interp_store", None)
+
     from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateBusinessAdapter
     from src.service.qa_engine.tools import build_default_registry
 
     biz_adapter = WeaviateBusinessAdapter(biz_store)
     graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id=project_id)
 
-    return build_default_registry(graph=graph_adapter, business_store=biz_adapter)
+    return build_default_registry(
+        graph=graph_adapter,
+        business_store=biz_adapter,
+        code_store=code_store,
+        method_interp_store=method_interp_store,
+    )
 
 
 def _inject_per_request_tool_registry(synthesizer, project_id: str, request: Request):
