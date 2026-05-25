@@ -76,6 +76,7 @@ class ReActSynthesizer:
         ctx: RetrievedContext,
         history: list[dict[str, Any]] | None = None,
         on_tool_call: Optional[Callable[..., Awaitable[None]]] = None,
+        memory_block: str | None = None,
     ) -> SynthesizedAnswer:
         """主入口：跑 ReAct 循环，返回 6 段式答案。
 
@@ -83,18 +84,22 @@ class ReActSynthesizer:
             await on_tool_call("starting", call)              # 开始前
             await on_tool_call("complete", call, result_dict) # 完成后
             sse_emitter 用它实时发"event: tool_call"事件给前端。
+        :param memory_block: 可选的记忆文本块（sse_emitter 无条件透传过来）；
+            None 时 with_memory_block 是 identity，不改变 system prompt（向后兼容）。
         """
-        from src.service.qa_engine.prompts import SYSTEM_PROMPT, build_user_prompt
+        from src.service.qa_engine.prompts import SYSTEM_PROMPT, build_user_prompt, with_memory_block
         from src.service.qa_engine.synthesizer import _ctx_to_dict
 
         user_prompt = build_user_prompt(ctx.question, _ctx_to_dict(ctx))
+        # 记忆注入（对齐 QASynthesizer）：memory_block=None 时 with_memory_block 为 identity
+        base_system = with_memory_block(SYSTEM_PROMPT, memory_block)
         # 给 system prompt 加 tool 使用指引（只有注册了工具才加，避免空 prompt 教 LLM "可调用工具" 但其实没工具）
-        system_text = SYSTEM_PROMPT
+        system_text = base_system
         tool_hint = self._build_tool_usage_hint()
         if tool_hint:
-            # 把 tool 使用指引追加到 SYSTEM_PROMPT 末尾
+            # 把 tool 使用指引追加到 base_system 末尾
             # 用 "\n\n" 作为段落分隔，跟 SYSTEM_PROMPT 原有结构对齐
-            system_text = f"{SYSTEM_PROMPT}\n\n{tool_hint}"
+            system_text = f"{base_system}\n\n{tool_hint}"
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_text},
             {"role": "user", "content": user_prompt},
@@ -200,6 +205,7 @@ class ReActSynthesizer:
         on_token: Optional[Callable[[str], Awaitable[None]]] = None,
         on_thinking: Optional[Callable[[str], Awaitable[None]]] = None,
         on_tool_call: Optional[Callable[..., Awaitable[None]]] = None,
+        memory_block: str | None = None,
     ) -> SynthesizedAnswer:
         """流式版的 synthesize：跟 synthesize 同样做 ReAct 循环。
 
@@ -209,15 +215,19 @@ class ReActSynthesizer:
 
         :param on_token: 文本片段到达时回调（每个 StreamTextDelta / 每个伪流 chunk）
         :param on_tool_call: tool 执行前后回调，跟 synthesize 一样
+        :param memory_block: 可选的记忆文本块（sse_emitter 无条件透传过来）；
+            None 时 with_memory_block 是 identity，不改变 system prompt（向后兼容）。
         """
-        from src.service.qa_engine.prompts import SYSTEM_PROMPT, build_user_prompt
+        from src.service.qa_engine.prompts import SYSTEM_PROMPT, build_user_prompt, with_memory_block
         from src.service.qa_engine.synthesizer import _ctx_to_dict
 
         user_prompt = build_user_prompt(ctx.question, _ctx_to_dict(ctx))
-        system_text = SYSTEM_PROMPT
+        # 记忆注入（对齐 QASynthesizer）：memory_block=None 时 with_memory_block 为 identity
+        base_system = with_memory_block(SYSTEM_PROMPT, memory_block)
+        system_text = base_system
         tool_hint = self._build_tool_usage_hint()
         if tool_hint:
-            system_text = f"{SYSTEM_PROMPT}\n\n{tool_hint}"
+            system_text = f"{base_system}\n\n{tool_hint}"
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_text},
             {"role": "user", "content": user_prompt},

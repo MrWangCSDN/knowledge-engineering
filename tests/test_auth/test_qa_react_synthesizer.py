@@ -736,3 +736,55 @@ async def test_synthesize_collects_cited_entities():
 
     # round 3 的重复 method//A 不应产生第三个元素，顺序保持 A → B
     assert answer.cited_entities == ["method//A", "method//B"]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_accepts_and_injects_memory_block():
+    """ReActSynthesizer.synthesize_stream 接受 memory_block 且注入 system prompt（对齐 QASynthesizer）。
+    回归点：sse_emitter 无条件透传 memory_block，真 ReActSynthesizer 此前会 TypeError。"""
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+    from src.service.qa_engine.tools.base import ToolRegistry
+    from src.service.qa_engine.llm_types import StreamTextDelta
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    # 捕获 LLM 收到的 system 消息内容，验证 memory_block 是否注入
+    captured: dict = {}
+
+    class _FakeLLM:
+        # complete_stream_with_tools：异步生成器（走真流路径），接受 keyword-only 参数
+        async def complete_stream_with_tools(self, *, messages, tools):
+            # 记录第一条消息（system message）的 content
+            captured["system"] = messages[0]["content"]
+            # yield 一个 StreamTextDelta 表示 LLM 给出了最终答案（无 tool_calls → ReAct 结束）
+            yield StreamTextDelta(text="## 概述\n答案")
+
+    synth = ReActSynthesizer(llm_provider=_FakeLLM(), tool_registry=ToolRegistry(), max_iterations=3)
+    ctx = RetrievedContext(question="q", project_id="p")
+    # 关键：带 memory_block 调用——修复前这里直接 TypeError
+    answer = await synth.synthesize_stream(ctx, history=[], memory_block="【记忆】用户偏好X")
+
+    assert answer.sections  # 没崩
+    assert "【记忆】用户偏好X" in captured["system"]  # 记忆注入了 system prompt
+
+
+@pytest.mark.asyncio
+async def test_synthesize_accepts_and_injects_memory_block():
+    """非流式 synthesize 同样接受并注入 memory_block。"""
+    from unittest.mock import AsyncMock
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+    from src.service.qa_engine.tools.base import ToolRegistry
+    from src.service.qa_engine.llm_types import LLMToolResponse
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    # AsyncMock 让 complete_with_tools 直接返回一个合法的最终答案（tool_calls 为空 → ReAct 结束）
+    llm = AsyncMock()
+    llm.complete_with_tools = AsyncMock(return_value=LLMToolResponse(
+        content="```json\n{\"sections\": []}\n```", tool_calls=[],
+    ))
+    synth = ReActSynthesizer(llm_provider=llm, tool_registry=ToolRegistry(), max_iterations=3)
+    ctx = RetrievedContext(question="q", project_id="p")
+    await synth.synthesize(ctx, history=[], memory_block="【记忆】偏好X")
+
+    # 验证 LLM 收到的 system 消息里包含了 memory_block 的内容
+    sent = llm.complete_with_tools.call_args.kwargs["messages"][0]["content"]
+    assert "【记忆】偏好X" in sent
