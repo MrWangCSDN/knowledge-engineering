@@ -121,6 +121,26 @@ def build_tools_for_project(project_id: str, request: Request):
     return build_default_registry(graph=graph_adapter, business_store=biz_adapter)
 
 
+def _inject_per_request_tool_registry(synthesizer, project_id: str, request: Request):
+    """ReAct synthesizer 按 project_id 注入 per-request 工具 registry（修 Task 24）。
+
+    - 非 ReActSynthesizer（如 QASynthesizer 单次 RAG）不需工具 → 原样返回，不构造。
+    - build_tools_for_project 失败（后端未就绪）→ 不抛，沿用 synthesizer 已有 registry，
+      主流程不挂（与 explain 内其它 per-request 构造的容错语义一致）。
+
+    :return: 同一个 synthesizer 实例（就地改 tool_registry）
+    """
+    # 局部 import 避免顶部循环依赖
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+    if not isinstance(synthesizer, ReActSynthesizer):
+        return synthesizer
+    try:
+        synthesizer.tool_registry = build_tools_for_project(project_id, request)
+    except Exception as exc:
+        _log.warning("explain: per-request 工具注册失败，沿用默认 registry: %r", exc)
+    return synthesizer
+
+
 # ─── 请求体 ─────────────────────────────────────────────────────────────────
 
 class ExplainRequest(BaseModel):
@@ -250,6 +270,8 @@ async def explain(
         import copy as _copy
         synthesizer = _copy.copy(synthesizer)
         synthesizer.llm = chosen_llm
+        # per-request 工具 registry（修 Task 24）：ReAct 模式按 project_id 隔离注入
+        synthesizer = _inject_per_request_tool_registry(synthesizer, project_id, request)
     except Exception as exc:
         # 构造 chosen_llm 失败（如 MINIMAX_API_KEY 缺失但用户选了 MiniMax）→ 降级用 app.state 默认 synthesizer
         # 这样主流程不挂；UI 可后续提示用户切回默认模型
