@@ -195,6 +195,7 @@ async def stream_qa_answer(
     # 2026-05-22：调到 (1字/10ms) — 等于完全禁用 batching，LLM 每来一个 token 立即压栈，
     # 主流程 tick 也从 20ms 降到 5ms。配合前端 raw_stream 累计渲染，达到 ChatGPT 打字机体感。
     pending_tokens: list[str] = []
+    pending_thinking: list[str] = []
     token_batcher = TokenBatcher(min_chars=1, max_ms=10)
 
     async def _on_token(delta: str) -> None:
@@ -202,6 +203,11 @@ async def stream_qa_answer(
         batch = await token_batcher.add(delta)
         if batch is not None:
             pending_tokens.append(batch)
+
+    async def _on_thinking(delta: str) -> None:
+        """LLM 思考增量直接入栈，主循环 flush 成 SSE thinking 事件（设计 §5 灰字）。"""
+        if delta:
+            pending_thinking.append(delta)
 
     try:
         if supports_stream:
@@ -220,12 +226,17 @@ async def stream_qa_answer(
             }
             if is_react:
                 stream_kwargs["on_tool_call"] = _on_tool_call
+                stream_kwargs["on_thinking"] = _on_thinking
 
             task = asyncio.create_task(
                 synthesizer.synthesize_stream(ctx, **stream_kwargs)
             )
             # 边等 task 边 flush 事件：每 20ms 检查一次
             while not task.done():
+                # flush 思考增量（设计 §5 灰字；在 token 前出）
+                while pending_thinking:
+                    delta = pending_thinking.pop(0)
+                    yield format_sse("thinking", {"delta": delta})
                 # flush pending tool_call events（ReAct 模式才有）
                 while pending_tool_events:
                     ev_type, ev_data = pending_tool_events.pop(0)
@@ -236,6 +247,9 @@ async def stream_qa_answer(
                     yield format_sse("token", {"delta": delta})
                 await asyncio.sleep(0.005)   # 5ms tick：每秒最多 200 次 yield，达到逐字流式效果
             # task 完成后 buffer 里可能还有最后几个事件
+            while pending_thinking:
+                delta = pending_thinking.pop(0)
+                yield format_sse("thinking", {"delta": delta})
             while pending_tool_events:
                 ev_type, ev_data = pending_tool_events.pop(0)
                 yield format_sse(ev_type, ev_data)
