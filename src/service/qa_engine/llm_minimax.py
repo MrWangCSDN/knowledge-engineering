@@ -80,58 +80,21 @@ class MiniMaxProvider(DashScopeProvider):
         user: str,
         **kwargs: Any,
     ):
-        """流式 yield，stateful filter 剥 <think>...</think> 段。
+        """流式 yield，剥 <think>...</think> 段（只吐正文）。
 
-        状态机：
-            in_think=False  → 普通输出，逐 token yield
-            in_think=True   → 推理段内，token 全 skip
-        buffer：跨 chunk 拼接以检测被切碎的标签（`<thi` + `nk>` 类）。
-        快路径：buf 空 + 当前 tok 不含 '<' → 直接 yield 不进 buffer（零延迟）。
+        2026-05-22 重构：内联状态机抽到 ThinkSplitter（见 think_splitter.py）。
+        本方法只消费 text 段、丢弃 think 段，保持历史"剥 think"语义不变。
         """
-        in_think = False
-        buf = ""
-        async for tok in super().complete_stream(system=system, user=user, **kwargs):
-            # 快路径：常规字符 + buf 为空 + 不在 think 段 → 直接 yield（最常见，零延迟）
-            if not in_think and not buf and "<" not in tok:
-                yield tok
-                continue
+        # 局部 import 避免顶部循环依赖风险（与仓库其它 provider 同模式）
+        from src.service.qa_engine.think_splitter import ThinkSplitter
 
-            # 慢路径：进入 stateful buffer 处理 <think>...</think>
-            buf += tok
-            while True:
-                if not in_think:
-                    idx = buf.find("<think>")
-                    if idx == -1:
-                        # 没找到开标签：找最后一个 '<' 位置，之前的内容安全 yield
-                        # 仅保留可能含未完整 '<think>' 标签碎片的尾部
-                        last_lt = buf.rfind("<")
-                        if last_lt == -1:
-                            # buf 完全不含 '<' → 全 yield
-                            if buf:
-                                yield buf
-                            buf = ""
-                        else:
-                            chunk = buf[:last_lt]
-                            if chunk:
-                                yield chunk
-                            buf = buf[last_lt:]
-                        break
-                    # 找到 <think> 开标签：前面内容 yield，进入 think 段
-                    if idx > 0:
-                        yield buf[:idx]
-                    buf = buf[idx + len("<think>"):]
-                    in_think = True
-                else:
-                    # 在 think 段：找 </think> 闭标签
-                    idx = buf.find("</think>")
-                    if idx == -1:
-                        # 没闭标签：丢 think 段内已知部分，保留尾部 ≤8 字（'</think>' 长度）防碎片
-                        keep = min(len(buf), 8)
-                        buf = buf[-keep:] if keep > 0 else ""
-                        break
-                    # 找到 </think>：跳过整段，从闭标签后继续（可能马上又遇到普通文本）
-                    buf = buf[idx + len("</think>"):]
-                    in_think = False
-        # 流结束后 buf 可能还有残余（最后一段未确定是否标签起点）
-        if not in_think and buf:
-            yield buf
+        splitter = ThinkSplitter()
+        async for tok in super().complete_stream(system=system, user=user, **kwargs):
+            for seg in splitter.feed(tok):
+                # 只吐正文；think 段丢弃（历史语义）
+                if seg.kind == "text" and seg.text:
+                    yield seg.text
+        # 流末残余
+        for seg in splitter.flush():
+            if seg.kind == "text" and seg.text:
+                yield seg.text
