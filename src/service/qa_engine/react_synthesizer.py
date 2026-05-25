@@ -141,9 +141,9 @@ class ReActSynthesizer:
             # 依次执行每个 tool_call，结果作为 'role=tool' 消息追加
             for tc in response.tool_calls:
                 # 收集本次工具调用的 entity_id（引用溯源）
-                _eid = tc.arguments.get("entity_id")
-                if isinstance(_eid, str) and _eid and _eid not in cited_entities:
-                    cited_entities.append(_eid)
+                eid = tc.arguments.get("entity_id")
+                if isinstance(eid, str) and eid and eid not in cited_entities:
+                    cited_entities.append(eid)
                 # 触发"starting"回调（让 SSE 立刻通知前端"LLM 正在调 X"）
                 # callback 是可选的；None 时直接跳过判断
                 if on_tool_call is not None:
@@ -296,9 +296,9 @@ class ReActSynthesizer:
             # 2) 依次执行
             for tc in round_tool_calls:
                 # 收集本次工具调用的 entity_id（引用溯源）
-                _eid = tc.arguments.get("entity_id")
-                if isinstance(_eid, str) and _eid and _eid not in cited_entities:
-                    cited_entities.append(_eid)
+                eid = tc.arguments.get("entity_id")
+                if isinstance(eid, str) and eid and eid not in cited_entities:
+                    cited_entities.append(eid)
                 if on_tool_call is not None:
                     try:
                         await on_tool_call("starting", tc)

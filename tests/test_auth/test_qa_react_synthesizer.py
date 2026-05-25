@@ -653,7 +653,11 @@ async def test_synthesize_stream_collects_cited_entities():
         handler=_echo_handler,
     ))
 
-    # fake LLM：第 1 轮调 ke_callees(method//A)，第 2 轮再调 ke_callees(method//B)，第 3 轮给 final
+    # fake LLM：
+    #   第 1 轮 → ke_callees(method//A)
+    #   第 2 轮 → ke_callees(method//B)
+    #   第 3 轮 → ke_callees(method//A)  ← 重复 round 1，用于覆盖去重 guard
+    #   第 4 轮 → final text
     class _FakeLLM:
         def __init__(self):
             self._round = 0
@@ -664,6 +668,9 @@ async def test_synthesize_stream_collects_cited_entities():
                 yield ToolCall(id="c1", name="ke_callees", arguments={"entity_id": "method//A"})
             elif self._round == 2:
                 yield ToolCall(id="c2", name="ke_callees", arguments={"entity_id": "method//B"})
+            elif self._round == 3:
+                # 重复 method//A —— 去重 guard（eid not in cited_entities）应阻止它再次入列
+                yield ToolCall(id="c3", name="ke_callees", arguments={"entity_id": "method//A"})
             else:
                 yield StreamTextDelta(text="## 概述\n答案")
 
@@ -671,4 +678,5 @@ async def test_synthesize_stream_collects_cited_entities():
     ctx = RetrievedContext(question="q", project_id="proj-a")
     answer = await synth.synthesize_stream(ctx, history=[])
 
+    # round 3 的重复 method//A 不应产生第三个元素，顺序保持 A → B
     assert answer.cited_entities == ["method//A", "method//B"]
