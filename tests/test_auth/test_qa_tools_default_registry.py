@@ -12,8 +12,8 @@ import pytest
 from src.service.qa_engine.tools import build_default_registry
 
 
-def test_default_registry_has_all_six_tools() -> None:
-    """build_default_registry 把 6 个 ke_* 全注册进去。"""
+def test_default_registry_has_core_tools_plus_todo_write() -> None:
+    """build_default_registry 把 6 个核心 ke_* + todo_write 元工具全注册进去。"""
     graph = MagicMock()
     store = MagicMock()
     reg = build_default_registry(graph=graph, business_store=store)
@@ -26,6 +26,7 @@ def test_default_registry_has_all_six_tools() -> None:
         "ke_business_interp",
         "ke_table_access",
         "ke_impact",
+        "todo_write",
     }
 
 

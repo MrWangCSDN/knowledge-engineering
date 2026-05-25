@@ -1,11 +1,11 @@
-"""MCP-style 工具框架：6 个 ke_* 工具 + Registry + 默认装配工厂。
+"""MCP-style 工具框架：6 个 ke_* 核心工具 + todo_write 元工具 + Registry + 默认装配工厂。
 
 设计文档：[[首页设计]] §13 v1.2
 
 公开 API:
   - Tool / ToolRegistry / ToolNotFound      from .base
   - build_default_registry(graph, business_store) -> ToolRegistry
-  - 6 个 build_ke_xxx_tool 工厂函数（生产用 build_default_registry 一把推；测试可单挑）
+  - 6 个 build_ke_xxx_tool 工厂函数 + build_todo_write_tool（生产用 build_default_registry 一把推；测试可单挑）
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from src.service.qa_engine.tools.ke_table_access import build_ke_table_access_to
 from src.service.qa_engine.tools.ke_impact import build_ke_impact_tool
 from src.service.qa_engine.tools.ke_read_entity import build_ke_read_entity_tool
 from src.service.qa_engine.tools.ke_method_interp import build_ke_method_interp_tool
+from src.service.qa_engine.tools.todo_write import build_todo_write_tool
 from src.service.qa_engine.retriever import BusinessStoreProto, GraphProto
 
 
@@ -36,6 +37,7 @@ __all__ = [
     "build_ke_impact_tool",
     "build_ke_read_entity_tool",
     "build_ke_method_interp_tool",
+    "build_todo_write_tool",
     "build_default_registry",
 ]
 
@@ -47,10 +49,11 @@ def build_default_registry(
     code_store: Any | None = None,
     method_interp_store: Any | None = None,
 ) -> ToolRegistry:
-    """构造预装 ke_* 工具的 ToolRegistry。
+    """构造预装 ke_* 工具 + todo_write 元工具的 ToolRegistry。
 
-    graph + business_store 必填（核心工具）；code_store / method_interp_store 可选，
+    graph + business_store 必填（6 个核心 ke_* 工具）；code_store / method_interp_store 可选，
     传入才注册 ke_read_entity / ke_method_interp（后端未连这两个 store 时优雅缺省）。
+    todo_write 无后端依赖，始终无条件注册（设计 §3.3）。
     """
     registry = ToolRegistry()
     registry.register(build_ke_search_tool(business_store))
@@ -59,6 +62,8 @@ def build_default_registry(
     registry.register(build_ke_callers_tool(graph))
     registry.register(build_ke_table_access_tool(graph))
     registry.register(build_ke_impact_tool(graph))
+    # meta 工具：todo_write 无后端依赖，始终注册（设计 §3.3）
+    registry.register(build_todo_write_tool())
     if code_store is not None:
         registry.register(build_ke_read_entity_tool(code_store))
     if method_interp_store is not None:
