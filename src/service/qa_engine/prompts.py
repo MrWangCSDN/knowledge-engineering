@@ -8,6 +8,10 @@
 4. 中文输出
 5. 缺信息的段落直接省略（不要凑字数）
 
+v1.4（Plan C4 §7）：新增 AGENT_SYSTEM_PROMPT 自由格式变体供 chat/agent（ReAct）路径——
+放开第 1 条的 6 段 JSON 强制（改自然 markdown），第 2 条反幻觉约束仍严格保留；
+结构化 6 段（SYSTEM_PROMPT）保留给非 chat 的"结构化技术解读"模式。
+
 W6 会在这里进一步加入：
   - 业务术语词典（business_terms.yaml 100 条）
   - few-shot gold doc 范例（30 篇）
