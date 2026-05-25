@@ -175,7 +175,11 @@ async def stream_qa_answer(
         # complete 的 echo 结果无展示价值，直接跳过。
         if call.name == "todo_write":
             if phase == "starting":
+                # 与 todo_write handler 一致的兜底：LLM 是系统边界，可能传 null/非 list，
+                # 透传给前端前归一化为 list（§3.4 信号哲学，防前端拿到非数组渲染崩）
                 items = call.arguments.get("items", [])
+                if not isinstance(items, list):
+                    items = []
                 pending_tool_events.append(("todo", {"items": items}))
             return
         # 只塞最关键字段：name + arguments / result（截断）

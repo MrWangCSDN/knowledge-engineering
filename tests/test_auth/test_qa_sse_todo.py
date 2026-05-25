@@ -71,3 +71,34 @@ async def test_stream_emits_todo_event_on_todo_write_call():
     # todo_write 不应再被当普通 tool_call 事件发
     tool_calls = _data_of(events, "tool_call")
     assert all(tc.get("name") != "todo_write" for tc in tool_calls)
+
+
+@pytest.mark.asyncio
+async def test_todo_event_normalizes_non_list_items():
+    """LLM 是系统边界：todo_write 传 items=null/非 list 时，todo 事件兜底为空数组，
+    与 todo_write handler 的 isinstance 兜底一致（防前端拿到非数组渲染崩）。"""
+    synth = MagicMock(spec=ReActSynthesizer)
+
+    async def fake_stream(ctx, history=None, on_token=None, on_thinking=None,
+                          on_tool_call=None, memory_block=None, **kwargs):
+        if on_tool_call:
+            # arguments.items 是 None（LLM 漏填/给错类型）
+            call = ToolCall(id="t1", name="todo_write", arguments={"items": None})
+            await on_tool_call("starting", call)
+        return SynthesizedAnswer(
+            sections=[{"type": "overview", "title": "x", "content": "y", "references": []}],
+            token_usage=1,
+        )
+
+    synth.synthesize_stream = AsyncMock(side_effect=fake_stream)
+
+    events: list[str] = []
+    async for c in stream_qa_answer(
+        question="q", project_id="p", session_id="s",
+        retriever=_build_mock_retriever(), synthesizer=synth,
+    ):
+        events.append(c)
+
+    todos = _data_of(events, "todo")
+    assert len(todos) == 1
+    assert todos[0]["items"] == []  # None 被归一化为空 list
