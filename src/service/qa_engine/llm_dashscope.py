@@ -22,7 +22,12 @@ from typing import Any, AsyncIterator, Optional
 
 import httpx
 
-from src.service.qa_engine.llm_types import LLMToolResponse, StreamTextDelta, ToolCall
+from src.service.qa_engine.llm_types import (
+    LLMToolResponse,
+    StreamTextDelta,
+    StreamThinkingDelta,
+    ToolCall,
+)
 
 
 class DashScopeProvider:
@@ -294,6 +299,13 @@ class DashScopeProvider:
         content = delta.get("content")
         if content:
             events.append(StreamTextDelta(text=str(content)))
+
+        # 1b) 思考增量（qwen 推理模型）→ yield StreamThinkingDelta（设计 §5）
+        #     reasoning_content 是 DashScope 给推理模型流式思考链的专用字段；
+        #     与 content（答案正文）并行，前端据类型渲染成灰字。
+        reasoning = delta.get("reasoning_content")
+        if reasoning:
+            events.append(StreamThinkingDelta(text=str(reasoning)))
 
         # 2) tool_call 增量 → 累积到 pending
         raw_tool_calls = delta.get("tool_calls") or []

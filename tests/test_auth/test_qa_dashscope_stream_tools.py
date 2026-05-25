@@ -254,3 +254,33 @@ async def test_complete_stream_with_tools_pure_text_no_tool_calls() -> None:
     assert all(isinstance(ev, StreamTextDelta) for ev in events)
     assert events[0].text == "答"
     assert events[1].text == "案"
+
+
+def test_process_stream_line_yields_thinking_from_reasoning_content():
+    """qwen 推理模型：delta.reasoning_content → StreamThinkingDelta。"""
+    from src.service.qa_engine.llm_dashscope import DashScopeProvider
+    from src.service.qa_engine.llm_types import StreamThinkingDelta
+
+    pending: dict = {}
+    # 模拟一行带 reasoning_content 的 SSE
+    line = 'data: {"choices":[{"delta":{"reasoning_content":"先看调用方"}}]}'
+    events = DashScopeProvider._process_stream_line(line, pending)
+
+    assert len(events) == 1
+    assert isinstance(events[0], StreamThinkingDelta)
+    assert events[0].text == "先看调用方"
+
+
+def test_process_stream_line_thinking_and_content_both_present():
+    """同一 delta 同时有 reasoning_content + content → 各 yield 一个事件，类型不同。"""
+    from src.service.qa_engine.llm_dashscope import DashScopeProvider
+    from src.service.qa_engine.llm_types import StreamThinkingDelta, StreamTextDelta
+
+    pending: dict = {}
+    line = 'data: {"choices":[{"delta":{"reasoning_content":"想","content":"答"}}]}'
+    events = DashScopeProvider._process_stream_line(line, pending)
+
+    # 思考在前、正文在后（顺序对前端渲染无强约束，但断言确定性）
+    assert any(isinstance(e, StreamThinkingDelta) and e.text == "想" for e in events)
+    assert any(isinstance(e, StreamTextDelta) and e.text == "答" for e in events)
+    assert len(events) == 2
