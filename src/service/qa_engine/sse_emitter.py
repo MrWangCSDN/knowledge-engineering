@@ -321,6 +321,8 @@ async def stream_qa_answer(
         "total_tokens": answer.token_usage,
         "cost_yuan": answer.cost_yuan,
         "latency_ms": latency_ms,
+        # agent 实际查过的 entity_id（ReAct 工具调用轨迹，设计 §6）；
+        # ≠ 上方 metadata 的 cited_entities（那是从 answer.sections 引用抽取、持久化用）
         "cited_entities": answer.cited_entities,
     })
 
