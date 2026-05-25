@@ -680,3 +680,59 @@ async def test_synthesize_stream_collects_cited_entities():
 
     # round 3 的重复 method//A 不应产生第三个元素，顺序保持 A → B
     assert answer.cited_entities == ["method//A", "method//B"]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_collects_cited_entities():
+    """同步（非流式）synthesize 同样收集 cited_entities（去重、跨轮累积）。
+
+    这是上面 test_synthesize_stream_collects_cited_entities 的「同步版镜像」：
+      - 流式路径走 complete_stream_with_tools（yield 事件）
+      - 同步路径走 complete_with_tools（返回 LLMToolResponse）
+    两条路径的 entity_id 收集 + 去重逻辑结构完全相同。这里给同步路径补特征测试
+    （characterization test），锁住现有行为，防止未来重构悄悄改坏其中一条。
+    """
+    # ── 注册一个假工具：handler 直接 echo，不依赖真图后端（跟 stream 版同一套）──
+    async def _echo_handler(inp):
+        # inp 是 tool 的 arguments dict；dict.get(key) 取不到返回 None，比 inp[key] 安全
+        return {"entity_id": inp.get("entity_id"), "ok": True}
+
+    reg = ToolRegistry()
+    # Tool 是个 dataclass/简单容器：name + description + JSON schema + 异步 handler
+    reg.register(Tool(
+        name="ke_callees",
+        description="x",
+        input_schema={"type": "object", "properties": {"entity_id": {"type": "string"}}, "required": ["entity_id"]},
+        handler=_echo_handler,
+    ))
+
+    # ── 构造每一轮 LLM 的返回（同步路径返回 LLMToolResponse，区别于 stream 的 yield）──
+    #   第 1 轮 → ke_callees(method//A)
+    #   第 2 轮 → ke_callees(method//B)
+    #   第 3 轮 → ke_callees(method//A)  ← 重复 round 1，专门覆盖去重 guard（eid not in cited_entities）
+    #   第 4 轮 → final：content 为合法 6 段式 JSON、tool_calls 为空 → 循环结束并解析返回
+    # 调工具的轮次 content 通常为 None（参考 test_react_loops_when_llm_calls_tool）
+    round1 = LLMToolResponse(
+        content=None,
+        tool_calls=[ToolCall(id="c1", name="ke_callees", arguments={"entity_id": "method//A"})],
+    )
+    round2 = LLMToolResponse(
+        content=None,
+        tool_calls=[ToolCall(id="c2", name="ke_callees", arguments={"entity_id": "method//B"})],
+    )
+    round3 = LLMToolResponse(
+        content=None,
+        tool_calls=[ToolCall(id="c3", name="ke_callees", arguments={"entity_id": "method//A"})],
+    )
+    final = LLMToolResponse(content=_ok_answer_json(), tool_calls=[])
+
+    llm = AsyncMock()
+    # side_effect=[...]：AsyncMock 每次 await 按顺序返回列表里的下一个；模拟「LLM 跑 4 轮」
+    llm.complete_with_tools = AsyncMock(side_effect=[round1, round2, round3, final])
+
+    synth = ReActSynthesizer(llm_provider=llm, tool_registry=reg, max_iterations=5)
+    ctx = RetrievedContext(question="q", project_id="proj-a")
+    answer = await synth.synthesize(ctx)
+
+    # round 3 的重复 method//A 不应产生第三个元素，顺序保持 A → B
+    assert answer.cited_entities == ["method//A", "method//B"]
