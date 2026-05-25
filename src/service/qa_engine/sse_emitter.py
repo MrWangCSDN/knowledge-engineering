@@ -170,6 +170,14 @@ async def stream_qa_answer(
         因为这个回调是 await 来的，不能直接 yield SSE（yield 必须在 async generator 主体里）；
         所以暂存到 list，主流程在合适的时机 flush。
         """
+        # todo_write 元工具（设计 §3.3/§8）：不当普通 tool_call 展示，而是转成专属
+        # `todo` 事件（前端渲染 checklist）。只在 starting 阶段发（此时 arguments 已带 items）；
+        # complete 的 echo 结果无展示价值，直接跳过。
+        if call.name == "todo_write":
+            if phase == "starting":
+                items = call.arguments.get("items", [])
+                pending_tool_events.append(("todo", {"items": items}))
+            return
         # 只塞最关键字段：name + arguments / result（截断）
         payload: dict = {"phase": phase, "id": call.id, "name": call.name}
         if phase == "starting":
