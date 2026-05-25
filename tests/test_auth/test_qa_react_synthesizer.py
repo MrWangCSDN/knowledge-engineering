@@ -580,3 +580,18 @@ async def test_react_synthesize_stream_forwards_tool_call_callback() -> None:
     assert len(tool_events) == 2
     assert tool_events[0]["phase"] == "starting"
     assert tool_events[1]["phase"] == "complete"
+
+
+def test_react_synthesizer_default_max_iterations_is_12():
+    """安全阀：默认循环上限 12（放开旧的 3，支撑多跳分析跑到收敛）。"""
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+
+    # 构造只需 llm + tool_registry（鸭子类型，传占位即可；本测试不跑循环）
+    class _DummyLLM:
+        async def complete_with_tools(self, *, messages, tools):
+            raise NotImplementedError
+
+    from src.service.qa_engine.tools.base import ToolRegistry
+
+    synth = ReActSynthesizer(llm_provider=_DummyLLM(), tool_registry=ToolRegistry())
+    assert synth.max_iterations == 12

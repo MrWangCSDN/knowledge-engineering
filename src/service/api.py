@@ -167,7 +167,7 @@ async def init_qa_engine() -> None:
         # 这里构造时不绑定 tool_registry（留给 per-request 注入）
         # 如果 neo4j_backend 未就绪，app.state.qa_tools 为 None，ReAct 也会降级
         from src.service.qa_engine.react_synthesizer import ReActSynthesizer
-        max_iter = int(os.environ.get("KE_QA_REACT_MAX_ITER", "3"))
+        max_iter = int(os.environ.get("KE_QA_REACT_MAX_ITER", "12"))
         # per-request 模式下：tool_registry 由 explain endpoint 注入；
         # 这里先不绑（react_synthesizer 接受 None tool_registry 会降级到 single-shot）
         # TODO(Task 24): ReActSynthesizer 改为接受 per-request tool_registry 参数

@@ -58,7 +58,7 @@ class ReActSynthesizer:
         *,
         llm_provider: ToolCallingLLMProto,
         tool_registry: ToolRegistry,
-        max_iterations: int = 3,
+        max_iterations: int = 12,
     ) -> None:
         """
         :param llm_provider: 实现 ToolCallingLLMProto 的实例
@@ -67,7 +67,8 @@ class ReActSynthesizer:
         """
         self.llm = llm_provider
         self.tool_registry = tool_registry
-        # 上限保护：3 轮通常够 LLM 用 1-2 个工具 + 给最终答案；多了说明 prompt 有问题
+        # 上限保护：12 轮安全阀，支撑多跳调用链/影响分析跑到收敛；
+        # 停止靠"模型给最终答案（无 tool_calls）即 return"，正常远不到 12
         self.max_iterations = max_iterations
 
     async def synthesize(
