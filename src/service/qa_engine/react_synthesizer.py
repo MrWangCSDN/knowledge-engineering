@@ -17,7 +17,7 @@ import json
 # typing.Any 是"我不想标具体类型"的占位
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
-from src.service.qa_engine.llm_types import LLMToolResponse, StreamTextDelta, ToolCall
+from src.service.qa_engine.llm_types import LLMToolResponse, StreamTextDelta, StreamThinkingDelta, ToolCall
 from src.service.qa_engine.retriever import RetrievedContext
 from src.service.qa_engine.synthesizer import SynthesizedAnswer, QASynthesizer
 from src.service.qa_engine.tools.base import Tool, ToolNotFound, ToolRegistry
@@ -191,6 +191,7 @@ class ReActSynthesizer:
         ctx: RetrievedContext,
         history: list[dict[str, Any]] | None = None,
         on_token: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_thinking: Optional[Callable[[str], Awaitable[None]]] = None,
         on_tool_call: Optional[Callable[..., Awaitable[None]]] = None,
     ) -> SynthesizedAnswer:
         """流式版的 synthesize：跟 synthesize 同样做 ReAct 循环。
@@ -237,6 +238,13 @@ class ReActSynthesizer:
                         if on_token is not None:
                             try:
                                 await on_token(event.text)
+                            except Exception:
+                                pass
+                    elif isinstance(event, StreamThinkingDelta):
+                        # 思考增量 → on_thinking（设计 §5 灰字）；不进 round_text_buf（不污染答案）
+                        if on_thinking is not None:
+                            try:
+                                await on_thinking(event.text)
                             except Exception:
                                 pass
                     elif isinstance(event, ToolCall):

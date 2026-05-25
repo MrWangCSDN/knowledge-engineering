@@ -595,3 +595,39 @@ def test_react_synthesizer_default_max_iterations_is_12():
 
     synth = ReActSynthesizer(llm_provider=_DummyLLM(), tool_registry=ToolRegistry())
     assert synth.max_iterations == 12
+
+
+@pytest.mark.asyncio
+async def test_synthesize_stream_forwards_thinking_to_on_thinking():
+    """真流式循环把 StreamThinkingDelta 转发到 on_thinking 回调（StreamTextDelta 仍走 on_token）。"""
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+    from src.service.qa_engine.tools.base import ToolRegistry
+    from src.service.qa_engine.llm_types import StreamTextDelta, StreamThinkingDelta
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    # fake LLM：有 complete_stream_with_tools（走真流路径），先吐思考再吐答案、无 tool_calls（即 final）
+    class _FakeStreamLLM:
+        async def complete_stream_with_tools(self, *, messages, tools):
+            yield StreamThinkingDelta(text="先看调用方")
+            yield StreamTextDelta(text="## 概述\n答案正文")
+
+    synth = ReActSynthesizer(
+        llm_provider=_FakeStreamLLM(),
+        tool_registry=ToolRegistry(),
+        max_iterations=3,
+    )
+
+    thinking_chunks: list[str] = []
+    token_chunks: list[str] = []
+
+    async def _on_thinking(t): thinking_chunks.append(t)
+    async def _on_token(t): token_chunks.append(t)
+
+    # RetrievedContext 是 dataclass：question + project_id 必填，其余字段有默认值
+    ctx = RetrievedContext(question="VetController 调了谁？", project_id="proj-a")
+    await synth.synthesize_stream(
+        ctx, history=[], on_token=_on_token, on_thinking=_on_thinking,
+    )
+
+    assert "".join(thinking_chunks) == "先看调用方"
+    assert "".join(token_chunks) == "## 概述\n答案正文"
