@@ -78,7 +78,10 @@ class ReActSynthesizer:
         on_tool_call: Optional[Callable[..., Awaitable[None]]] = None,
         memory_block: str | None = None,
     ) -> SynthesizedAnswer:
-        """主入口：跑 ReAct 循环，返回 6 段式答案。
+        """主入口：跑 ReAct 循环，返回答案。
+
+        chat/agent 路径自由格式 markdown（Plan C4）：非 JSON 输出由 _parse_sections
+        兜底包成单段 overview；结构化 6 段能力见 QASynthesizer（非 chat）。
 
         :param on_tool_call: 可选的异步回调；每次 tool 执行前后会被调用：
             await on_tool_call("starting", call)              # 开始前

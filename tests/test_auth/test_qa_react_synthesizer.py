@@ -812,7 +812,41 @@ async def test_react_uses_free_format_system_prompt():
     assert "必须合法 JSON" not in sys_text
     assert "markdown" in sys_text.lower()
     assert "不允许编造" in sys_text or "不能编造" in sys_text
-    assert answer.sections and answer.sections[0]["content"] == "## 概述\n这是自由格式答案"
+    # _parse_sections 兜底把非 JSON markdown 包成单段 overview（前端/SSE 依赖这个 shape）
+    assert answer.sections
+    assert answer.sections[0]["type"] == "overview"
+    assert answer.sections[0]["title"] == "回答"
+    assert answer.sections[0]["content"] == "## 概述\n这是自由格式答案"
+
+
+@pytest.mark.asyncio
+async def test_react_stream_uses_free_format_system_prompt():
+    """synthesize_stream（sse_emitter 实际用的生产路径）同样走自由格式 prompt + 单段兜底。"""
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+    from src.service.qa_engine.tools.base import ToolRegistry
+    from src.service.qa_engine.llm_types import StreamTextDelta
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    captured: dict = {}
+
+    # fake 流式 LLM：吐纯 markdown 文本、无 tool_calls（即 final 那轮）
+    class _FakeStreamLLM:
+        async def complete_stream_with_tools(self, *, messages, tools):
+            captured["system"] = messages[0]["content"]
+            yield StreamTextDelta(text="## 概述\n流式自由格式答案")
+
+    synth = ReActSynthesizer(llm_provider=_FakeStreamLLM(), tool_registry=ToolRegistry(), max_iterations=3)
+    ctx = RetrievedContext(question="q", project_id="p")
+    answer = await synth.synthesize_stream(ctx, history=[])
+
+    sys_text = captured["system"]
+    assert "6 段式 JSON" not in sys_text
+    assert "必须合法 JSON" not in sys_text
+    assert "markdown" in sys_text.lower()
+    assert "不允许编造" in sys_text or "不能编造" in sys_text
+    # 非 JSON markdown 输出被 _parse_sections 兜底包成单段 overview
+    assert answer.sections[0]["type"] == "overview"
+    assert answer.sections[0]["content"] == "## 概述\n流式自由格式答案"
 
 
 def test_qa_synthesizer_still_uses_structured_prompt():
