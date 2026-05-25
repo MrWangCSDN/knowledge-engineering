@@ -126,6 +126,33 @@ reference 字段：
 """
 
 
+# ─── 自由格式 system prompt（v1.4 / Plan C4，设计 §7）────────────────────────
+# chat/agent（ReAct）路径用：保留分析师角色 + 视角 + 反幻觉 + 引用标记 + Mermaid 约定，
+# 但**不**强制 6 段式 JSON——模型自然 markdown 作答。结构化 6 段能力保留在 SYSTEM_PROMPT
+# 给"结构化技术解读"非 chat 场景。输出由 _parse_sections 降级分支接住（非 JSON → 单段）。
+AGENT_SYSTEM_PROMPT = """你是企业代码知识分析师。你的任务是把代码翻译成业务方/新人能读懂的业务说明，并直接回答用户的问题。
+
+【作答风格】
+- 用**自然的 markdown** 作答：按需用标题、列表、表格、代码块（```lang）组织，不必套固定结构。
+- 简洁专业、中文；篇幅与问题复杂度匹配，不啰嗦也不凑字数。
+- 调用链/架构/数据流等适合图的，按下方 Mermaid 约定画图。
+
+【严格规则】
+1. **不允许编造**：所有方法名、类名、表名必须出自我提供的 context 或工具返回结果，不能从你的知识里"想当然"；宁可说"未找到"也不要虚构 entity_id / 代码内容。
+2. **引用标记**：提到方法/类/表时，用 `[entity_id|显示文本]` 格式（前端会转成可点击链接），例：`[method://com.bank.openAccount|DepositController.openAccount()]`。
+3. **视角**（可选锚定）：先想清楚用户要的是"整体架构 / 请求流程 / 数据流 / 依赖关系 / 业务规则 / 外部集成"哪一类，据此组织重点，但不必显式声明视角。
+4. context 不足以回答时：直接说明"未找到相关业务逻辑，建议换个说法"，不要硬编。
+
+【Mermaid 约定（画图时遵守）】
+- 节点 ID 必须用 context 给出的 entity_id，不能编造。
+- 节点标签两行：显示名 + `\\n` + 真实路径，例：`open-account["OpenAccount\\nsrc/deposit/OpenAccount.java"]`。
+- 边必带语义标签：`A -->|"调用 / 写入 / 校验"| B`。
+- 节点超过 5 个时拆图，避免毛球图。
+- 4 类预设样式：external `#585b70`（外部系统）/ entry `#89b4fa`（入口）/ store `#a6e3a1`（持久化）/ concern `#f38ba8`（风险）。
+- Mermaid 写在 ` ```mermaid ` fenced code block 里。
+"""
+
+
 # ─── User prompt 组装函数 ──────────────────────────────────────────────────
 
 
@@ -139,7 +166,7 @@ _SKILL_HINTS: dict[str, str] = {
 }
 
 
-def build_user_prompt(question: str, context: dict[str, Any]) -> str:
+def build_user_prompt(question: str, context: dict[str, Any], free_format: bool = False) -> str:
     """把 retriever 返回的 context 拼成 LLM user prompt。
 
     context 结构（来自 RetrievedContext，转 dict）：
@@ -150,6 +177,9 @@ def build_user_prompt(question: str, context: dict[str, Any]) -> str:
         "table_access_by_entry": {entity_id: [{table_id, operation}, ...]},
         "skill_id": "business" | "dependency" | "data-flow" | "architecture",
       }
+
+    free_format: True → 尾部任务块用自然 markdown 指引（chat/agent 路径，Plan C4 §7）；
+                 False（默认）→ 原结构化 6 段 JSON 指令（QASynthesizer，向后兼容）。
     """
     parts: list[str] = []
     parts.append(f"【用户问题】{question}")
@@ -224,10 +254,17 @@ def build_user_prompt(question: str, context: dict[str, Any]) -> str:
     parts.append("")
     parts.append("【任务】")
     parts.append("基于以上 context 回答用户问题。")
-    parts.append("先按 system prompt 里的 Step 1 选 1 个主视角，再按该视角侧重组织 6 段式答案。")
-    parts.append("严格按 JSON 输出，缺信息段跳过；overview 段无论如何都要出（注明视角）。")
-    parts.append("如果 context 不足以回答（比如候选都不相关），")
-    parts.append("仍要给一个 overview 段说明：视角：overall-architecture\\n未找到相关业务逻辑，建议换个说法。")
+    if free_format:
+        # 自由格式（chat/agent，设计 §7）：自然 markdown，不套 6 段
+        parts.append("用自然的 markdown 作答（标题/列表/代码块按需），不必套固定结构。")
+        parts.append("提到方法/类/表时用 `[entity_id|显示文本]` 标注；只能基于 context/工具返回的真实实体，不得编造 entity_id。")
+        parts.append("如果 context 不足以回答，直接说明未找到并建议换个说法。")
+    else:
+        # 结构化 6 段（非 chat / QASynthesizer，保持原样）
+        parts.append("先按 system prompt 里的 Step 1 选 1 个主视角，再按该视角侧重组织 6 段式答案。")
+        parts.append("严格按 JSON 输出，缺信息段跳过；overview 段无论如何都要出（注明视角）。")
+        parts.append("如果 context 不足以回答（比如候选都不相关），")
+        parts.append("仍要给一个 overview 段说明：视角：overall-architecture\\n未找到相关业务逻辑，建议换个说法。")
 
     return "\n".join(parts)
 
