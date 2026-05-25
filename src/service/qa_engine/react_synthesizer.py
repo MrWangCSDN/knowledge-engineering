@@ -87,18 +87,18 @@ class ReActSynthesizer:
         :param memory_block: 可选的记忆文本块（sse_emitter 无条件透传过来）；
             None 时 with_memory_block 是 identity，不改变 system prompt（向后兼容）。
         """
-        from src.service.qa_engine.prompts import SYSTEM_PROMPT, build_user_prompt, with_memory_block
+        from src.service.qa_engine.prompts import AGENT_SYSTEM_PROMPT, build_user_prompt, with_memory_block
         from src.service.qa_engine.synthesizer import _ctx_to_dict
 
-        user_prompt = build_user_prompt(ctx.question, _ctx_to_dict(ctx))
+        user_prompt = build_user_prompt(ctx.question, _ctx_to_dict(ctx), free_format=True)
         # 记忆注入（对齐 QASynthesizer）：memory_block=None 时 with_memory_block 为 identity
-        base_system = with_memory_block(SYSTEM_PROMPT, memory_block)
+        base_system = with_memory_block(AGENT_SYSTEM_PROMPT, memory_block)
         # 给 system prompt 加 tool 使用指引（只有注册了工具才加，避免空 prompt 教 LLM "可调用工具" 但其实没工具）
         system_text = base_system
         tool_hint = self._build_tool_usage_hint()
         if tool_hint:
             # 把 tool 使用指引追加到 base_system 末尾
-            # 用 "\n\n" 作为段落分隔，跟 SYSTEM_PROMPT 原有结构对齐
+            # 用 "\n\n" 作为段落分隔，跟 AGENT_SYSTEM_PROMPT 原有结构对齐
             system_text = f"{base_system}\n\n{tool_hint}"
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_text},
@@ -218,12 +218,12 @@ class ReActSynthesizer:
         :param memory_block: 可选的记忆文本块（sse_emitter 无条件透传过来）；
             None 时 with_memory_block 是 identity，不改变 system prompt（向后兼容）。
         """
-        from src.service.qa_engine.prompts import SYSTEM_PROMPT, build_user_prompt, with_memory_block
+        from src.service.qa_engine.prompts import AGENT_SYSTEM_PROMPT, build_user_prompt, with_memory_block
         from src.service.qa_engine.synthesizer import _ctx_to_dict
 
-        user_prompt = build_user_prompt(ctx.question, _ctx_to_dict(ctx))
+        user_prompt = build_user_prompt(ctx.question, _ctx_to_dict(ctx), free_format=True)
         # 记忆注入（对齐 QASynthesizer）：memory_block=None 时 with_memory_block 为 identity
-        base_system = with_memory_block(SYSTEM_PROMPT, memory_block)
+        base_system = with_memory_block(AGENT_SYSTEM_PROMPT, memory_block)
         system_text = base_system
         tool_hint = self._build_tool_usage_hint()
         if tool_hint:

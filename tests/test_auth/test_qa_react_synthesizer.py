@@ -788,3 +788,34 @@ async def test_synthesize_accepts_and_injects_memory_block():
     # 验证 LLM 收到的 system 消息里包含了 memory_block 的内容
     sent = llm.complete_with_tools.call_args.kwargs["messages"][0]["content"]
     assert "【记忆】偏好X" in sent
+
+
+@pytest.mark.asyncio
+async def test_react_uses_free_format_system_prompt():
+    """ReActSynthesizer 走自由格式 prompt（AGENT_SYSTEM_PROMPT），system 消息不再强制 6 段 JSON。"""
+    from unittest.mock import AsyncMock
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+    from src.service.qa_engine.tools.base import ToolRegistry
+    from src.service.qa_engine.llm_types import LLMToolResponse
+    from src.service.qa_engine.retriever import RetrievedContext
+
+    llm = AsyncMock()
+    llm.complete_with_tools = AsyncMock(return_value=LLMToolResponse(
+        content="## 概述\n这是自由格式答案", tool_calls=[],
+    ))
+    synth = ReActSynthesizer(llm_provider=llm, tool_registry=ToolRegistry(), max_iterations=3)
+    ctx = RetrievedContext(question="VetController 调了谁？", project_id="p")
+    answer = await synth.synthesize(ctx, history=[])
+
+    sys_text = llm.complete_with_tools.call_args.kwargs["messages"][0]["content"]
+    assert "6 段式 JSON" not in sys_text
+    assert "必须合法 JSON" not in sys_text
+    assert "markdown" in sys_text.lower()
+    assert "不允许编造" in sys_text or "不能编造" in sys_text
+    assert answer.sections and answer.sections[0]["content"] == "## 概述\n这是自由格式答案"
+
+
+def test_qa_synthesizer_still_uses_structured_prompt():
+    """回归：QASynthesizer（非 chat）仍用 6 段式 SYSTEM_PROMPT，不受 C4 影响。"""
+    from src.service.qa_engine.prompts import SYSTEM_PROMPT
+    assert "6 段式" in SYSTEM_PROMPT
