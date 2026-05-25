@@ -73,6 +73,7 @@ def build_todo_write_tool() -> Tool:
         description=(
             "多步任务自追踪 checklist：把当前待办列表 items（每项 {content, status}，"
             "status ∈ pending/in_progress/completed）记录并展示给用户。"
+            "每次调用均为全量快照，替换之前的列表（不要每条 item 调一次）。"
             "仅在多步复杂任务时调用；简单问题无需调用。"
         ),
         input_schema=_TODO_WRITE_SCHEMA,

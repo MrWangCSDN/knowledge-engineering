@@ -31,3 +31,4 @@ async def test_todo_write_handler_missing_items_defaults_empty():
     tool = build_todo_write_tool()
     assert (await tool.handler({}))["items"] == []
     assert (await tool.handler({"items": "oops"}))["items"] == []
+    assert (await tool.handler({"items": None}))["items"] == []
