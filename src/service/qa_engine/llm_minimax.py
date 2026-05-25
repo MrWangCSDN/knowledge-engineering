@@ -23,6 +23,7 @@ from typing import Any
 
 # 复用 DashScope 的全部协议层逻辑（complete/stream/tools/parse 等）
 from src.service.qa_engine.llm_dashscope import DashScopeProvider
+from src.service.qa_engine.llm_types import StreamTextDelta, StreamThinkingDelta
 
 
 class MiniMaxProvider(DashScopeProvider):
@@ -98,3 +99,42 @@ class MiniMaxProvider(DashScopeProvider):
         for seg in splitter.flush():
             if seg.kind == "text" and seg.text:
                 yield seg.text
+
+    async def complete_stream_with_tools(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ):
+        """流式 + 工具：把父类吐的 StreamTextDelta 经 ThinkSplitter 切成
+        think/text 段 → StreamThinkingDelta / StreamTextDelta；其它事件（ToolCall）原样透传。
+
+        MiniMax-M2 把推理内联在 content 里用 <think>...</think>（不像 qwen 走
+        reasoning_content 独立字段），所以必须在事件流层面再切一次。
+        工具调用走标准 OpenAI 协议（de-risk 已证），父类累积逻辑直接复用。
+        """
+        from src.service.qa_engine.think_splitter import ThinkSplitter
+
+        splitter = ThinkSplitter()
+
+        def _emit(seg) -> Any:
+            # think 段 → StreamThinkingDelta；text 段 → StreamTextDelta
+            if seg.kind == "think":
+                return StreamThinkingDelta(text=seg.text)
+            return StreamTextDelta(text=seg.text)
+
+        async for ev in super().complete_stream_with_tools(
+            messages=messages, tools=tools, **kwargs
+        ):
+            if isinstance(ev, StreamTextDelta):
+                for seg in splitter.feed(ev.text):
+                    if seg.text:
+                        yield _emit(seg)
+            else:
+                # ToolCall / 其它事件原样透传
+                yield ev
+        # 流末残余
+        for seg in splitter.flush():
+            if seg.text:
+                yield _emit(seg)

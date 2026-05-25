@@ -37,3 +37,44 @@ async def test_complete_stream_strips_think(monkeypatch):
     assert "".join(out) == "答案前答案后"
     assert "<think>" not in "".join(out)
     assert "推理过程" not in "".join(out)
+
+
+@pytest.mark.asyncio
+async def test_stream_with_tools_routes_think_to_thinking_delta(monkeypatch):
+    from src.service.qa_engine.llm_types import (
+        StreamTextDelta,
+        StreamThinkingDelta,
+        ToolCall,
+    )
+
+    provider = MiniMaxProvider(api_key="test-key")
+
+    # 模拟父类 complete_stream_with_tools 吐出的事件序列：
+    # 正文 StreamTextDelta（含跨片 <think>）+ 一个 ToolCall
+    async def fake_parent_events(*, messages, tools, **kwargs):
+        yield StreamTextDelta(text="答案前<think>推")
+        yield StreamTextDelta(text="理段</think>答案后")
+        yield ToolCall(id="c1", name="ke_search", arguments={"query": "x"})
+
+    monkeypatch.setattr(
+        "src.service.qa_engine.llm_dashscope.DashScopeProvider.complete_stream_with_tools",
+        lambda self, *, messages, tools, **kwargs: fake_parent_events(
+            messages=messages, tools=tools, **kwargs
+        ),
+    )
+
+    events = []
+    async for ev in provider.complete_stream_with_tools(messages=[], tools=[]):
+        events.append(ev)
+
+    # think 段被路由到 StreamThinkingDelta
+    think = "".join(e.text for e in events if isinstance(e, StreamThinkingDelta))
+    text = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    tool_calls = [e for e in events if isinstance(e, ToolCall)]
+
+    assert think == "推理段"
+    assert text == "答案前答案后"
+    # ToolCall 原样透传
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "ke_search"
+    assert tool_calls[0].arguments == {"query": "x"}
