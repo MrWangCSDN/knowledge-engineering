@@ -97,7 +97,8 @@ def build_tools_for_project(project_id: str, request: Request):
     """每个请求构造一个绑定 project_id 的 ToolRegistry。
 
     与 build_retriever_for_project 同理：adapter 按 project_id 绑定，
-    工具里的 handler 通过 input dict 的 project_id 字段传递隔离信息（ke_search 等）。
+    工具里的 project_id 由 adapter（Neo4jGraphAdapter）和 build_default_registry 闭包传入；
+    LLM 不再需要在 input 里指定 project_id（修 2026-05-26 mall-swarm 实测 LLM 猜错 tenant 的 bug）。
 
     :param project_id: URL path 中的工程 ID
     :param request: FastAPI Request
@@ -125,6 +126,7 @@ def build_tools_for_project(project_id: str, request: Request):
     return build_default_registry(
         graph=graph_adapter,
         business_store=biz_adapter,
+        project_id=project_id,
         code_store=code_store,
         method_interp_store=method_interp_store,
     )

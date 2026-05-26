@@ -67,7 +67,7 @@ def test_build_tools_for_project_passes_optional_stores(monkeypatch):
     code_sentinel = object()
     interp_sentinel = object()
 
-    def _fake_build_default_registry(*, graph, business_store, code_store=None, method_interp_store=None):
+    def _fake_build_default_registry(*, graph, business_store, project_id, code_store=None, method_interp_store=None):
         captured["code_store"] = code_store
         captured["method_interp_store"] = method_interp_store
         from src.service.qa_engine.tools.base import ToolRegistry
@@ -100,3 +100,56 @@ def test_build_tools_for_project_passes_optional_stores(monkeypatch):
     qa_router.build_tools_for_project("proj-a", _Req())
     assert captured["code_store"] is code_sentinel
     assert captured["method_interp_store"] is interp_sentinel
+
+
+def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch):
+    """build_tools_for_project 把 URL path 的 project_id 闭包给 ke_search。
+
+    关键不变量：ke_search 收到 LLM 的 input 即使**没**含 project_id 也能正常用闭包查；
+    即使 LLM 误传 project_id="wrong" 也被忽略。
+
+    ke_search handler 调用 WeaviateBusinessAdapter.search_method_hits_by_text；
+    这里 monkeypatch WeaviateBusinessAdapter 使其返回带 spy 的替身，验证 project_id 是闭包值。
+    """
+    from unittest.mock import MagicMock
+    import asyncio
+    import src.service.qa_engine.adapters as _adapters
+
+    # spy_adapter：search_method_hits_by_text 有记录功能，不真连 Weaviate
+    spy_adapter = MagicMock()
+    spy_adapter.search_method_hits_by_text.return_value = []
+
+    # monkeypatch WeaviateBusinessAdapter 构造，让它直接返回 spy_adapter
+    monkeypatch.setattr(
+        _adapters, "WeaviateBusinessAdapter",
+        lambda store: spy_adapter,
+    )
+    # Neo4jGraphAdapter 也替换成轻量替身（不真连 Neo4j）
+    monkeypatch.setattr(
+        _adapters, "Neo4jGraphAdapter",
+        lambda backend, project_id: MagicMock(),
+    )
+
+    # 伪造 request.app.state：含 4 个后端（值是什么不重要，adapter 已被 patch）
+    class _State:
+        weaviate_business_store = object()
+        neo4j_backend = object()
+        weaviate_code_store = None
+        weaviate_method_interp_store = None
+
+    class _App:
+        state = _State()
+
+    class _Req:
+        app = _App()
+
+    registry = qa_router.build_tools_for_project("mall-swarm", _Req())
+    ke_search = registry.get("ke_search")
+
+    # LLM 误传 wrong-tenant 也忽略，用 URL path 闭包的 mall-swarm
+    # asyncio.run 替代 get_event_loop().run_until_complete() — Python 3.12 full-suite 兼容
+    asyncio.run(ke_search.handler({"query": "X", "project_id": "wrong-tenant"}))
+
+    spy_adapter.search_method_hits_by_text.assert_called_once()
+    call_kwargs = spy_adapter.search_method_hits_by_text.call_args.kwargs
+    assert call_kwargs["project_id"] == "mall-swarm"
