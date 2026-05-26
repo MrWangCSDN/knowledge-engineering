@@ -46,6 +46,7 @@ def build_ke_search_tool(store: BusinessStoreProto, project_id: str) -> Tool:
     bound_project_id = project_id.strip()
 
     async def handler(input: dict[str, Any]) -> dict[str, Any]:
+        # `or "" + .strip()`：兼容 query 为 None 或 空白字符串两种情况
         query = (input.get("query") or "").strip()
         if not query:
             return {
@@ -59,6 +60,8 @@ def build_ke_search_tool(store: BusinessStoreProto, project_id: str) -> Tool:
         except (TypeError, ValueError):
             limit = 5
 
+        # 调底层 store；store 用 Protocol 注入，单测 / 生产用同一个接口
+        # project_id 用闭包绑定值，不从 input 取（即使 LLM 误传也忽略）
         try:
             results = store.search_method_hits_by_text(
                 text=query, project_id=bound_project_id, limit=limit
@@ -70,6 +73,8 @@ def build_ke_search_tool(store: BusinessStoreProto, project_id: str) -> Tool:
                 "error": f"search backend error: {e}",
             }
 
+        # results 已经是 list[dict]，原样透传
+        # 不在 tool 里做 reranking / 过滤，让上层（skill 或 LLM）决定
         return {"query": query, "results": list(results)}
 
     return Tool(

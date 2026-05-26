@@ -11,7 +11,7 @@ from src.service.qa_engine.tools.ke_search import build_ke_search_tool
 
 
 def _run(coro):
-    """同步跑 async — pytest-asyncio 没启用时用这个 helper。"""
+    """同步跑 async — 不引入 @pytest.mark.asyncio 装饰器，保持测试同步风格简单。"""
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
