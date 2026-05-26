@@ -46,17 +46,25 @@ def build_default_registry(
     *,
     graph: GraphProto,
     business_store: BusinessStoreProto,
+    project_id: str,
     code_store: Any | None = None,
     method_interp_store: Any | None = None,
 ) -> ToolRegistry:
     """构造预装 ke_* 工具 + todo_write 元工具的 ToolRegistry。
 
-    graph + business_store 必填（6 个核心 ke_* 工具）；code_store / method_interp_store 可选，
-    传入才注册 ke_read_entity / ke_method_interp（后端未连这两个 store 时优雅缺省）。
-    todo_write 无后端依赖，始终无条件注册（设计 §3.3）。
+    v1.3 修复（2026-05-26）：新增必填 project_id，闭包透传给 ke_search（修 LLM 猜 tenant bug）。
+    其他 ke_* 工具的 project_id 由 graph adapter（如 Neo4jGraphAdapter）实例化时绑定，
+    本函数不直接经手。
+
+    :param graph: 已绑 project_id 的 GraphProto adapter（如 Neo4jGraphAdapter(..., project_id=...)）
+    :param business_store: BusinessInterpretation store 的 adapter
+    :param project_id: 当前请求工程 ID — 透传给 ke_search 闭包
+    :param code_store: 可选 CodeEntity store
+    :param method_interp_store: 可选 MethodInterpretation store
     """
     registry = ToolRegistry()
-    registry.register(build_ke_search_tool(business_store))
+    # ke_search 闭包绑 project_id（与 Neo4jGraphAdapter 设计对齐）
+    registry.register(build_ke_search_tool(business_store, project_id))
     registry.register(build_ke_business_interp_tool(business_store))
     registry.register(build_ke_callees_tool(graph))
     registry.register(build_ke_callers_tool(graph))

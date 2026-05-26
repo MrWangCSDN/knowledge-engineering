@@ -116,7 +116,7 @@ async def test_ke_search_returns_candidates_from_business_store() -> None:
         {"entity_id": "C1", "summary_text": "y", "level": "class", "score": 0.7},
     ]
 
-    tool = build_ke_search_tool(store)
+    tool = build_ke_search_tool(store, "test")
     assert tool.name == "ke_search"
 
     out = await tool.handler({
@@ -131,9 +131,11 @@ async def test_ke_search_returns_candidates_from_business_store() -> None:
     assert out["results"][0]["entity_id"] == "M1"
 
     # store 被以正确参数调用
+    # 注意：project_id 由闭包注入（build_ke_search_tool 第二参数），
+    # handler input 里的 "project_id" 字段被 Task1 改动后忽略
     call_kwargs = store.search_method_hits_by_text.call_args.kwargs
     assert call_kwargs["text"] == "兽医列表"
-    assert call_kwargs["project_id"] == "petclinic"
+    assert call_kwargs["project_id"] == "test"  # 来自闭包，非 handler input
     assert call_kwargs["limit"] == 5
 
 
@@ -142,7 +144,7 @@ async def test_ke_search_default_limit_when_omitted() -> None:
     """没传 limit 时用默认值（5）。"""
     store = MagicMock()
     store.search_method_hits_by_text.return_value = []
-    tool = build_ke_search_tool(store)
+    tool = build_ke_search_tool(store, "test")
 
     await tool.handler({"query": "x", "project_id": "p"})
 
@@ -154,7 +156,7 @@ async def test_ke_search_default_limit_when_omitted() -> None:
 async def test_ke_search_missing_query_returns_empty() -> None:
     """query 为空时返回 [] + error，不调底层 store。"""
     store = MagicMock()
-    tool = build_ke_search_tool(store)
+    tool = build_ke_search_tool(store, "test")
 
     out = await tool.handler({"project_id": "p"})  # 缺 query
     assert out["results"] == []

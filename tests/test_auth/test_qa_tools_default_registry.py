@@ -16,7 +16,7 @@ def test_default_registry_has_core_tools_plus_todo_write() -> None:
     """build_default_registry 把 6 个核心 ke_* + todo_write 元工具全注册进去。"""
     graph = MagicMock()
     store = MagicMock()
-    reg = build_default_registry(graph=graph, business_store=store)
+    reg = build_default_registry(graph=graph, business_store=store, project_id="test")
 
     names = {t.name for t in reg.list_tools()}
     assert names == {
@@ -37,7 +37,7 @@ async def test_default_registry_call_dispatches() -> None:
     graph.successors.return_value = ["B"]
     store = MagicMock()
 
-    reg = build_default_registry(graph=graph, business_store=store)
+    reg = build_default_registry(graph=graph, business_store=store, project_id="test")
     out = await reg.call("ke_callees", {"entity_id": "A"})
 
     assert out == {"entity_id": "A", "callees": ["B"]}
@@ -64,6 +64,7 @@ def test_default_registry_registers_optional_stores_when_provided():
     reg = build_default_registry(
         graph=_FakeGraph(),
         business_store=_FakeBiz(),
+        project_id="test",
         code_store=_FakeCodeStore(),
         method_interp_store=_FakeInterpStore(),
     )
@@ -84,7 +85,43 @@ def test_default_registry_skips_optional_stores_when_absent():
         def get_by_entity(self, entity_id, *, project_id, level=None): return None
         def search_method_hits_by_text(self, *, text, project_id, limit=5): return []
 
-    reg = build_default_registry(graph=_FakeGraph(), business_store=_FakeBiz())
+    reg = build_default_registry(graph=_FakeGraph(), business_store=_FakeBiz(), project_id="test")
     names = {t.name for t in reg.list_tools()}
     assert "ke_read_entity" not in names
     assert "ke_method_interp" not in names
+
+
+def test_build_default_registry_requires_project_id():
+    """build_default_registry 现在必填 project_id（透传给 ke_search 闭包）。"""
+    import pytest
+    from unittest.mock import MagicMock
+    from src.service.qa_engine.tools import build_default_registry
+
+    graph = MagicMock()
+    business = MagicMock()
+    # 不传 project_id 应当报错（旧 signature 兼容性破坏，意在强制升级调用方）
+    with pytest.raises(TypeError):
+        build_default_registry(graph=graph, business_store=business)  # type: ignore[call-arg]
+
+
+def test_build_default_registry_passes_project_id_to_ke_search():
+    """build_default_registry 把 project_id 闭包传到 ke_search。"""
+    from unittest.mock import MagicMock
+    from src.service.qa_engine.tools import build_default_registry
+
+    graph = MagicMock()
+    business = MagicMock()
+    business.search_method_hits_by_text.return_value = []
+
+    registry = build_default_registry(
+        graph=graph, business_store=business, project_id="mall-swarm"
+    )
+    # 拿 ke_search 工具并调一次 handler，验证 project_id 闭包到位
+    import asyncio
+    tool = registry.get("ke_search")
+    asyncio.get_event_loop().run_until_complete(
+        tool.handler({"query": "X"})
+    )
+    business.search_method_hits_by_text.assert_called_once_with(
+        text="X", project_id="mall-swarm", limit=5
+    )
