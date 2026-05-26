@@ -379,7 +379,7 @@ class ReActSynthesizer:
         # 这段 prompt 着重 3 件事，按照 PetClinic 实测踩过的坑：
         #   1. 告诉 LLM 有哪些工具 → 解决"不知道能调什么"
         #   2. 强调用【可用 context】里给的 entity_id → 解决"瞎编 method://xxx"
-        #   3. 强调 project_id 从用户问题或上下文里来 → 解决"猜成 petclinic-root 这种模块名"
+        #   3. 提示 LLM 不要在 input 里塞 project_id（后端闭包绑定，已不再 schema 暴露）
         return f"""═════════════════════════════════════════════════════════════
 【可调用工具（v1.3 ReAct）】
 ═════════════════════════════════════════════════════════════
@@ -396,8 +396,8 @@ class ReActSynthesizer:
 2. **entity_id 要照搬**。candidates 里给你的形如 `method//abc123` 或 `class//def456`，
    `://`/`//` 全部保留原样，**不要**把它改成 `method://xxx_imagined` 之类。
 
-3. **project_id 跟用户当前会话保持一致**（默认从用户问题语境推断，比如 petclinic / deposit）；
-   不要拿模块 id（如 petclinic-root）当 project_id —— 它们不是一回事。
+3. **不要在 tool_call 输入里指定 project_id**。工具已经由后端绑定到当前会话的工程，
+   你提供 project_id 会被忽略（schema 也不再包含该字段）。
 
 4. **能给最终答案就别再调工具**。tool_call 仅用于"我看了 candidates 还差关键信息"的场景；
    如果 candidates 已经足够回答，直接输出 6 段式 JSON。
