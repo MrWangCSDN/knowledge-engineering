@@ -1,6 +1,7 @@
 # 项目配置：当前目标代码库为 mall-swarm
 repo:
-  path: "/Users/wangshanhe/Desktop/myproject/mall-swarm"
+  path: "/Users/java/repos/mall-swarm"
+  project_id: mall-swarm   # v2.0 多租户：写入 Weaviate tenant + Neo4j 节点属性
   version: 1.0.0
   language: java
   modules:
