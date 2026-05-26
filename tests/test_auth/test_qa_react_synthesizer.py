@@ -313,7 +313,7 @@ async def test_react_system_prompt_lists_available_tools() -> None:
     from src.service.qa_engine.tools.ke_callees import build_ke_callees_tool
     from src.service.qa_engine.tools.ke_search import build_ke_search_tool
     registry = ToolRegistry()
-    registry.register(build_ke_search_tool(MagicMock()))
+    registry.register(build_ke_search_tool(MagicMock(), "test"))
     registry.register(build_ke_callees_tool(graph_mock))
 
     synth = ReActSynthesizer(

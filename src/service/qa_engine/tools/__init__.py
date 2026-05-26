@@ -4,7 +4,7 @@
 
 公开 API:
   - Tool / ToolRegistry / ToolNotFound      from .base
-  - build_default_registry(graph, business_store) -> ToolRegistry
+  - build_default_registry(*, graph, business_store, project_id, code_store=None, method_interp_store=None) -> ToolRegistry
   - 6 个 build_ke_xxx_tool 工厂函数 + build_todo_write_tool（生产用 build_default_registry 一把推；测试可单挑）
 """
 from __future__ import annotations
@@ -55,6 +55,11 @@ def build_default_registry(
     v1.3 修复（2026-05-26）：新增必填 project_id，闭包透传给 ke_search（修 LLM 猜 tenant bug）。
     其他 ke_* 工具的 project_id 由 graph adapter（如 Neo4jGraphAdapter）实例化时绑定，
     本函数不直接经手。
+
+    本函数构造 6 个核心 ke_* 工具（ke_search / ke_business_interp / ke_callees / ke_callers /
+    ke_table_access / ke_impact）+ todo_write 元工具（设计 §3.3，无后端依赖始终注册）+ 2 个可选
+    ke_* 工具（ke_read_entity / ke_method_interp，分别依赖 code_store / method_interp_store，
+    None 时优雅缺省）。
 
     :param graph: 已绑 project_id 的 GraphProto adapter（如 Neo4jGraphAdapter(..., project_id=...)）
     :param business_store: BusinessInterpretation store 的 adapter

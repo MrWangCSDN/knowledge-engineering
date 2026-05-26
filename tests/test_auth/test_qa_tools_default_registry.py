@@ -119,9 +119,8 @@ def test_build_default_registry_passes_project_id_to_ke_search():
     # 拿 ke_search 工具并调一次 handler，验证 project_id 闭包到位
     import asyncio
     tool = registry.get("ke_search")
-    asyncio.get_event_loop().run_until_complete(
-        tool.handler({"query": "X"})
-    )
+    # asyncio.run 替代 get_event_loop().run_until_complete()，避免 Python 3.12 full-suite RuntimeError
+    asyncio.run(tool.handler({"query": "X"}))
     business.search_method_hits_by_text.assert_called_once_with(
         text="X", project_id="mall-swarm", limit=5
     )
