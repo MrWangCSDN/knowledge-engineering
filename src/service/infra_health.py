@@ -232,3 +232,51 @@ async def _ping_ollama(base_url: str | None) -> DepStatus:
     except Exception as e:
         # ConnectError（连接被拒 / 端口未监听）/ ConnectTimeout 等都到这里
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+# ─── check_all_deps 编排 ────────────────────────────────────────────────
+
+async def check_all_deps(app_state) -> InfraStatus:
+    """并发 ping 5 个 critical 依赖，返回完整状态。
+
+    从 os.environ 读 5 个依赖的 config（与 service/api.py 中 endpoint init 用的同源），
+    不读 app_state（app_state 当前留作未来扩展点）。
+
+    并发用 asyncio.gather；每个 ping 内部自己有 5s timeout，所以 gather 总时长 ≤ 5s。
+
+    :param app_state: FastAPI app.state，留作未来扩展（当前未使用）
+    :returns: {"mysql": DepStatus, "neo4j": DepStatus, "weaviate": DepStatus,
+               "dashscope": DepStatus, "ollama": DepStatus}
+    """
+    import os  # os 模块提供读取环境变量的 os.environ.get()
+
+    # 从环境变量读 5 个 config；与 service/api.py 中 endpoint init 同源
+    db_url = os.environ.get("KE_DB_URL")
+    neo4j_uri = os.environ.get("NEO4J_URI")
+    neo4j_user = os.environ.get("NEO4J_USER", "neo4j")  # 默认值 "neo4j" 是 Neo4j 的默认用户名
+    neo4j_password = os.environ.get("NEO4J_PASSWORD")
+    weaviate_url = os.environ.get("WEAVIATE_URL")
+    weaviate_api_key = os.environ.get("WEAVIATE_API_KEY")
+    dashscope_api_key = os.environ.get("DASHSCOPE_API_KEY")
+    # OLLAMA_BASE_URL 默认 127.0.0.1:11434（与 yaml 的 ollama_base_url 一致）
+    ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+
+    # asyncio.gather：并发 await 多个 coroutine，按入参顺序返回结果列表
+    # 等效于"同时发出 5 个网络请求，等所有都完成后一次性拿结果"
+    # 与串行 await 逐个调用相比，总耗时 = max(单个耗时) 而非 sum(单个耗时)
+    mysql_r, neo4j_r, weaviate_r, dashscope_r, ollama_r = await asyncio.gather(
+        _ping_mysql(db_url),
+        _ping_neo4j(neo4j_uri, neo4j_user, neo4j_password),
+        _ping_weaviate(weaviate_url, weaviate_api_key),
+        _ping_dashscope(dashscope_api_key),
+        _ping_ollama(ollama_base_url),
+    )
+
+    # 按 key 名组装返回 dict，与 InfraStatus TypedDict 对应
+    return {
+        "mysql": mysql_r,
+        "neo4j": neo4j_r,
+        "weaviate": weaviate_r,
+        "dashscope": dashscope_r,
+        "ollama": ollama_r,
+    }

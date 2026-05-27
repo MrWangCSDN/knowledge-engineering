@@ -193,3 +193,72 @@ async def test_ping_ollama_connection_refused():
     result = await _ping_ollama("http://localhost:65535")
     assert result["ok"] is False
     assert "Connect" in result["error"] or "refused" in result["error"].lower()
+
+
+# ───── check_all_deps 编排测试 ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_check_all_deps_returns_5_keys(monkeypatch):
+    """check_all_deps 返回 dict 含 5 个 critical 依赖的 key。"""
+    from src.service.infra_health import check_all_deps
+
+    async def fake_ok(*a, **k):
+        return {"ok": True}
+
+    monkeypatch.setattr("src.service.infra_health._ping_mysql", fake_ok)
+    monkeypatch.setattr("src.service.infra_health._ping_neo4j", fake_ok)
+    monkeypatch.setattr("src.service.infra_health._ping_weaviate", fake_ok)
+    monkeypatch.setattr("src.service.infra_health._ping_dashscope", fake_ok)
+    monkeypatch.setattr("src.service.infra_health._ping_ollama", fake_ok)
+
+    fake_state = MagicMock()
+    result = await check_all_deps(fake_state)
+
+    assert set(result.keys()) == {"mysql", "neo4j", "weaviate", "dashscope", "ollama"}
+    assert all(v["ok"] for v in result.values())
+
+
+@pytest.mark.asyncio
+async def test_check_all_deps_partial_failure(monkeypatch):
+    """部分挂 → 该项 ok=False，其他 True。"""
+    from src.service.infra_health import check_all_deps
+
+    async def fake_ok(*a, **k):
+        return {"ok": True}
+
+    async def fake_fail(*a, **k):
+        return {"ok": False, "error": "down"}
+
+    monkeypatch.setattr("src.service.infra_health._ping_mysql", fake_ok)
+    monkeypatch.setattr("src.service.infra_health._ping_neo4j", fake_fail)
+    monkeypatch.setattr("src.service.infra_health._ping_weaviate", fake_ok)
+    monkeypatch.setattr("src.service.infra_health._ping_dashscope", fake_ok)
+    monkeypatch.setattr("src.service.infra_health._ping_ollama", fake_ok)
+
+    fake_state = MagicMock()
+    result = await check_all_deps(fake_state)
+
+    assert result["neo4j"] == {"ok": False, "error": "down"}
+    assert result["mysql"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_check_all_deps_concurrent(monkeypatch):
+    """5 个 ping 应该并发跑而非串行 — 用 sleep 检测时间。"""
+    from src.service.infra_health import check_all_deps
+    import time
+
+    async def slow_ok(*a, **k):
+        await asyncio.sleep(0.5)
+        return {"ok": True}
+
+    for name in ("_ping_mysql", "_ping_neo4j", "_ping_weaviate", "_ping_dashscope", "_ping_ollama"):
+        monkeypatch.setattr(f"src.service.infra_health.{name}", slow_ok)
+
+    fake_state = MagicMock()
+    t0 = time.time()
+    await check_all_deps(fake_state)
+    elapsed = time.time() - t0
+
+    # 串行需要 5 * 0.5s = 2.5s；并发应该 < 1s
+    assert elapsed < 1.0, f"check_all_deps 应该并发，实际 {elapsed:.2f}s"
