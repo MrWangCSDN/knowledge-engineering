@@ -39,7 +39,21 @@ class Neo4jGraphBackend:
 
     def _ensure_driver(self) -> None:
         import neo4j
-        self._driver = neo4j.GraphDatabase.driver(self._uri, auth=(self._user, self._password))
+        # staging Neo4j 偶尔会让单个查询挂 30+ 分钟（socket recv 永不返回）；
+        # 加 client-side 超时保护：连接获取、空闲回收、心跳，让单点故障可以快速暴露
+        # 而不是阻塞整条 7000+ 节点的 sync 链。
+        self._driver = neo4j.GraphDatabase.driver(
+            self._uri,
+            auth=(self._user, self._password),
+            # 建连超时：3 次握手 + Bolt 协议磋商时间上限
+            connection_timeout=15.0,
+            # 从池中获取已有连接的最大等待
+            connection_acquisition_timeout=30.0,
+            # 连接最长寿命，超过则回收重建（防 stale connection）
+            max_connection_lifetime=300,
+            # TCP keep-alive 帮助及早发现 broken socket
+            keep_alive=True,
+        )
 
     def close(self) -> None:
         if self._driver:
