@@ -99,16 +99,24 @@ def build_retriever_for_project(project_id: str, request: Request):
     return QARetriever(business_store=biz_adapter, graph=graph_adapter)
 
 
-def build_tools_for_project(project_id: str, request: Request):
+async def build_tools_for_project(
+    project_id: str,
+    request: Request,
+    db: AsyncSession,
+):
     """每个请求构造一个绑定 project_id 的 ToolRegistry。
 
     与 build_retriever_for_project 同理：adapter 按 project_id 绑定，
     工具里的 project_id 由 adapter（Neo4jGraphAdapter）和 build_default_registry 闭包传入；
     LLM 不再需要在 input 里指定 project_id（修 2026-05-26 mall-swarm 实测 LLM 猜错 tenant 的 bug）。
 
+    v2.x 新增：从 DB 拿 repo_local_path（4 个文件类工具需要这个路径），
+    签名由 sync 改为 async（要 await db.get(Project)）。
+
     :param project_id: URL path 中的工程 ID
     :param request: FastAPI Request
-    :return: ToolRegistry 实例（已绑定 project_id 的 adapter）
+    :param db: SQLAlchemy AsyncSession（用于查 Project.repo_local_path）
+    :return: ToolRegistry 实例（已绑定 project_id 的 adapter + repo_local_path）
     :raises RuntimeError: 底层资源未就绪时抛出
     """
     biz_store = getattr(request.app.state, "weaviate_business_store", None)
@@ -123,6 +131,12 @@ def build_tools_for_project(project_id: str, request: Request):
     code_store = getattr(request.app.state, "weaviate_code_store", None)
     method_interp_store = getattr(request.app.state, "weaviate_method_interp_store", None)
 
+    # v2.x 新增：从 DB 拿 repo_local_path（4 个文件类工具需要这个路径）
+    # db.get 是 SQLAlchemy async 单行主键查询，等效于 SELECT ... WHERE id = project_id LIMIT 1
+    from src.service.db_models_homepage import Project as _ProjectModel
+    project = await db.get(_ProjectModel, project_id)
+    repo_local_path = project.repo_local_path if project else None
+
     from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateBusinessAdapter
     from src.service.qa_engine.tools import build_default_registry
 
@@ -135,15 +149,24 @@ def build_tools_for_project(project_id: str, request: Request):
         project_id=project_id,
         code_store=code_store,
         method_interp_store=method_interp_store,
+        repo_local_path=repo_local_path,
     )
 
 
-def _inject_per_request_tool_registry(synthesizer, project_id: str, request: Request):
+async def _inject_per_request_tool_registry(
+    synthesizer,
+    project_id: str,
+    request: Request,
+    db: AsyncSession,
+):
     """ReAct synthesizer 按 project_id 注入 per-request 工具 registry（修 Task 24）。
 
     - 非 ReActSynthesizer（如 QASynthesizer 单次 RAG）不需工具 → 原样返回，不构造。
     - build_tools_for_project 失败（后端未就绪）→ 不抛，沿用 synthesizer 已有 registry，
       主流程不挂（与 explain 内其它 per-request 构造的容错语义一致）。
+
+    v2.x：改为 async（build_tools_for_project 现在要 await db.get(Project)），
+    新增 db 参数，调用方须 await。
 
     :return: 同一个 synthesizer 实例（就地改 tool_registry）
     """
@@ -152,7 +175,7 @@ def _inject_per_request_tool_registry(synthesizer, project_id: str, request: Req
     if not isinstance(synthesizer, ReActSynthesizer):
         return synthesizer
     try:
-        synthesizer.tool_registry = build_tools_for_project(project_id, request)
+        synthesizer.tool_registry = await build_tools_for_project(project_id, request, db)
     except Exception as exc:
         _log.warning("explain: per-request 工具注册失败，沿用默认 registry: %r", exc)
     return synthesizer
@@ -288,7 +311,8 @@ async def explain(
         synthesizer = _copy.copy(synthesizer)
         synthesizer.llm = chosen_llm
         # per-request 工具 registry（修 Task 24）：ReAct 模式按 project_id 隔离注入
-        synthesizer = _inject_per_request_tool_registry(synthesizer, project_id, request)
+        # v2.x：_inject_per_request_tool_registry 现在 async，需要 await + db 参数
+        synthesizer = await _inject_per_request_tool_registry(synthesizer, project_id, request, db)
     except Exception as exc:
         # 构造 chosen_llm 失败（如 MINIMAX_API_KEY 缺失但用户选了 MiniMax）→ 降级用 app.state 默认 synthesizer
         # 这样主流程不挂；UI 可后续提示用户切回默认模型

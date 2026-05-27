@@ -3,6 +3,7 @@
 qa_router._inject_per_request_tool_registry：ReAct synthesizer 按 project_id
 注入 per-request 工具 registry（修 Task 24 多租户隔离）；非 ReAct 跳过；失败不抛。
 """
+import pytest
 from src.service.qa_engine.tools.base import ToolRegistry
 from src.service.qa_engine.react_synthesizer import ReActSynthesizer
 from src.service import qa_router
@@ -13,24 +14,29 @@ class _DummyLLM:
         raise NotImplementedError
 
 
-def test_injects_registry_into_react_synthesizer(monkeypatch):
+@pytest.mark.asyncio
+async def test_injects_registry_into_react_synthesizer(monkeypatch):
+    from unittest.mock import AsyncMock
     sentinel = ToolRegistry()
     # monkeypatch build_tools_for_project 返回 sentinel（不碰真实 Weaviate/Neo4j）
-    monkeypatch.setattr(
-        qa_router, "build_tools_for_project",
-        lambda project_id, request: sentinel,
-    )
+    # v2.x：build_tools_for_project 是 async，monkeypatch 用 AsyncMock 协程
+    async def _fake_builder(project_id, request, db):
+        return sentinel
+    monkeypatch.setattr(qa_router, "build_tools_for_project", _fake_builder)
+    fake_db = AsyncMock()
     synth = ReActSynthesizer(llm_provider=_DummyLLM(), tool_registry=ToolRegistry())
-    out = qa_router._inject_per_request_tool_registry(synth, "proj-a", object())
+    out = await qa_router._inject_per_request_tool_registry(synth, "proj-a", object(), fake_db)
     # registry 被换成 per-request 的 sentinel
     assert out.tool_registry is sentinel
 
 
-def test_skips_non_react_synthesizer(monkeypatch):
+@pytest.mark.asyncio
+async def test_skips_non_react_synthesizer(monkeypatch):
     # 非 ReActSynthesizer（用普通对象模拟 QASynthesizer）→ 原样返回，不调 builder
+    from unittest.mock import AsyncMock
     called = {"n": 0}
 
-    def _builder(project_id, request):
+    async def _builder(project_id, request, db):
         called["n"] += 1
         return ToolRegistry()
 
@@ -39,35 +45,41 @@ def test_skips_non_react_synthesizer(monkeypatch):
     class _PlainSynth:
         pass
 
+    fake_db = AsyncMock()
     plain = _PlainSynth()
-    out = qa_router._inject_per_request_tool_registry(plain, "proj-a", object())
+    out = await qa_router._inject_per_request_tool_registry(plain, "proj-a", object(), fake_db)
     assert out is plain
     assert called["n"] == 0  # 非 ReAct 不构造 registry
 
 
-def test_builder_failure_does_not_raise(monkeypatch):
+@pytest.mark.asyncio
+async def test_builder_failure_does_not_raise(monkeypatch):
     # builder 抛错（后端未就绪）→ 不抛，沿用 synthesizer 原 registry
+    from unittest.mock import AsyncMock
     original = ToolRegistry()
 
-    def _boom(project_id, request):
+    async def _boom(project_id, request, db):
         raise RuntimeError("backend down")
 
     monkeypatch.setattr(qa_router, "build_tools_for_project", _boom)
+    fake_db = AsyncMock()
     synth = ReActSynthesizer(llm_provider=_DummyLLM(), tool_registry=original)
-    out = qa_router._inject_per_request_tool_registry(synth, "proj-a", object())
+    out = await qa_router._inject_per_request_tool_registry(synth, "proj-a", object(), fake_db)
     # 失败兜底：registry 仍是原来的，没被清成 None
     assert out.tool_registry is original
 
 
-def test_build_tools_for_project_passes_optional_stores(monkeypatch):
+@pytest.mark.asyncio
+async def test_build_tools_for_project_passes_optional_stores(monkeypatch):
     """build_tools_for_project 把 app.state 的 code_store / method_interp_store
     透传给 build_default_registry（有则注册对应工具）。"""
+    from unittest.mock import AsyncMock
     captured = {}
 
     code_sentinel = object()
     interp_sentinel = object()
 
-    def _fake_build_default_registry(*, graph, business_store, project_id, code_store=None, method_interp_store=None):
+    def _fake_build_default_registry(*, graph, business_store, project_id, code_store=None, method_interp_store=None, repo_local_path=None):
         captured["code_store"] = code_store
         captured["method_interp_store"] = method_interp_store
         from src.service.qa_engine.tools.base import ToolRegistry
@@ -86,6 +98,11 @@ def test_build_tools_for_project_passes_optional_stores(monkeypatch):
     class _Req:
         app = _App()
 
+    # v2.x：build_tools_for_project 是 async，需要 await + 传 db 参数
+    # db.get 返回 None（repo_local_path 路径降级 None，不影响 code_store/method_interp_store 透传测试）
+    fake_db = AsyncMock()
+    fake_db.get = AsyncMock(return_value=None)
+
     # monkeypatch build_default_registry 捕获透传；adapter 构造换轻量替身（不真连后端）
     # 注意：build_tools_for_project 内部是局部 import
     #   `from src.service.qa_engine.tools import build_default_registry`
@@ -97,12 +114,13 @@ def test_build_tools_for_project_passes_optional_stores(monkeypatch):
     monkeypatch.setattr(_adapters, "Neo4jGraphAdapter", lambda backend, project_id: object())
     monkeypatch.setattr(_adapters, "WeaviateBusinessAdapter", lambda store: object())
 
-    qa_router.build_tools_for_project("proj-a", _Req())
+    await qa_router.build_tools_for_project("proj-a", _Req(), fake_db)
     assert captured["code_store"] is code_sentinel
     assert captured["method_interp_store"] is interp_sentinel
 
 
-def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch):
+@pytest.mark.asyncio
+async def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch):
     """build_tools_for_project 把 URL path 的 project_id 闭包给 ke_search。
 
     关键不变量：ke_search 收到 LLM 的 input 即使**没**含 project_id 也能正常用闭包查；
@@ -111,8 +129,7 @@ def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch):
     ke_search handler 调用 WeaviateBusinessAdapter.search_method_hits_by_text；
     这里 monkeypatch WeaviateBusinessAdapter 使其返回带 spy 的替身，验证 project_id 是闭包值。
     """
-    from unittest.mock import MagicMock
-    import asyncio
+    from unittest.mock import MagicMock, AsyncMock
     import src.service.qa_engine.adapters as _adapters
 
     # spy_adapter：search_method_hits_by_text 有记录功能，不真连 Weaviate
@@ -143,13 +160,45 @@ def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch):
     class _Req:
         app = _App()
 
-    registry = qa_router.build_tools_for_project("mall-swarm", _Req())
+    # v2.x：build_tools_for_project 是 async，需要 await + 传 db 参数
+    # db.get 返回 None（repo_local_path 降级 None，不影响 ke_search 闭包 project_id 测试）
+    fake_db = AsyncMock()
+    fake_db.get = AsyncMock(return_value=None)
+
+    registry = await qa_router.build_tools_for_project("mall-swarm", _Req(), fake_db)
     ke_search = registry.get("ke_search")
 
     # LLM 误传 wrong-tenant 也忽略，用 URL path 闭包的 mall-swarm
-    # asyncio.run 替代 get_event_loop().run_until_complete() — Python 3.12 full-suite 兼容
-    asyncio.run(ke_search.handler({"query": "X", "project_id": "wrong-tenant"}))
+    await ke_search.handler({"query": "X", "project_id": "wrong-tenant"})
 
     spy_adapter.search_method_hits_by_text.assert_called_once()
     call_kwargs = spy_adapter.search_method_hits_by_text.call_args.kwargs
     assert call_kwargs["project_id"] == "mall-swarm"
+
+
+@pytest.mark.asyncio
+async def test_build_tools_for_project_loads_repo_local_path_from_db():
+    """build_tools_for_project 从 DB Project 拿 repo_local_path 闭包给 4 工具。"""
+    from unittest.mock import MagicMock, AsyncMock
+    from fastapi import Request
+    from src.service.qa_router import build_tools_for_project
+
+    # 假 Project 对象
+    fake_project = MagicMock()
+    fake_project.repo_local_path = "/tmp/fake-repo"
+
+    # mock app.state
+    request = MagicMock(spec=Request)
+    request.app.state.weaviate_business_store = MagicMock()
+    request.app.state.neo4j_backend = MagicMock()
+    request.app.state.weaviate_code_store = None
+    request.app.state.weaviate_method_interp_store = None
+
+    # mock db.get(Project, ...)
+    fake_db = AsyncMock()
+    fake_db.get = AsyncMock(return_value=fake_project)
+
+    registry = await build_tools_for_project("mall-swarm", request, fake_db)
+    # 4 工具都注册了
+    for name in ("ke_grep", "ke_glob", "ke_read_file", "ke_ls"):
+        assert registry.get(name) is not None

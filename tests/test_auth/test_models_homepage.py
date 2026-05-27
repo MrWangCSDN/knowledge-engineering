@@ -31,6 +31,8 @@ def test_project_columns():
         "last_synced_at", "last_synced_commit", "sync_schedule",
         # v2.0 多租户新增
         "group_id",  # FK → groups.id，nullable=True，ondelete='SET NULL'
+        # Task 1 源码文件工具新增：本地 clone 路径，供 ke_grep/ke_glob/ke_read_file/ke_ls 使用
+        "repo_local_path",
     }
 
 
