@@ -403,6 +403,12 @@ class ReActSynthesizer:
    如果 candidates 已经足够回答，直接输出 6 段式 JSON。
 
 5. **错就早错**。tool 返回 `{{"error": "..."}}` 时不要重复同一调用；改 entity_id 或换工具。
+
+6. **新增：文件层探索工具**（ke_grep / ke_glob / ke_read_file / ke_ls）适合
+   "图谱里没的东西"——配置文件（yml/properties）、Mapper XML 原文、注释、字符串
+   常量、目录结构、import 关系。流程参考：先 ke_glob 找文件 → ke_grep 定位行 →
+   ke_read_file 看完整内容。`path` 参数都是项目相对路径，禁用 `..`/绝对路径，
+   越界会被拒。
 """
 
     def _tools_to_openai_schema(self) -> list[dict[str, Any]]:
