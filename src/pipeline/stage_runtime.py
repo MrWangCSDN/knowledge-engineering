@@ -193,6 +193,8 @@ class KnowledgeStageContext(KnowledgeAwareStageContext):
     app_context: Optional[AppContext] = None
     # v2.0：多租户标识，写入 Neo4j 节点属性与 Weaviate tenant
     project_id: Optional[str] = None
+    # --force-full：清 Weaviate tenant + 删 embedding checkpoint，跑全量
+    force_full: bool = False
 
 
 class KnowledgeStage:
@@ -301,6 +303,8 @@ class KnowledgeStage:
             graph_config=k.to_graph_dict(project_id=ctx.project_id),
             vector_config=k.to_vectordb_code_dict(),
             progress_callback=_wrap_graph_progress(ctx.progress_callback),
+            # --force-full：写 Weaviate 前清 tenant + 删 embedding checkpoint
+            force_full=ctx.force_full,
         )
         _actx = ctx.app_context if ctx.app_context is not None else AppContext.get()
         _actx.set_graph(graph)

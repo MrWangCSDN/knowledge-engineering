@@ -78,6 +78,7 @@ def _build_knowledge_ctx(
     step_callback: Callable[[str], None],
     app_context: Optional[AppContext] = None,
     project_id: Optional[str] = None,
+    force_full: bool = False,
 ) -> KnowledgeStageContext:
     return KnowledgeStageContext(
         structure_facts=structure_facts,
@@ -91,6 +92,8 @@ def _build_knowledge_ctx(
         app_context=app_context,
         # v2.0：多租户 project_id，透传到 KnowledgeStageContext 再到 graph_config
         project_id=project_id,
+        # --force-full：透传到 graph.build_from 控制 embedding checkpoint 行为
+        force_full=force_full,
     )
 
 

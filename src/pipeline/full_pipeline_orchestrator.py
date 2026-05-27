@@ -45,6 +45,9 @@ class FullPipelineScope:
     # v2.0：多租户 project_id，优先从 run_pipeline(project_id=...) 取，
     # 次选 config.repo.project_id，最终 fallback "default"
     project_id: Optional[str] = None
+    # CLI --force-full：清 Weaviate tenant + 删 embedding checkpoint，跑全量
+    # 默认 False 是断点续跑
+    force_full: bool = False
 
     # --- 派生（__post_init__）---
     k: Any = field(init=False)
@@ -166,6 +169,8 @@ def _segment_knowledge(scope: FullPipelineScope) -> Optional[dict[str, Any]]:
         app_context=scope.app_ctx,
         # v2.0：透传 project_id，写入 Neo4j 节点属性
         project_id=scope.project_id,
+        # --force-full 透传：清 Weaviate tenant + 删 embedding checkpoint
+        force_full=scope.force_full,
     )
     _execute_stages([KnowledgeStage()], knowledge_ctx)
     scope.graph = knowledge_ctx.graph

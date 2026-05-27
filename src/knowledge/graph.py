@@ -133,6 +133,9 @@ class KnowledgeGraph:
         graph_config: Optional[dict] = None,
         vector_config: Optional[dict] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        # --force-full：DashScope embedding 全量重跑（清 Weaviate tenant + 删 checkpoint）
+        # 默认 False = 断点续跑（已 embedded 跳过）；Task 4 在 embedding 循环里消费此 flag
+        force_full: bool = False,
     ) -> None:
         """从结构事实 + 语义增强事实 + 领域知识 构建图谱。progress_callback(current, total, message) 用于 Neo4j 同步进度。"""
         self.clear()

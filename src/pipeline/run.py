@@ -98,6 +98,10 @@ def run_pipeline(
     snapshot_repo: SnapshotRepository | None = None,
     app_context: AppContext | None = None,
     project_id: Optional[str] = None,
+    # force_full=True 时清 Weaviate tenant + 删 embedding checkpoint，跑全量；
+    # 默认 False 是断点续跑（已 embedded 的 entity 跳过）。
+    # 来源：CLI --force-full → cli.py → 本参数 → KnowledgeStage → graph.build_from
+    force_full: bool = False,
 ) -> dict[str, Any]:
     """
     执行完整流水线：数据与触发 → 结构 → 语义 → 知识层。
@@ -147,5 +151,6 @@ def run_pipeline(
         include_method_interpretation=include_method_interpretation,
         include_business_interpretation=include_business_interpretation,
         project_id=effective_project_id,
+        force_full=force_full,
     )
     return execute_full_pipeline_table(scope)

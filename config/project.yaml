@@ -149,11 +149,11 @@ knowledge:
   pipeline:
     include_method_interpretation_build: false
     include_business_interpretation_build: false
-  # 语义向量：统一通过本地 Ollama embedding 模型（如 bge-m3）生成
+  # 语义向量：DashScope text-embedding-v4（1024 维，与 vectordb dimension 一致）
+  # API key 走 env var DASHSCOPE_API_KEY（与 weaviate/neo4j 一致，secret 不入 git）
   semantic_embedding:
-    backend: ollama
-    ollama_base_url: "http://127.0.0.1:11434"
-    ollama_model: "bge-m3"
+    backend: dashscope
+    model: text-embedding-v4
   graph:
     backend: neo4j   # 设为 neo4j 时，流水线构建后会将图同步到 Neo4j
     neo4j_uri: "bolt://localhost:7687"

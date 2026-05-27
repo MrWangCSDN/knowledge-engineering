@@ -19,6 +19,16 @@ def main() -> None:
         help="执行到该层后停止（默认执行到 knowledge）",
     )
     parser.add_argument("--output-dir", "-o", default=None, help="中间结果输出目录（structure_facts.json 等）")
+    # --force-full：强制全量重跑 embedding（删 checkpoint + 清 Weaviate tenant）
+    # action="store_true"：用户写 --force-full 即 True，不写则默认 False
+    parser.add_argument(
+        "--force-full",
+        action="store_true",
+        help=(
+            "强制全量重跑 embedding（删 checkpoint + 清 Weaviate tenant 数据）。"
+            "默认行为是断点续跑（已 embedded 的 entity 跳过）。"
+        ),
+    )
     ig = parser.add_mutually_exclusive_group()
     ig.add_argument(
         "--with-interpretation",
@@ -68,6 +78,8 @@ def main() -> None:
         output_dir=args.output_dir,
         include_method_interpretation=include_interp,
         include_business_interpretation=include_biz,
+        # args.force_full 由 argparse 把 --force-full 自动转 snake_case
+        force_full=args.force_full,
     )
     print("Pipeline stage:", result.get("stage", "?"))
     if "graph_nodes" in result:
