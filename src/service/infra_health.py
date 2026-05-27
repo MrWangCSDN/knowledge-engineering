@@ -120,3 +120,115 @@ async def _ping_neo4j(uri: str | None, user: str | None, password: str | None) -
         return {"ok": False, "error": f"Neo4j ping timeout (>{PING_TIMEOUT_SEC}s)"}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+# ─── _ping_weaviate ──────────────────────────────────────────────────────
+
+# httpx：纯 Python 的异步 HTTP 客户端，比 requests 更适合 asyncio；
+# 这里不用 weaviate-client SDK，而是直接 HTTP 探活，更轻量、不需要完整初始化
+import httpx
+
+
+async def _ping_weaviate(url: str | None, api_key: str | None) -> DepStatus:
+    """ping Weaviate：GET /v1/.well-known/live 验证服务存活。
+
+    :param url: Weaviate base URL，如 'http://43.228.76.163:8080'
+    :param api_key: API key（live endpoint 不需要 auth，保留参数以备未来切到 ready 检查）
+    :returns: {"ok": True} 或 {"ok": False, "error": "..."}
+    """
+    # config sanity：URL 为 None / 空 → 短路，避免连接 5s 后才超时
+    if not url:
+        return {"ok": False, "error": "WEAVIATE_URL not configured"}
+
+    # /v1/.well-known/live 端点：进程存活就返 200，不需要 auth
+    # /v1/.well-known/ready 更严格（等 raft 完成），但 raft 选举期间会 503，对 startup 过严
+    live_url = url.rstrip("/") + "/v1/.well-known/live"
+
+    try:
+        # httpx.AsyncClient 作为异步上下文管理器（with 块结束自动关连接）
+        # timeout= 传给所有请求（connect + read 合计）
+        async with httpx.AsyncClient(timeout=PING_TIMEOUT_SEC) as client:
+            # await client.get() 发送异步 GET 请求，返回 Response 对象
+            resp = await client.get(live_url)
+            # status_code 是整型 HTTP 状态码（200 / 503 等）
+            if resp.status_code == 200:
+                return {"ok": True}
+            return {"ok": False, "error": f"Weaviate live status={resp.status_code}"}
+
+    # httpx.TimeoutException：connect timeout 或 read timeout 都会走这里
+    except httpx.TimeoutException:
+        return {"ok": False, "error": f"Weaviate ping timeout (>{PING_TIMEOUT_SEC}s)"}
+    except Exception as e:
+        # 其余网络错误（DNS 解析失败、连接被拒）
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+# ─── _ping_dashscope ─────────────────────────────────────────────────────
+
+async def _ping_dashscope(api_key: str | None) -> DepStatus:
+    """ping DashScope：embedding 1 字符验证 API key + 服务可达。
+
+    cost ≈ ¥0.000001（1 token），可忽略；用 text-embedding-v4 模型（1024 维）。
+
+    :param api_key: DashScope API key，如 'sk-...'
+    :returns: {"ok": True} 或 {"ok": False, "error": "..."}
+    """
+    # config sanity：key 为 None / 空 → 短路
+    if not api_key:
+        return {"ok": False, "error": "DASHSCOPE_API_KEY not configured"}
+
+    # DashScope 原生 embedding endpoint（区别于 /compatible-mode/ OpenAI 兼容路径）
+    url = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
+
+    # HTTP headers：Authorization Bearer 是 DashScope 鉴权方式；Content-Type 告知 server 我们发 JSON
+    headers = {
+        "Authorization": f"Bearer {api_key}",  # f-string 拼接；f"..." 是 Python 3.6+ 格式化字符串
+        "Content-Type": "application/json",
+    }
+
+    # payload：最小化请求体，只发 1 个字符"."，token 消耗 ≈ 1
+    # dict 嵌套 dict 是 Python 中表达 JSON 结构的惯用写法
+    payload = {"model": "text-embedding-v4", "input": {"texts": ["."]}}
+
+    try:
+        async with httpx.AsyncClient(timeout=PING_TIMEOUT_SEC) as client:
+            # client.post：发 HTTP POST，json= 参数自动序列化 dict → JSON 并设 Content-Type
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 200:
+                return {"ok": True}
+            # 401 = Bad API key；非 200 统一返 error
+            return {"ok": False, "error": f"DashScope status={resp.status_code}"}
+
+    except httpx.TimeoutException:
+        return {"ok": False, "error": f"DashScope ping timeout (>{PING_TIMEOUT_SEC}s)"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+# ─── _ping_ollama ────────────────────────────────────────────────────────
+
+async def _ping_ollama(base_url: str | None) -> DepStatus:
+    """ping Ollama：GET /api/tags 拉模型列表，最轻量的健康检查。
+
+    :param base_url: Ollama HTTP base，本地通常 'http://127.0.0.1:11434'
+    :returns: {"ok": True} 或 {"ok": False, "error": "..."}
+    """
+    # config sanity：URL 为 None / 空 → 短路
+    if not base_url:
+        return {"ok": False, "error": "OLLAMA_BASE_URL not configured"}
+
+    # /api/tags：返回已拉取模型列表；空列表也是 200，说明服务在跑
+    tags_url = base_url.rstrip("/") + "/api/tags"
+
+    try:
+        async with httpx.AsyncClient(timeout=PING_TIMEOUT_SEC) as client:
+            resp = await client.get(tags_url)
+            if resp.status_code == 200:
+                return {"ok": True}
+            return {"ok": False, "error": f"Ollama status={resp.status_code}"}
+
+    except httpx.TimeoutException:
+        return {"ok": False, "error": f"Ollama ping timeout (>{PING_TIMEOUT_SEC}s)"}
+    except Exception as e:
+        # ConnectError（连接被拒 / 端口未监听）/ ConnectTimeout 等都到这里
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}

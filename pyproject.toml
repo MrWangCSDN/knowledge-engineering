@@ -44,7 +44,7 @@ auth = [
   "alembic>=1.13,<2",
   "pydantic[email]>=2.0,<3",
 ]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.1.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.1.0", "pytest-httpx>=0.30", "pytest-asyncio>=0.23"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

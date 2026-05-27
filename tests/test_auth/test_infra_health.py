@@ -102,3 +102,94 @@ async def test_ping_neo4j_auth_failure(monkeypatch):
     result = await _ping_neo4j("bolt://h:7687", "neo4j", "pw")
     assert result["ok"] is False
     assert "auth failed" in result["error"].lower() or "RuntimeError" in result["error"]
+
+
+# ───── _ping_weaviate 测试 ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_ping_weaviate_config_missing():
+    """url 缺失 → ok=False。"""
+    from src.service.infra_health import _ping_weaviate
+    result = await _ping_weaviate(None, "key")
+    assert result == {"ok": False, "error": "WEAVIATE_URL not configured"}
+
+
+@pytest.mark.asyncio
+async def test_ping_weaviate_success(httpx_mock):
+    """GET /v1/.well-known/live 返 200 → ok=True。"""
+    from src.service.infra_health import _ping_weaviate
+    httpx_mock.add_response(url="http://host:8080/v1/.well-known/live", status_code=200)
+    result = await _ping_weaviate("http://host:8080", "fake-key")
+    assert result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_ping_weaviate_503_returns_unhealthy(httpx_mock):
+    """non-200 → ok=False。"""
+    from src.service.infra_health import _ping_weaviate
+    httpx_mock.add_response(url="http://host:8080/v1/.well-known/live", status_code=503)
+    result = await _ping_weaviate("http://host:8080", "fake-key")
+    assert result["ok"] is False
+    assert "503" in result["error"]
+
+
+# ───── _ping_dashscope 测试 ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_ping_dashscope_config_missing():
+    from src.service.infra_health import _ping_dashscope
+    result = await _ping_dashscope(None)
+    assert result == {"ok": False, "error": "DASHSCOPE_API_KEY not configured"}
+
+
+@pytest.mark.asyncio
+async def test_ping_dashscope_success(httpx_mock):
+    """embedding 1 个字符 → 200 → ok=True。"""
+    from src.service.infra_health import _ping_dashscope
+    httpx_mock.add_response(
+        url="https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding",
+        status_code=200,
+        json={"output": {"embeddings": [{"text_index": 0, "embedding": [0.1] * 1024}]}, "usage": {"total_tokens": 1}},
+    )
+    result = await _ping_dashscope("sk-fake")
+    assert result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_ping_dashscope_401(httpx_mock):
+    """401 unauthorized → ok=False。"""
+    from src.service.infra_health import _ping_dashscope
+    httpx_mock.add_response(
+        url="https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding",
+        status_code=401,
+    )
+    result = await _ping_dashscope("sk-bad-key")
+    assert result["ok"] is False
+    assert "401" in result["error"]
+
+
+# ───── _ping_ollama 测试 ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_ping_ollama_config_missing():
+    from src.service.infra_health import _ping_ollama
+    result = await _ping_ollama(None)
+    assert result == {"ok": False, "error": "OLLAMA_BASE_URL not configured"}
+
+
+@pytest.mark.asyncio
+async def test_ping_ollama_success(httpx_mock):
+    """GET /api/tags 返 200 → ok=True。"""
+    from src.service.infra_health import _ping_ollama
+    httpx_mock.add_response(url="http://localhost:11434/api/tags", status_code=200, json={"models": []})
+    result = await _ping_ollama("http://localhost:11434")
+    assert result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_ping_ollama_connection_refused():
+    """真实连接失败（无 mock）→ ok=False。"""
+    from src.service.infra_health import _ping_ollama
+    result = await _ping_ollama("http://localhost:65535")
+    assert result["ok"] is False
+    assert "Connect" in result["error"] or "refused" in result["error"].lower()
