@@ -29,6 +29,8 @@ from src.service.db_models_homepage import Project, UserProjectAccess  # 首页/
 PROJECT_ID = "mall-swarm"
 PROJECT_NAME = "mall-swarm（电商微服务示例）"
 GIT_URL = "https://github.com/MrWangCSDN/mall-swarm"
+# 本地源码绝对路径，4 个文件类工具会从这里拼路径访问代码
+REPO_LOCAL_PATH = "/Users/java/repos/mall-swarm"
 # OWNERS：要赋予 owner 角色的 username 列表
 # admin 不放这里——靠 is_admin=True 全局可见
 OWNERS = ["alice", "bob", "carol"]
@@ -43,8 +45,13 @@ async def main() -> None:
         # db.get(Model, pk) 是 SQLAlchemy 2.x 按主键加载的快捷方式
         existing = await s.get(Project, PROJECT_ID)
         if existing is not None:
-            # 已存在就跳过创建，但仍打印当前状态便于排查
-            print(f"  proj[skip] {PROJECT_ID} name={existing.name} status={existing.status}")
+            # 幂等：已存在但 repo_local_path 未配 → UPDATE 填上（首次跑 Task 2 时）
+            if existing.repo_local_path != REPO_LOCAL_PATH:
+                existing.repo_local_path = REPO_LOCAL_PATH
+                print(f"  proj[upd ] {PROJECT_ID} repo_local_path={REPO_LOCAL_PATH}")
+            else:
+                # 已存在且 repo_local_path 已是目标值，跳过
+                print(f"  proj[skip] {PROJECT_ID} name={existing.name} status={existing.status}")
         else:
             # status='indexing' 表示工程已配置、等待 pipeline 跑完
             # （'configured' 是 v1.0 仓库管理用的；我们已经准备马上跑 pipeline，所以直接 indexing）
@@ -55,10 +62,11 @@ async def main() -> None:
                 status="indexing",
                 git_url=GIT_URL,
                 git_branch="master",  # mall-swarm 默认分支是 master 而非 main
+                repo_local_path=REPO_LOCAL_PATH,  # 4 个文件工具会用这个路径
                 created_by="admin",
             )
             s.add(p)  # 将新对象加入 session 的 pending 队列
-            print(f"  proj[new ] {PROJECT_ID} git_url={GIT_URL}")
+            print(f"  proj[new ] {PROJECT_ID} git_url={GIT_URL} path={REPO_LOCAL_PATH}")
 
         # ── 2. 查 OWNERS 这几个 username 对应的 user_id ───────────────────
         # in_ 是 SQL IN 操作符的 SQLAlchemy 写法
