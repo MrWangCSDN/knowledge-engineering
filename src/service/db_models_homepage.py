@@ -101,6 +101,13 @@ class Project(Base):
     sync_schedule: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
     """同步频率：manual / hourly / daily。v1.0 只支持 manual。"""
 
+    repo_local_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    """项目源码在后端服务器的本地绝对路径；NULL 表示未配置。
+
+    用于 4 个文件类工具（ke_grep / ke_glob / ke_read_file / ke_ls）拼路径。
+    设计：[[代码源文件查询工具-设计]] §6
+    """
+
     # ─── v2.0 多租户新增字段 ──────────────────────────────────────
     # group_id：工程所属的分组（FK → groups.id）
     # nullable=True：存量工程可以不属于任何 group，逐步迁移
