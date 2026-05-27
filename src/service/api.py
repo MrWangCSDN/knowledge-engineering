@@ -395,8 +395,73 @@ async def require_infra_healthy(
 
 
 @app.get("/health")
-def health(ctx: AppContext = Depends(get_app_context)) -> dict:
-    return {"status": "ok", "graph_loaded": ctx.get_graph_optional() is not None}
+async def health(request: Request) -> dict:
+    """主动重新 ping 5 个 critical 依赖，更新 app.state.infra_status 并返回。
+
+    设计：[[基础设施健康检查与产品不可用-设计]] §3.2.3
+
+    Response schema:
+      - 未登录 / 普通用户：{"healthy": bool, "ts": iso}
+      - Admin            ：{"healthy": bool, "ts": iso, "deps": {...}}
+
+    本端点本身不附 require_infra_healthy（决策 #5：健康检查不能自我熔断）。
+    用户权限通过 Authorization header 解析；缺 header → 视作匿名（不暴露 deps）。
+    """
+    # 导入时间工具；datetime.now(timezone.utc) 返回带时区的当前 UTC 时间
+    from datetime import datetime, timezone
+
+    # 每次调用都重新 ping，不读 cache（用户「重试连接」必须看到最新状态）
+    # 局部导入避免循环依赖，同时让 patch("src.service.infra_health.check_all_deps") 可以正确 mock
+    from src.service.infra_health import check_all_deps
+
+    # await 关键字等待协程完成；check_all_deps 是 async def，必须 await
+    status = await check_all_deps(request.app.state)
+    # 写回 state，让 require_infra_healthy 下一次也能用上最新值
+    request.app.state.infra_status = status
+
+    # all() 接受可迭代对象，全 True 才返回 True；字典的 .values() 返回所有 value 的视图
+    healthy = all(v.get("ok") for v in status.values())
+    # 类型注解 dict：说明变量类型，帮助 IDE 做静态检查
+    body: dict = {
+        "healthy": healthy,
+        # .isoformat() 将 datetime 转为 ISO 8601 字符串，如 "2026-05-27T10:00:00+00:00"
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # 尝试解析当前用户（不强制登录）— admin 看 deps，其他不看
+    # request.headers 是一个类字典对象，.get() 返回指定 header 值，缺失时返回默认值 ""
+    auth_header = request.headers.get("Authorization", "")
+    # str.startswith() 检查字符串是否以指定前缀开头
+    if auth_header.startswith("Bearer "):
+        # 切片语法 [n:] 取从第 n 个字符开始的子字符串；len("Bearer ") == 7
+        token = auth_header[len("Bearer "):]
+        try:
+            # decode_token 解码 JWT；签名错或过期返回 None（见 auth_security.py）
+            from src.service.auth_security import decode_token
+            from src.service.db import get_session_maker
+            from src.service.auth_models import User
+
+            # payload 是 dict 或 None；若 token 无效则为 None
+            payload = decode_token(token)
+            if payload is not None:
+                # payload.get("sub", "0") 取 subject 字段（用户 ID 字符串），缺失时返回 "0"
+                user_id = int(payload.get("sub", "0"))
+                if user_id > 0:
+                    # get_session_maker() 返回 async_sessionmaker 工厂函数，调用它得到 session
+                    SM = get_session_maker()
+                    # async with ... as s：异步上下文管理器，自动关闭 session
+                    async with SM() as s:
+                        # s.get(Model, pk) 按主键查找；找不到返回 None
+                        user = await s.get(User, user_id)
+                        # 只有真实存在且 is_admin=True 的用户才暴露 deps
+                        if user is not None and user.is_admin:
+                            body["deps"] = status
+        except Exception:
+            # token 错 / decode 失败 / DB 异常 → 静默忽略，按匿名处理
+            # pass 是 Python 的空语句，什么都不做
+            pass
+
+    return body
 
 
 @app.get("/search")
