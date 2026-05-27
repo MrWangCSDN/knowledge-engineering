@@ -13,7 +13,7 @@ from src.service.qa_engine.tools import build_default_registry
 
 
 def test_default_registry_has_core_tools_plus_todo_write() -> None:
-    """build_default_registry 把 6 个核心 ke_* + todo_write 元工具全注册进去。"""
+    """build_default_registry 把 6 个核心 ke_* + todo_write 元工具 + 4 个文件类工具全注册进去。"""
     graph = MagicMock()
     store = MagicMock()
     reg = build_default_registry(graph=graph, business_store=store, project_id="test")
@@ -27,6 +27,10 @@ def test_default_registry_has_core_tools_plus_todo_write() -> None:
         "ke_table_access",
         "ke_impact",
         "todo_write",
+        "ke_grep",
+        "ke_glob",
+        "ke_read_file",
+        "ke_ls",
     }
 
 
@@ -124,3 +128,41 @@ def test_build_default_registry_passes_project_id_to_ke_search():
     business.search_method_hits_by_text.assert_called_once_with(
         text="X", project_id="mall-swarm", limit=5
     )
+
+
+def test_build_default_registry_accepts_repo_local_path():
+    """build_default_registry 接受 repo_local_path 参数并注册 4 个文件类工具。"""
+    from unittest.mock import MagicMock
+    from src.service.qa_engine.tools import build_default_registry
+
+    graph = MagicMock()
+    business = MagicMock()
+    registry = build_default_registry(
+        graph=graph,
+        business_store=business,
+        project_id="test",
+        repo_local_path="/tmp/fake-repo",
+    )
+
+    # 4 个新工具被注册
+    for name in ("ke_grep", "ke_glob", "ke_read_file", "ke_ls"):
+        assert registry.get(name) is not None, f"{name} not registered"
+
+
+def test_build_default_registry_without_repo_local_path():
+    """repo_local_path 为 None 时 4 个工具仍注册（handler 内部 error 处理）。"""
+    from unittest.mock import MagicMock
+    from src.service.qa_engine.tools import build_default_registry
+
+    graph = MagicMock()
+    business = MagicMock()
+    registry = build_default_registry(
+        graph=graph,
+        business_store=business,
+        project_id="test",
+        # 不传 repo_local_path
+    )
+
+    # 4 个工具仍注册
+    for name in ("ke_grep", "ke_glob", "ke_read_file", "ke_ls"):
+        assert registry.get(name) is not None
