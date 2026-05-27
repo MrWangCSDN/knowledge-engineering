@@ -59,34 +59,37 @@ def test_get_embedding_empty_returns_zero_vector():
     assert get_embedding(None) == [0.0] * DIM   # type: ignore[arg-type]
 
 
-def test_get_embeddings_batch_under_25_one_call(httpx_mock):
-    """10 条 text → 1 次 HTTP 请求。
+def test_get_embeddings_batch_under_max_one_call(httpx_mock):
+    """7 条 text （< BATCH_MAX=10）→ 1 次 HTTP 请求。
 
     `httpx_mock` 是 pytest-httpx 插件提供的 fixture，会拦截 httpx 客户端发出的所有请求
     """
-    # 用列表推导式快速造 10 个文本
-    texts = [f"text-{i}" for i in range(10)]
+    # 用列表推导式快速造 7 个文本（小于 BATCH_MAX=10，不需要切片）
+    texts = [f"text-{i}" for i in range(7)]
     # 注册一次 mock response，pytest-httpx 会按顺序消费
     httpx_mock.add_response(url=DASHSCOPE_URL, json=_make_response(texts))
 
     result = get_embeddings_batch(texts)
-    assert len(result) == 10
+    assert len(result) == 7
     # 每个向量是 DIM 维 float list
     assert all(len(v) == DIM for v in result)
-    # 只发了 1 个请求（10 < BATCH_MAX=25，不需要分片）
+    # 只发了 1 个请求（7 < BATCH_MAX=10，不需要分片）
     assert len(httpx_mock.get_requests()) == 1
 
 
-def test_get_embeddings_batch_over_25_chunked(httpx_mock):
-    """60 条 → 3 次 HTTP（25+25+10），结果按原序拼接。"""
-    texts = [f"text-{i}" for i in range(60)]
-    # 三批 response：每批输入按 [0:25], [25:50], [50:60] 切；text_index 在每批内 0-based
-    httpx_mock.add_response(url=DASHSCOPE_URL, json=_make_response(texts[:25]))
-    httpx_mock.add_response(url=DASHSCOPE_URL, json=_make_response(texts[25:50]))
-    httpx_mock.add_response(url=DASHSCOPE_URL, json=_make_response(texts[50:60]))
+def test_get_embeddings_batch_over_max_chunked(httpx_mock):
+    """25 条 → 3 次 HTTP（10+10+5），结果按原序拼接。
+
+    BATCH_MAX=10（DashScope v4 硬限），所以 25 条需要切 3 批
+    """
+    texts = [f"text-{i}" for i in range(25)]
+    # 三批 response：每批输入按 [0:10], [10:20], [20:25] 切；text_index 在每批内 0-based
+    httpx_mock.add_response(url=DASHSCOPE_URL, json=_make_response(texts[:10]))
+    httpx_mock.add_response(url=DASHSCOPE_URL, json=_make_response(texts[10:20]))
+    httpx_mock.add_response(url=DASHSCOPE_URL, json=_make_response(texts[20:25]))
 
     result = get_embeddings_batch(texts)
-    assert len(result) == 60
+    assert len(result) == 25
     assert len(httpx_mock.get_requests()) == 3
 
 

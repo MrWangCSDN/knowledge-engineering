@@ -27,8 +27,10 @@ import httpx
 # DashScope text-embedding-v4 输出维度（与 Weaviate vectordb.dimension 一致）
 DIM = 1024
 
-# 单次 API 调用最大批量（DashScope v4 文档限制 25 条 / 请求）
-BATCH_MAX = 25
+# 单次 API 调用最大批量（实测 DashScope v4 限制 10 条 / 请求；
+# 超过 10 返回 400 InvalidParameter "batch size is invalid, it should not be larger than 10"）
+# 注：spec / plan 写的是 25，但生产实测 DashScope 强制 10 上限
+BATCH_MAX = 10
 
 # 重试次数：网络错误 / 5xx 时最多重试 RETRY_TIMES 次
 RETRY_TIMES = 3
