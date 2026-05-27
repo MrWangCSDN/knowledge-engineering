@@ -52,3 +52,7 @@ test_pipeline_smoke.py
 
 # 备份文件
 *.bak
+
+# embedding 断点续跑：运行时数据，不入 git（.gitkeep 占位除外）
+data/checkpoints/*.json
+data/checkpoints/*.json.tmp
