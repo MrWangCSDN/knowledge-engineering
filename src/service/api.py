@@ -123,6 +123,36 @@ async def init_qa_engine() -> None:
     from src.service.qa_engine.router import SkillRouter
 
     _log = logging.getLogger("qa_engine.startup")
+    # Python 默认 root logger level = WARNING，导致 INFO 被吞；
+    # 显式设置本 logger 为 INFO，让 startup 日志在任何 uvicorn 配置下都可见
+    if not _log.handlers:
+        # 只在没有 handler 时添加（避免重复输出）；Handler 继承自 StreamHandler 输出到 stderr
+        _h = logging.StreamHandler()
+        _h.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
+        _log.addHandler(_h)
+    _log.setLevel(logging.INFO)
+
+    # ──── 基础设施健康检查 — 写 app.state.infra_status ────────────────────
+    # 设计：[[基础设施健康检查与产品不可用-设计]] §3.2.1
+    # 5 个 critical 依赖并发 ping，每个 5s timeout；任一挂 uvicorn 仍 ready，
+    # 但 require_infra_healthy dependency 会拒所有需要 critical 资源的路由。
+    # 注意：check_all_deps 只从 os.environ 读 config，不依赖 app.state 中的连接对象，
+    # 因此必须在 LLM / 后端资源初始化之前运行，保证任一早返回路径也能写入 infra_status。
+    from src.service.infra_health import check_all_deps
+    # check_all_deps 是协程（async def），必须 await；返回 InfraStatus dict
+    app.state.infra_status = await check_all_deps(app.state)
+    # 简洁 log 一行显示哪些依赖 ok / 哪些挂
+    _log.info(
+        "[startup] infra_status: %s",
+        {k: v["ok"] for k, v in app.state.infra_status.items()},
+    )
+    # 任一不 ok 则 WARNING 级别 log 详细错误，方便运维定位
+    unhealthy_deps = {k: v for k, v in app.state.infra_status.items() if not v["ok"]}
+    if unhealthy_deps:
+        _log.warning(
+            "[startup] critical 依赖部分不可用（系统将进入「产品不可用」状态）：%s",
+            unhealthy_deps,
+        )
 
     # 先初始化 LLM —— 这是 chat 的"必备"组件，挂了就别拉后端资源了
     try:
