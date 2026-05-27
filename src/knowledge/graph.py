@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -14,9 +15,14 @@ from src.models import (
     EntityType,
     RelationType,
 )
-from src.semantic.embedding import get_embedding
+# get_embedding 保留供查询时的单条 fallback；批量写入走 get_embeddings_batch
+from src.semantic.embedding import get_embedding, get_embeddings_batch
+from src.semantic.embedding_checkpoint import EmbeddingCheckpoint
 from src.knowledge.factories import VectorStoreFactory
 from src.knowledge.vector_store import VectorStore
+
+# 模块级 logger；统一走 logging 而非 print，便于 uvicorn / pytest 控制输出
+_LOG = logging.getLogger(__name__)
 
 
 def _neo4j_sanitize(value: Any) -> Any:
@@ -283,30 +289,89 @@ class KnowledgeGraph:
                 # v2.0：从 graph_config 拿 project_id 作为 Weaviate tenant
                 # （graph_config 是 build_from 的 kwarg，由 stage_runtime 注入项目 id）
                 _vs_tenant = (graph_config or {}).get("project_id") if graph_config else None
-                for se in semantic_facts.semantic_entities:
-                    if not se.embed_text:
-                        continue
-                    if se.structure_entity_id in method_ids_with_snippet:
-                        continue
-                    vec = get_embedding(se.embed_text, vector_dim)
-                    self._vector_store.add(se.structure_entity_id, vec, tenant=_vs_tenant)
-                for e in structure_facts.entities:
-                    if e.type != EntityType.METHOD:
-                        continue
-                    snippet = (e.attributes or {}).get("code_snippet")
-                    if not snippet:
-                        continue
-                    vec = get_embedding(snippet, vector_dim)
-                    add_method = getattr(self._vector_store, "add", None)
-                    if callable(add_method):
-                        add_method(
-                            e.id,
-                            vec,
-                            entity_type="method",
-                            name=e.name or "",
-                            code_snippet=snippet,
-                            tenant=_vs_tenant,
-                        )
+
+                # ─── DashScope batch + EmbeddingCheckpoint 集成 ─────────────
+                # 用 tenant 作为 checkpoint 的 project_id 维度（每个 tenant 独立 checkpoint）
+                # tenant 为 None 时 fallback "default"，与 EmbeddingCheckpoint 内部约定一致
+                # 注意：force_full=True 时 EmbeddingCheckpoint 会自动删本地 checkpoint；
+                #       Weaviate tenant 数据不自动清，需运维 / 后续工具支持
+                _ckpt_pid = _vs_tenant or "default"
+                ckpt = EmbeddingCheckpoint.load(
+                    _ckpt_pid,
+                    force_full=force_full,
+                    # weaviate_store=None — 当前 vector_store 无 exists/exists_many API；
+                    # 等后续给 WeaviateVectorStore 加 fallback 方法后再接入
+                    weaviate_store=None,
+                )
+                if force_full:
+                    _LOG.info(
+                        "[knowledge] --force-full: 已删 embedding checkpoint (tenant=%s)；"
+                        "如同时需要清 Weaviate tenant 数据请人工执行（auto-clear 尚未实现）",
+                        _ckpt_pid,
+                    )
+
+                # ─── 第一批：semantic embed_text 向量 ───
+                # 列表推导式 + 短路条件：过滤 None / empty / 已有 snippet 的
+                # `if A and not B` —— Python 短路求值：A 假时不评估 B
+                sem_pairs: list[tuple[str, str]] = [
+                    (se.structure_entity_id, se.embed_text)
+                    for se in semantic_facts.semantic_entities
+                    if se.embed_text and se.structure_entity_id not in method_ids_with_snippet
+                ]
+                if sem_pairs:
+                    # batch 查 checkpoint：拿到 {eid: 是否已完成}
+                    sem_exists = ckpt.has_many([eid for eid, _ in sem_pairs])
+                    # 列表推导：仅保留未完成的 (eid, text)
+                    sem_pending = [(eid, text) for eid, text in sem_pairs if not sem_exists.get(eid, False)]
+                    _LOG.info(
+                        "[knowledge] semantic embedding 续跑：跳过 %d / %d 已完成，需 embed %d 个",
+                        len(sem_pairs) - len(sem_pending), len(sem_pairs), len(sem_pending),
+                    )
+                    if sem_pending:
+                        # 一次性 batch 调用：内部自动按 BATCH_MAX=25 切片
+                        sem_vecs = get_embeddings_batch([t for _, t in sem_pending])
+                        # zip 同步迭代 (eid, text) 与对应 vec；保证一一对应
+                        for (eid, _text), vec in zip(sem_pending, sem_vecs):
+                            self._vector_store.add(eid, vec, tenant=_vs_tenant)
+                            ckpt.mark_done(eid)
+                        # 写盘：原子 rename，下次崩了也能续上
+                        ckpt.flush()
+
+                # ─── 第二批：方法 code_snippet 向量 ───
+                # 收集 (eid, name, snippet) 三元组；name 给 Weaviate 做检索标签
+                snip_triples: list[tuple[str, str, str]] = [
+                    (e.id, e.name or "", e.attributes["code_snippet"])
+                    for e in structure_facts.entities
+                    if e.type == EntityType.METHOD
+                       and e.attributes
+                       and e.attributes.get("code_snippet")
+                ]
+                if snip_triples:
+                    snip_exists = ckpt.has_many([eid for eid, _, _ in snip_triples])
+                    snip_pending = [
+                        (eid, name, snip) for eid, name, snip in snip_triples
+                        if not snip_exists.get(eid, False)
+                    ]
+                    _LOG.info(
+                        "[knowledge] code_snippet embedding 续跑：跳过 %d / %d 已完成，需 embed %d 个",
+                        len(snip_triples) - len(snip_pending), len(snip_triples), len(snip_pending),
+                    )
+                    if snip_pending:
+                        snip_vecs = get_embeddings_batch([s for _, _, s in snip_pending])
+                        # getattr + callable check：duck-type 向量库 add 方法（memory store 也有）
+                        add_method = getattr(self._vector_store, "add", None)
+                        if callable(add_method):
+                            for (eid, name, snip), vec in zip(snip_pending, snip_vecs):
+                                add_method(
+                                    eid,
+                                    vec,
+                                    entity_type="method",
+                                    name=name,
+                                    code_snippet=snip,
+                                    tenant=_vs_tenant,
+                                )
+                                ckpt.mark_done(eid)
+                            ckpt.flush()
 
         # 当 graph.backend=neo4j 时，将内存图同步到 Neo4j（graph_config 为空则用默认连接参数）
         self._neo4j_sync_status: Optional[str] = None
