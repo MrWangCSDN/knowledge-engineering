@@ -15,6 +15,7 @@ from src.service.auth_router import router as auth_router
 from src.service.db import Base, get_db
 from src.service.db_models_homepage import Project as ProjectModel
 from src.service.project_router import router as project_router
+from src.service.deps_infra import require_infra_healthy  # Task 7：infra 健康检查 dep（测试里 no-op 覆盖）
 
 
 # ───────── fixtures ─────────
@@ -50,6 +51,8 @@ def client(session_maker):
             yield s
             await s.commit()
     app.dependency_overrides[get_db] = override_db
+    # 测试里跳过 infra 健康检查（infra 不可用不是这批测试的验证目标）
+    app.dependency_overrides[require_infra_healthy] = lambda: None
     return TestClient(app)
 
 

@@ -14,6 +14,7 @@ from src.core.context import AppContext, get_app_context
 from src.knowledge import KnowledgeGraph
 from src.service.auth_dependencies import get_current_user
 from src.service.auth_models import User
+from src.service.deps_infra import require_infra_healthy  # 抽到独立文件避免 router 循环 import
 from src.service.admin_router import router as admin_router
 from src.service.auth_router import router as auth_router
 from src.service.archived_router import router as archived_router  # Task 6：跨工程归档 session 汇总
@@ -351,47 +352,6 @@ async def close_qa_engine() -> None:
             adapter.close()
         except Exception:
             pass
-
-
-async def require_infra_healthy(
-    request: Request,
-    user: User = Depends(get_current_user),
-) -> None:
-    """FastAPI dependency — 任一 critical 依赖不可用则 503。
-
-    设计：[[基础设施健康检查与产品不可用-设计]] §3.2.2
-
-    detail body:
-      - 普通用户：{"code": "INFRA_UNHEALTHY", "message": "系统暂时不可用，请联系管理员"}
-      - Admin   ：上同 + "deps": app.state.infra_status
-
-    用法：在 APIRouter 构造里 dependencies=[Depends(require_infra_healthy)]。
-    """
-    # 取 app.state.infra_status；缺失视作初始化未完成（503 INFRA_UNINITIALIZED）
-    state = getattr(request.app.state, "infra_status", None)
-    if state is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "INFRA_UNINITIALIZED",
-                "message": "系统正在初始化，请稍后重试",
-            },
-        )
-
-    # 任一 ok=False 都视作 unhealthy
-    unhealthy = [k for k, v in state.items() if not v.get("ok")]
-    if not unhealthy:
-        return  # 全 ok，pass
-
-    # detail：普通用户只看友好文案；admin 看 deps 完整字段
-    detail: dict = {
-        "code": "INFRA_UNHEALTHY",
-        "message": "系统暂时不可用，请联系管理员",
-    }
-    if user.is_admin:
-        detail["deps"] = state
-
-    raise HTTPException(status_code=503, detail=detail)
 
 
 @app.get("/health")

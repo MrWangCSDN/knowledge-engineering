@@ -57,6 +57,7 @@ from src.service.auth_security import hash_password   # bcrypt 密码加密
 from src.service.db import get_db                 # FastAPI dependency：提供 DB session
 from src.service.db_models_groups import GroupMember  # group 成员 ORM 模型
 from src.service.db_models_homepage import UserProjectAccess  # project 成员 ORM 模型
+from src.service.deps_infra import require_infra_healthy  # 设计 §3.3：基础设施不可用时返 503
 
 
 # ─── Router 定义 ──────────────────────────────────────────────────────────────
@@ -64,7 +65,12 @@ from src.service.db_models_homepage import UserProjectAccess  # project 成员 O
 # APIRouter：FastAPI 路由分组工具
 # prefix="/admin/users"：所有路由路径前自动加上 "/admin/users"
 # tags=["admin-users"]：在 OpenAPI 文档里把这些接口归到 "admin-users" 分类下
-router = APIRouter(prefix="/admin/users", tags=["admin-users"])
+router = APIRouter(
+    prefix="/admin/users",
+    tags=["admin-users"],
+    # 设计 §3.3：任一 critical 依赖挂 → 503 INFRA_UNHEALTHY
+    dependencies=[Depends(require_infra_healthy)],
+)
 
 
 # ─── Pydantic 请求 / 响应 Schema ──────────────────────────────────────────────

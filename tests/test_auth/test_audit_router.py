@@ -45,6 +45,7 @@ from src.service.db_models_groups import AuditLog, Group, GroupMember  # ORM 模
 from src.service.db_models_homepage import Project            # Project ORM
 from src.service.audit_router import router as audit_router   # 被测 router
 from src.service.group_router import router as group_router   # group_router（注册 /groups/* 路由）
+from src.service.deps_infra import require_infra_healthy      # Task 7：infra 健康检查 dep（测试里 no-op 覆盖）
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -234,6 +235,8 @@ def _make_app(session_maker) -> FastAPI:
 
     # dependency_overrides：把生产用的 get_db 替换为 in-memory SQLite session
     app.dependency_overrides[get_db] = override_db
+    # 测试里跳过 infra 健康检查（infra 不可用不是这批测试的验证目标）
+    app.dependency_overrides[require_infra_healthy] = lambda: None
     return app
 
 

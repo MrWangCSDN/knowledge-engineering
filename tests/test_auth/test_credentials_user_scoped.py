@@ -33,6 +33,7 @@ from src.service.auth_models import User       # ORM 用户模型
 from src.service.auth_router import router as auth_router       # 登录路由
 from src.service.admin_router import router as admin_router     # admin 凭证路由（/admin/credentials/*）
 from src.service.credentials_router import router as credentials_router  # 用户级凭证路由（/credentials/*）
+from src.service.deps_infra import require_infra_healthy  # Task 7：infra 健康检查 dep（测试里 no-op 覆盖）
 from src.service.db import Base, get_db        # ORM 基类（建表用）+ DB 依赖注入
 
 
@@ -133,6 +134,8 @@ def _make_app(session_maker) -> FastAPI:
 
     # dependency_overrides 是一个字典：{原依赖函数: 覆盖函数}
     app.dependency_overrides[get_db] = override_db
+    # 测试里跳过 infra 健康检查（infra 不可用不是这批测试的验证目标）
+    app.dependency_overrides[require_infra_healthy] = lambda: None
     return app
 
 

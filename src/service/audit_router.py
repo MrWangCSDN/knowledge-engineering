@@ -39,13 +39,18 @@ from src.service.db import get_db                          # FastAPI DB session 
 from src.service.db_models_groups import AuditLog          # 审计日志 ORM 模型
 from src.service.db_models_homepage import Project          # Project ORM 模型（查 group 下项目）
 from src.service.permission_deps import require_group_role  # Group 权限 dependency 工厂
+from src.service.deps_infra import require_infra_healthy  # 设计 §3.3：基础设施不可用时返 503
 
 
 # ─── Router 定义 ──────────────────────────────────────────────────────────────
 
 # audit_router 不设 prefix：两条路由的 prefix 不同（/admin 和 /groups），
 # 分别注册即可；在 api.py 里 include_router 时直接加。
-router = APIRouter(tags=["audit"])
+router = APIRouter(
+    tags=["audit"],
+    # 设计 §3.3：任一 critical 依赖挂 → 503 INFRA_UNHEALTHY
+    dependencies=[Depends(require_infra_healthy)],
+)
 
 
 # ─── Pydantic 响应 Schema ─────────────────────────────────────────────────────

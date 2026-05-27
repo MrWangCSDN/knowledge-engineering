@@ -27,11 +27,17 @@ from src.service.auth_models import User  # ORM 用户模型（auth_models 里�
 from src.service.db import get_db  # FastAPI Depends：获取当前请求的 AsyncSession
 from src.service.db_models_homepage import GitCredential  # ORM 模型：git_credentials 表
 from src.service.token_crypto import encrypt_token, token_hint  # Fernet 加密 + UI hint 工具函数
+from src.service.deps_infra import require_infra_healthy  # 设计 §3.3：基础设施不可用时返 503
 
 
 # APIRouter：FastAPI 的路由分组工具，prefix 会自动加到下面每个路由的路径前
 # tags 用于 OpenAPI 文档中的分组标签
-router = APIRouter(prefix="/credentials", tags=["credentials"])
+router = APIRouter(
+    prefix="/credentials",
+    tags=["credentials"],
+    # 设计 §3.3：任一 critical 依赖挂 → 503 INFRA_UNHEALTHY
+    dependencies=[Depends(require_infra_healthy)],
+)
 
 
 # ─── Pydantic 请求/响应 Schema ────────────────────────────────────────────────

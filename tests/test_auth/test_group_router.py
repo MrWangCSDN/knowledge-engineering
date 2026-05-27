@@ -36,6 +36,7 @@ from src.service.db import Base, get_db                 # ORM Base + DB 依赖
 from src.service.db_models_groups import Group, GroupMember  # Group / GroupMember ORM
 from src.service.db_models_homepage import Project      # Project ORM（用于 delete-with-projects 场景）
 from src.service.group_router import router as group_router  # 被测 router（Task 7 实现）
+from src.service.deps_infra import require_infra_healthy  # Task 7：infra 健康检查 dep（测试里 no-op 覆盖）
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -137,6 +138,8 @@ def _make_app(session_maker) -> FastAPI:
 
     # 把 get_db 替换为 override_db
     app.dependency_overrides[get_db] = override_db
+    # 测试里跳过 infra 健康检查（infra 不可用不是这批测试的验证目标）
+    app.dependency_overrides[require_infra_healthy] = lambda: None
     return app
 
 

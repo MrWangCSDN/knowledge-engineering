@@ -49,10 +49,16 @@ from src.service.memory.service import recall_memory_block
 # 用法：在 @router.xxx(..., dependencies=[Depends(require_project_role("reporter"))]) 中声明
 # FastAPI 的 dependencies 参数：不需要路由函数参数接收返回值，只需副作用（权限检查）时使用
 from src.service.permission_deps import require_project_role
+from src.service.deps_infra import require_infra_healthy  # 设计 §3.3：基础设施不可用时返 503
 
 _log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/projects/{project_id}/qa", tags=["qa"])
+router = APIRouter(
+    prefix="/projects/{project_id}/qa",
+    tags=["qa"],
+    # 设计 §3.3：任一 critical 依赖挂 → 503 INFRA_UNHEALTHY
+    dependencies=[Depends(require_infra_healthy)],
+)
 
 
 # ─── per-request 构造 helpers（Task 22） ─────────────────────────────────────

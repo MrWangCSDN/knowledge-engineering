@@ -40,7 +40,8 @@ from src.service.auth_router import router as auth_router        # 登录路由�
 from src.service.db import Base, get_db                          # ORM Base + DB 依赖
 from src.service.db_models_groups import Group, GroupMember      # Group / GroupMember ORM
 from src.service.db_models_homepage import Project, UserProjectAccess  # Project / 成员 ORM
-from src.service.project_member_router import router as project_member_router  # 被测 router
+from src.service.project_member_router import router as project_member_router  # 被測 router
+from src.service.deps_infra import require_infra_healthy  # Task 7：infra 健康检查 dep（测试里 no-op 覆盖）
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -134,6 +135,8 @@ def _make_app(session_maker) -> FastAPI:
 
     # dependency_overrides：FastAPI 的 DI 覆盖机制
     app.dependency_overrides[get_db] = override_db
+    # 测试里跳过 infra 健康检查（infra 不可用不是这批测试的验证目标）
+    app.dependency_overrides[require_infra_healthy] = lambda: None
     return app
 
 

@@ -50,13 +50,19 @@ from src.service.permission_deps import (
     ROLE_RANK,               # role 等级字典：{'reporter': 1, 'maintainer': 2, 'owner': 3}
     require_project_role,    # dependency 工厂：检查 role ≥ min_role
 )
+from src.service.deps_infra import require_infra_healthy  # 设计 §3.3：基础设施不可用时返 503
 
 
 # ─── Router 定义 ──────────────────────────────────────────────────────────────
 
 # APIRouter：FastAPI 路由分组工具
 # prefix="/projects"：所有路由路径前自动加上 "/projects"
-router = APIRouter(prefix="/projects", tags=["project-members"])
+router = APIRouter(
+    prefix="/projects",
+    tags=["project-members"],
+    # 设计 §3.3：任一 critical 依赖挂 → 503 INFRA_UNHEALTHY
+    dependencies=[Depends(require_infra_healthy)],
+)
 
 
 # ─── Pydantic 请求 / 响应 Schema ──────────────────────────────────────────────

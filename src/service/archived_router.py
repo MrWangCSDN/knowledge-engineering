@@ -14,6 +14,7 @@ from src.service.auth_dependencies import get_current_user
 from src.service.auth_models import User
 from src.service.db import get_db
 from src.service.db_models_homepage import Project as ProjectModel, QASession
+from src.service.deps_infra import require_infra_healthy  # 设计 §3.3：基础设施不可用时返 503
 
 
 def _iso(dt: datetime) -> str:
@@ -26,7 +27,12 @@ def _iso(dt: datetime) -> str:
 
 # prefix=/user：用户维度（不绑定 project），与 qa_router 的 /projects/.. 平级
 # 注：/api 前缀由 vite 代理 + production nginx 负责添加和剥离
-router = APIRouter(prefix="/user", tags=["user-archived"])
+router = APIRouter(
+    prefix="/user",
+    tags=["user-archived"],
+    # 设计 §3.3：任一 critical 依赖挂 → 503 INFRA_UNHEALTHY
+    dependencies=[Depends(require_infra_healthy)],
+)
 
 
 class _ArchivedSessionDTO(BaseModel):

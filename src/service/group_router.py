@@ -62,6 +62,7 @@ from src.service.permission_deps import (
     require_group_role,    # dependency 工厂：检查 role ≥ min_role
     resolve_group_role,    # 计算用户在 group 的继承 role（不含 Instance Admin 覆盖）
 )
+from src.service.deps_infra import require_infra_healthy  # 设计 §3.3：基础设施不可用时返 503
 
 
 # ─── 常量 ──────────────────────────────────────────────────────────────────────
@@ -76,7 +77,12 @@ MAX_GROUP_DEPTH = 3
 # APIRouter：FastAPI 的路由分组工具
 # prefix="/groups"：所有路由路径前自动加上 "/groups"
 # tags=["groups"]：在 OpenAPI 文档里把这些接口归到 "groups" 分类下
-router = APIRouter(prefix="/groups", tags=["groups"])
+router = APIRouter(
+    prefix="/groups",
+    tags=["groups"],
+    # 设计 §3.3：任一 critical 依赖挂 → 503 INFRA_UNHEALTHY
+    dependencies=[Depends(require_infra_healthy)],
+)
 
 
 # ─── Pydantic 请求 / 响应 Schema ──────────────────────────────────────────────

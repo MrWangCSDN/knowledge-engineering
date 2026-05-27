@@ -29,6 +29,7 @@ from src.service.qa_engine.retriever import RetrievedContext
 from src.service.qa_engine.router import SkillRouter
 from src.service.qa_engine.synthesizer import SynthesizedAnswer
 from src.service.qa_router import router as qa_router
+from src.service.deps_infra import require_infra_healthy  # Task 7：infra 健康检查 dep（测试里 no-op 覆盖）
 
 
 # ───────── fixtures ─────────
@@ -61,6 +62,8 @@ def _build_app(session_maker, *, retriever=None, synthesizer=None):
             yield s
             await s.commit()
     app.dependency_overrides[get_db] = override_db
+    # 测试里跳过 infra 健康检查（infra 不可用不是这批测试的验证目标）
+    app.dependency_overrides[require_infra_healthy] = lambda: None
 
     # 默认 mock：
     if retriever is None:

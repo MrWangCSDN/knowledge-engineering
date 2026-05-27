@@ -17,7 +17,7 @@ from fastapi import HTTPException
 @pytest.mark.asyncio
 async def test_require_infra_healthy_all_ok_passes():
     """5 个依赖全 ok → pass（不抛）。"""
-    from src.service.api import require_infra_healthy
+    from src.service.deps_infra import require_infra_healthy
 
     request = MagicMock()
     request.app.state.infra_status = {
@@ -35,7 +35,7 @@ async def test_require_infra_healthy_all_ok_passes():
 @pytest.mark.asyncio
 async def test_require_infra_healthy_partial_unhealthy_503_normal_user():
     """普通用户：任一挂 → 503，detail 只含 code+message，无 deps。"""
-    from src.service.api import require_infra_healthy
+    from src.service.deps_infra import require_infra_healthy
 
     request = MagicMock()
     request.app.state.infra_status = {
@@ -60,7 +60,7 @@ async def test_require_infra_healthy_partial_unhealthy_503_normal_user():
 @pytest.mark.asyncio
 async def test_require_infra_healthy_admin_sees_deps():
     """Admin 用户：detail 含 deps 完整字段（含 error 字符串）。"""
-    from src.service.api import require_infra_healthy
+    from src.service.deps_infra import require_infra_healthy
 
     request = MagicMock()
     request.app.state.infra_status = {
@@ -83,7 +83,7 @@ async def test_require_infra_healthy_admin_sees_deps():
 @pytest.mark.asyncio
 async def test_require_infra_healthy_no_state_initialized():
     """app.state.infra_status 缺失 → 503 INFRA_UNINITIALIZED（不应正常发生）。"""
-    from src.service.api import require_infra_healthy
+    from src.service.deps_infra import require_infra_healthy
 
     request = MagicMock()
     # 用 spec 不让 MagicMock 自动伪造属性

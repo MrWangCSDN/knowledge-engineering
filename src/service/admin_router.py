@@ -45,9 +45,15 @@ from src.service.db_models_homepage import (
     GitCredential,
     Project as ProjectModel,
 )
+from src.service.deps_infra import require_infra_healthy  # 设计 §3.3：基础设施不可用时返 503
 
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(
+    prefix="/admin",
+    tags=["admin"],
+    # 设计 §3.3：任一 critical 依赖挂 → 503 INFRA_UNHEALTHY
+    dependencies=[Depends(require_infra_healthy)],
+)
 
 
 # ─── 工具：admin 守卫 ───────────────────────────────────────────────────

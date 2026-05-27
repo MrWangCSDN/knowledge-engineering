@@ -31,9 +31,15 @@ from src.service.project_models import (
     ProjectListResponse,
     ProjectStats,
 )
+from src.service.deps_infra import require_infra_healthy  # 设计 §3.3：基础设施不可用时返 503
 
 
-router = APIRouter(prefix="/projects", tags=["projects"])
+router = APIRouter(
+    prefix="/projects",
+    tags=["projects"],
+    # 设计 §3.3：任一 critical 依赖挂 → 503 INFRA_UNHEALTHY
+    dependencies=[Depends(require_infra_healthy)],
+)
 
 
 # ─── 工具：ORM → Pydantic 转换 ──────────────────────────────────────────────
