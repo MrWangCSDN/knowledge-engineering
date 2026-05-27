@@ -28,7 +28,6 @@ async def test_health_unauthenticated_returns_basic_status():
         "neo4j": {"ok": True},
         "weaviate": {"ok": True},
         "dashscope": {"ok": True},
-        "ollama": {"ok": True},
     }
 
     # async def 定义异步函数；*a/**k 接收任意参数，这里只是为了签名兼容
@@ -67,7 +66,6 @@ async def test_health_unhealthy_still_returns_200():
         "neo4j": {"ok": False, "error": "down"},
         "weaviate": {"ok": False, "error": "down"},
         "dashscope": {"ok": False, "error": "down"},
-        "ollama": {"ok": False, "error": "down"},
     }
 
     async def fake_check(*a, **k):

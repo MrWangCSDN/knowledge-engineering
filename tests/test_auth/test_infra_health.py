@@ -1,6 +1,8 @@
-"""infra_health.py 单元测试 — 5 ping function + check_all_deps。
+"""infra_health.py 单元测试 — 4 ping function + check_all_deps。
 
 策略：mock 底层 client，不连真实服务。验证 ok/timeout/error/config-missing 四类返回。
+
+历史：v1 含 _ping_ollama（5 ping）；v2 起 embedding 切 DashScope，删除 Ollama 测试。
 """
 import asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -168,38 +170,11 @@ async def test_ping_dashscope_401(httpx_mock):
     assert "401" in result["error"]
 
 
-# ───── _ping_ollama 测试 ───────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_ping_ollama_config_missing():
-    from src.service.infra_health import _ping_ollama
-    result = await _ping_ollama(None)
-    assert result == {"ok": False, "error": "OLLAMA_BASE_URL not configured"}
-
-
-@pytest.mark.asyncio
-async def test_ping_ollama_success(httpx_mock):
-    """GET /api/tags 返 200 → ok=True。"""
-    from src.service.infra_health import _ping_ollama
-    httpx_mock.add_response(url="http://localhost:11434/api/tags", status_code=200, json={"models": []})
-    result = await _ping_ollama("http://localhost:11434")
-    assert result == {"ok": True}
-
-
-@pytest.mark.asyncio
-async def test_ping_ollama_connection_refused():
-    """真实连接失败（无 mock）→ ok=False。"""
-    from src.service.infra_health import _ping_ollama
-    result = await _ping_ollama("http://localhost:65535")
-    assert result["ok"] is False
-    assert "Connect" in result["error"] or "refused" in result["error"].lower()
-
-
 # ───── check_all_deps 编排测试 ─────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_check_all_deps_returns_5_keys(monkeypatch):
-    """check_all_deps 返回 dict 含 5 个 critical 依赖的 key。"""
+async def test_check_all_deps_returns_4_keys(monkeypatch):
+    """check_all_deps 返回 dict 含 4 个 critical 依赖的 key（v2 起去掉 ollama）。"""
     from src.service.infra_health import check_all_deps
 
     async def fake_ok(*a, **k):
@@ -209,12 +184,11 @@ async def test_check_all_deps_returns_5_keys(monkeypatch):
     monkeypatch.setattr("src.service.infra_health._ping_neo4j", fake_ok)
     monkeypatch.setattr("src.service.infra_health._ping_weaviate", fake_ok)
     monkeypatch.setattr("src.service.infra_health._ping_dashscope", fake_ok)
-    monkeypatch.setattr("src.service.infra_health._ping_ollama", fake_ok)
 
     fake_state = MagicMock()
     result = await check_all_deps(fake_state)
 
-    assert set(result.keys()) == {"mysql", "neo4j", "weaviate", "dashscope", "ollama"}
+    assert set(result.keys()) == {"mysql", "neo4j", "weaviate", "dashscope"}
     assert all(v["ok"] for v in result.values())
 
 
@@ -233,7 +207,6 @@ async def test_check_all_deps_partial_failure(monkeypatch):
     monkeypatch.setattr("src.service.infra_health._ping_neo4j", fake_fail)
     monkeypatch.setattr("src.service.infra_health._ping_weaviate", fake_ok)
     monkeypatch.setattr("src.service.infra_health._ping_dashscope", fake_ok)
-    monkeypatch.setattr("src.service.infra_health._ping_ollama", fake_ok)
 
     fake_state = MagicMock()
     result = await check_all_deps(fake_state)
@@ -244,7 +217,7 @@ async def test_check_all_deps_partial_failure(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_check_all_deps_concurrent(monkeypatch):
-    """5 个 ping 应该并发跑而非串行 — 用 sleep 检测时间。"""
+    """4 个 ping 应该并发跑而非串行 — 用 sleep 检测时间。"""
     from src.service.infra_health import check_all_deps
     import time
 
@@ -252,7 +225,7 @@ async def test_check_all_deps_concurrent(monkeypatch):
         await asyncio.sleep(0.5)
         return {"ok": True}
 
-    for name in ("_ping_mysql", "_ping_neo4j", "_ping_weaviate", "_ping_dashscope", "_ping_ollama"):
+    for name in ("_ping_mysql", "_ping_neo4j", "_ping_weaviate", "_ping_dashscope"):
         monkeypatch.setattr(f"src.service.infra_health.{name}", slow_ok)
 
     fake_state = MagicMock()
@@ -260,5 +233,5 @@ async def test_check_all_deps_concurrent(monkeypatch):
     await check_all_deps(fake_state)
     elapsed = time.time() - t0
 
-    # 串行需要 5 * 0.5s = 2.5s；并发应该 < 1s
+    # 串行需要 4 * 0.5s = 2.0s；并发应该 < 1s
     assert elapsed < 1.0, f"check_all_deps 应该并发，实际 {elapsed:.2f}s"

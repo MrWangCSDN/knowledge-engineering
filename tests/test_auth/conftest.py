@@ -35,8 +35,7 @@ def _stub_infra_status():
         "mysql": {"ok": True},       # MySQL 数据库
         "neo4j": {"ok": True},       # Neo4j 图数据库
         "weaviate": {"ok": True},    # Weaviate 向量数据库
-        "dashscope": {"ok": True},   # 阿里云 DashScope LLM API
-        "ollama": {"ok": True},      # 本地 Ollama LLM
+        "dashscope": {"ok": True},   # 阿里云 DashScope LLM + embedding API
     }
     # yield 关键字：让 fixture 在测试运行前设置，测试结束后继续运行（这里什么也不做）
     # 相当于：setup → yield → teardown（teardown 部分在 yield 后写）

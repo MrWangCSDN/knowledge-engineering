@@ -36,12 +36,11 @@ class DepStatus(TypedDict):
 
 
 class InfraStatus(TypedDict):
-    """5 个 critical 依赖的整体状态。"""
+    """4 个 critical 依赖的整体状态（v2 起 Ollama 已切 DashScope 不再依赖）。"""
     mysql: DepStatus
     neo4j: DepStatus
     weaviate: DepStatus
     dashscope: DepStatus
-    ollama: DepStatus
 
 
 # ─── _ping_mysql ─────────────────────────────────────────────────────────
@@ -205,52 +204,25 @@ async def _ping_dashscope(api_key: str | None) -> DepStatus:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-# ─── _ping_ollama ────────────────────────────────────────────────────────
-
-async def _ping_ollama(base_url: str | None) -> DepStatus:
-    """ping Ollama：GET /api/tags 拉模型列表，最轻量的健康检查。
-
-    :param base_url: Ollama HTTP base，本地通常 'http://127.0.0.1:11434'
-    :returns: {"ok": True} 或 {"ok": False, "error": "..."}
-    """
-    # config sanity：URL 为 None / 空 → 短路
-    if not base_url:
-        return {"ok": False, "error": "OLLAMA_BASE_URL not configured"}
-
-    # /api/tags：返回已拉取模型列表；空列表也是 200，说明服务在跑
-    tags_url = base_url.rstrip("/") + "/api/tags"
-
-    try:
-        async with httpx.AsyncClient(timeout=PING_TIMEOUT_SEC) as client:
-            resp = await client.get(tags_url)
-            if resp.status_code == 200:
-                return {"ok": True}
-            return {"ok": False, "error": f"Ollama status={resp.status_code}"}
-
-    except httpx.TimeoutException:
-        return {"ok": False, "error": f"Ollama ping timeout (>{PING_TIMEOUT_SEC}s)"}
-    except Exception as e:
-        # ConnectError（连接被拒 / 端口未监听）/ ConnectTimeout 等都到这里
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-
-
 # ─── check_all_deps 编排 ────────────────────────────────────────────────
 
 async def check_all_deps(app_state) -> InfraStatus:
-    """并发 ping 5 个 critical 依赖，返回完整状态。
+    """并发 ping 4 个 critical 依赖，返回完整状态。
 
-    从 os.environ 读 5 个依赖的 config（与 service/api.py 中 endpoint init 用的同源），
+    从 os.environ 读 4 个依赖的 config（与 service/api.py 中 endpoint init 用的同源），
     不读 app_state（app_state 当前留作未来扩展点）。
 
     并发用 asyncio.gather；每个 ping 内部自己有 5s timeout，所以 gather 总时长 ≤ 5s。
 
+    历史：v1 含 ollama ping；v2 起 embedding 切 DashScope，删除 Ollama 依赖。
+
     :param app_state: FastAPI app.state，留作未来扩展（当前未使用）
     :returns: {"mysql": DepStatus, "neo4j": DepStatus, "weaviate": DepStatus,
-               "dashscope": DepStatus, "ollama": DepStatus}
+               "dashscope": DepStatus}
     """
     import os  # os 模块提供读取环境变量的 os.environ.get()
 
-    # 从环境变量读 5 个 config；与 service/api.py 中 endpoint init 同源
+    # 从环境变量读 4 个 config；与 service/api.py 中 endpoint init 同源
     db_url = os.environ.get("KE_DB_URL")
     neo4j_uri = os.environ.get("NEO4J_URI")
     neo4j_user = os.environ.get("NEO4J_USER", "neo4j")  # 默认值 "neo4j" 是 Neo4j 的默认用户名
@@ -258,18 +230,15 @@ async def check_all_deps(app_state) -> InfraStatus:
     weaviate_url = os.environ.get("WEAVIATE_URL")
     weaviate_api_key = os.environ.get("WEAVIATE_API_KEY")
     dashscope_api_key = os.environ.get("DASHSCOPE_API_KEY")
-    # OLLAMA_BASE_URL 默认 127.0.0.1:11434（与 yaml 的 ollama_base_url 一致）
-    ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 
     # asyncio.gather：并发 await 多个 coroutine，按入参顺序返回结果列表
-    # 等效于"同时发出 5 个网络请求，等所有都完成后一次性拿结果"
+    # 等效于"同时发出 4 个网络请求，等所有都完成后一次性拿结果"
     # 与串行 await 逐个调用相比，总耗时 = max(单个耗时) 而非 sum(单个耗时)
-    mysql_r, neo4j_r, weaviate_r, dashscope_r, ollama_r = await asyncio.gather(
+    mysql_r, neo4j_r, weaviate_r, dashscope_r = await asyncio.gather(
         _ping_mysql(db_url),
         _ping_neo4j(neo4j_uri, neo4j_user, neo4j_password),
         _ping_weaviate(weaviate_url, weaviate_api_key),
         _ping_dashscope(dashscope_api_key),
-        _ping_ollama(ollama_base_url),
     )
 
     # 按 key 名组装返回 dict，与 InfraStatus TypedDict 对应
@@ -278,5 +247,4 @@ async def check_all_deps(app_state) -> InfraStatus:
         "neo4j": neo4j_r,
         "weaviate": weaviate_r,
         "dashscope": dashscope_r,
-        "ollama": ollama_r,
     }

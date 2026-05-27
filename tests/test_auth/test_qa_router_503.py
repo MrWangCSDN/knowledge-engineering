@@ -33,7 +33,6 @@ async def test_qa_explain_503_when_neo4j_down():
         "neo4j": {"ok": False, "error": "Connection refused"},
         "weaviate": {"ok": True},
         "dashscope": {"ok": True},
-        "ollama": {"ok": True},
     }
 
     # ASGITransport：让 httpx 直接调用 ASGI app，不需要启动真实的 HTTP 服务器

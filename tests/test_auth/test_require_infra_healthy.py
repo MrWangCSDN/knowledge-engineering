@@ -25,7 +25,6 @@ async def test_require_infra_healthy_all_ok_passes():
         "neo4j": {"ok": True},
         "weaviate": {"ok": True},
         "dashscope": {"ok": True},
-        "ollama": {"ok": True},
     }
     user = MagicMock(is_admin=False)
     # 不抛即 pass
@@ -43,7 +42,6 @@ async def test_require_infra_healthy_partial_unhealthy_503_normal_user():
         "neo4j": {"ok": False, "error": "Connection refused"},
         "weaviate": {"ok": True},
         "dashscope": {"ok": True},
-        "ollama": {"ok": True},
     }
     user = MagicMock(is_admin=False)
 
@@ -68,7 +66,6 @@ async def test_require_infra_healthy_admin_sees_deps():
         "neo4j": {"ok": False, "error": "Connection refused"},
         "weaviate": {"ok": True},
         "dashscope": {"ok": True},
-        "ollama": {"ok": True},
     }
     user = MagicMock(is_admin=True)
 
