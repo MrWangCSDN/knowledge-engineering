@@ -241,7 +241,7 @@ def _try_connect_backends() -> tuple[Any, Any, Any, Any]:
     任一步失败都视作整体失败 → 退回 StubRetriever（避免半连接状态）。
 
     :return: (WeaviateBusinessInterpretStore 或 None, Neo4jGraphBackend 或 None,
-              WeaviateVectorStore 或 None, WeaviateMethodInterpretStore 或 None)
+              WeaviateVectorStore 或 None, WeaviateTopologicalInterpretStore 或 None)
     """
     import os
     import logging
@@ -310,8 +310,8 @@ def _try_connect_backends() -> tuple[Any, Any, Any, Any]:
     except Exception as e:
         _log.warning("[startup] Weaviate CodeEntity store 连接失败（ke_read_entity 不可用）: %s", e)
     try:
-        from src.knowledge.weaviate_interpretation_store import WeaviateMethodInterpretStore
-        method_interp_store = WeaviateMethodInterpretStore(
+        from src.knowledge.weaviate_interpretation_store import WeaviateTopologicalInterpretStore
+        method_interp_store = WeaviateTopologicalInterpretStore(
             url=weaviate_url,
             grpc_port=weaviate_grpc_port,
             dimension=weaviate_dimension,

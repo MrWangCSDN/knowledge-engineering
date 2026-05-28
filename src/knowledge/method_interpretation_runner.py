@@ -11,11 +11,11 @@ from typing import Any, Callable, Optional
 from src.models.structure import EntityType, RelationType, StructureFacts, StructureEntity, StructureRelation
 from src.core.domain_enums import InterpretPhase
 from src.core.weaviate_defaults import (
-    DEFAULT_COLLECTION_METHOD_INTERPRETATION,
+    DEFAULT_COLLECTION_TOPOLOGICAL_INTERPRETATION,
     DEFAULT_WEAVIATE_GRPC_PORT,
     DEFAULT_WEAVIATE_HTTP_URL,
 )
-from src.knowledge.weaviate_interpretation_store import WeaviateMethodInterpretStore
+from src.knowledge.weaviate_interpretation_store import WeaviateTopologicalInterpretStore
 from src.knowledge.interpretation_store_adapter import MethodInterpretationStoreAdapter
 from src.knowledge.llm import LLMProviderFactory
 from src.knowledge.base_interpretation_runner import BaseInterpretationRunner
@@ -176,7 +176,7 @@ def run_method_interpretations(
     对每个含 code_snippet 的方法调用 LLM，写入 Weaviate。
     单条失败则跳过，不阻塞全库。
 
-    ``interpret_cfg`` / ``vectordb_cfg`` 推荐使用 ``MethodInterpretationConfig`` /
+    ``interpret_cfg`` / ``vectordb_cfg`` 推荐使用 ``TopologicalInterpretationConfig`` /
     ``VectorDBConfig``；仍兼容 plain dict（经 Pydantic 校验）。
     """
     mi = coerce_method_interpretation_config(interpret_cfg)
@@ -220,10 +220,10 @@ def run_method_interpretations(
     ok, fail = 0, 0
 
     try:
-        weaviate_store = WeaviateMethodInterpretStore(
+        weaviate_store = WeaviateTopologicalInterpretStore(
             url=vinterp.weaviate_url or DEFAULT_WEAVIATE_HTTP_URL,
             grpc_port=int(vinterp.weaviate_grpc_port or DEFAULT_WEAVIATE_GRPC_PORT),
-            collection_name=vinterp.collection_name or DEFAULT_COLLECTION_METHOD_INTERPRETATION,
+            collection_name=vinterp.collection_name or DEFAULT_COLLECTION_TOPOLOGICAL_INTERPRETATION,
             dimension=dim,
             api_key=vinterp.weaviate_api_key,
         )
@@ -382,7 +382,7 @@ def run_method_interpretations(
             runner.step(
                 f"技术解读完成：本轮成功 {ok}，失败 {fail}；"
                 f"累计已有解读 {already_done + ok} / 候选 {total_candidates}"
-                f"，已写入 Weaviate「{vinterp.collection_name or DEFAULT_COLLECTION_METHOD_INTERPRETATION}」"
+                f"，已写入 Weaviate「{vinterp.collection_name or DEFAULT_COLLECTION_TOPOLOGICAL_INTERPRETATION}」"
             )
         if runner.progress_callback:
             runner.progress(100, 100, "流水线全部完成")

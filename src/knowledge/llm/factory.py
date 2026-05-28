@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from src.config.models import BusinessInterpretationConfig, MethodInterpretationConfig
+from src.config.models import TopologicalInterpretationConfig
 
 from .ollama import OllamaProvider
 from .protocol import LLMProvider
@@ -156,7 +156,7 @@ class LLMProviderFactory:
 
     @staticmethod
     def interpretation_llm_kwargs_from_config(
-        m: MethodInterpretationConfig | BusinessInterpretationConfig,
+        m: TopologicalInterpretationConfig,
     ) -> dict[str, Any]:
         """从方法/业务解读配置对象提取 ``create_with_meta`` 所需 kwargs（含回退开关）。"""
         return {
@@ -175,14 +175,7 @@ class LLMProviderFactory:
         }
 
     @staticmethod
-    def from_method_interpretation(m: MethodInterpretationConfig) -> LLMProviderSelection:
-        return LLMProviderFactory.create_with_meta(
-            backend=m.llm_backend,
-            **LLMProviderFactory.interpretation_llm_kwargs_from_config(m),
-        )
-
-    @staticmethod
-    def from_business_interpretation(m: BusinessInterpretationConfig) -> LLMProviderSelection:
+    def from_method_interpretation(m: TopologicalInterpretationConfig) -> LLMProviderSelection:
         return LLMProviderFactory.create_with_meta(
             backend=m.llm_backend,
             **LLMProviderFactory.interpretation_llm_kwargs_from_config(m),

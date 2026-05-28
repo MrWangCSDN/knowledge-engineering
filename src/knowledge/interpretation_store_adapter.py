@@ -27,7 +27,7 @@ class InterpretationStoreAdapterProtocol(Protocol, Generic[K]):
 
 
 class MethodInterpretationStoreAdapter(InterpretationStoreAdapterProtocol[str]):
-    """适配器：把 WeaviateMethodInterpretStore 统一成方法解读存储接口。"""
+    """适配器：把 WeaviateTopologicalInterpretStore 统一成方法解读存储接口。"""
 
     def __init__(self, store: Any):
         self._store = store

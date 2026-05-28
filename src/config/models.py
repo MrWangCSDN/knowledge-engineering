@@ -6,9 +6,8 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.core.weaviate_defaults import (
-    DEFAULT_COLLECTION_BUSINESS_INTERPRETATION,
     DEFAULT_COLLECTION_CODE_ENTITY,
-    DEFAULT_COLLECTION_METHOD_INTERPRETATION,
+    DEFAULT_COLLECTION_TOPOLOGICAL_INTERPRETATION,
     DEFAULT_WEAVIATE_GRPC_PORT,
     DEFAULT_WEAVIATE_HTTP_URL,
 )
@@ -72,8 +71,8 @@ class VectorDBConfig(BaseModel):
     allow_fallback_to_memory: bool = False
 
 
-class MethodInterpretationConfig(BaseModel):
-    """knowledge.method_interpretation 配置。"""
+class TopologicalInterpretationConfig(BaseModel):
+    """knowledge.topological_interpretation 配置（原 method_interpretation）。"""
     enabled: bool = False
     language: str = "zh"
     ollama_base_url: str = "http://127.0.0.1:11434"
@@ -98,30 +97,6 @@ class MethodInterpretationConfig(BaseModel):
     multi_providers: Optional[list[dict]] = None
 
 
-class BusinessInterpretationConfig(BaseModel):
-    """knowledge.business_interpretation 配置。"""
-    enabled: bool = False
-    language: str = "zh"
-    ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_model: str = "qwen2.5:32b"
-    timeout_seconds: int = 180
-    max_classes: int = 0
-    max_apis: int = 0
-    max_modules: int = 0
-    max_workers: int = 4  # LLM 并发调用数
-    # ollama | openai | anthropic | multi
-    llm_backend: str = "ollama"
-    openai_api_key: Optional[str] = None
-    openai_base_url: Optional[str] = None
-    openai_model: str = "gpt-4o-mini"
-    openai_max_tokens: Optional[int] = None
-    anthropic_api_key: Optional[str] = None
-    anthropic_model: str = "claude-3-5-sonnet-20241022"
-    anthropic_max_tokens: int = 8192
-    llm_allow_fallback_to_ollama: bool = False
-    multi_providers: Optional[list[dict]] = None
-
-
 class SnapshotConfig(BaseModel):
     """knowledge.snapshot 配置。"""
     save_after_build: bool = False
@@ -136,13 +111,9 @@ class KnowledgeConfig(BaseModel):
         default_factory=lambda: VectorDBConfig(collection_name=DEFAULT_COLLECTION_CODE_ENTITY)
     )
     vectordb_interpret: VectorDBConfig = Field(
-        default_factory=lambda: VectorDBConfig(collection_name=DEFAULT_COLLECTION_METHOD_INTERPRETATION)
+        default_factory=lambda: VectorDBConfig(collection_name=DEFAULT_COLLECTION_TOPOLOGICAL_INTERPRETATION)
     )
-    vectordb_business: VectorDBConfig = Field(
-        default_factory=lambda: VectorDBConfig(collection_name=DEFAULT_COLLECTION_BUSINESS_INTERPRETATION)
-    )
-    method_interpretation: MethodInterpretationConfig = Field(default_factory=MethodInterpretationConfig)
-    business_interpretation: BusinessInterpretationConfig = Field(default_factory=BusinessInterpretationConfig)
+    topological_interpretation: TopologicalInterpretationConfig = Field(default_factory=TopologicalInterpretationConfig)
     snapshot: SnapshotConfig = Field(default_factory=SnapshotConfig)
 
     # Pydantic v2 弃用 class-based Config，改为 model_config
@@ -159,9 +130,9 @@ class KnowledgeConfig(BaseModel):
         graph = GraphConfig.model_validate(r.get("graph") or {})
         vcode = VectorDBConfig.model_validate(r.get("vectordb-code") or {})
         vinterp = VectorDBConfig.model_validate(r.get("vectordb-interpret") or {})
-        vbiz = VectorDBConfig.model_validate(r.get("vectordb-business") or {})
-        mi = MethodInterpretationConfig.model_validate(r.get("method_interpretation") or {})
-        bi = BusinessInterpretationConfig.model_validate(r.get("business_interpretation") or {})
+        ti = TopologicalInterpretationConfig.model_validate(
+            r.get("topological_interpretation") or r.get("method_interpretation") or {}
+        )
         snap = SnapshotConfig.model_validate(r.get("snapshot") or {})
         return cls(
             pipeline=pipe,
@@ -169,15 +140,13 @@ class KnowledgeConfig(BaseModel):
             graph=graph,
             vectordb_code=vcode,
             vectordb_interpret=vinterp,
-            vectordb_business=vbiz,
-            method_interpretation=mi,
-            business_interpretation=bi,
+            topological_interpretation=ti,
             snapshot=snap,
         )
 
     def to_interpret_dict(self) -> dict[str, Any]:
-        """导出 method_interpretation 为 dict（如 ``ProjectConfig.model_dump``、外部脚本）。"""
-        m = self.method_interpretation
+        """导出 topological_interpretation 为 dict（如 ``ProjectConfig.model_dump``、外部脚本）。"""
+        m = self.topological_interpretation
         return {
             "enabled": m.enabled,
             "language": m.language,
@@ -196,46 +165,9 @@ class KnowledgeConfig(BaseModel):
             "llm_allow_fallback_to_ollama": m.llm_allow_fallback_to_ollama,
         }
 
-    def to_business_interpret_dict(self) -> dict[str, Any]:
-        """导出 business_interpretation 为 dict（如 ``ProjectConfig.model_dump``、外部脚本）。"""
-        b = self.business_interpretation
-        return {
-            "enabled": b.enabled,
-            "language": b.language,
-            "ollama_base_url": b.ollama_base_url,
-            "ollama_model": b.ollama_model,
-            "timeout_seconds": b.timeout_seconds,
-            "max_classes": b.max_classes,
-            "max_apis": b.max_apis,
-            "max_modules": b.max_modules,
-            "llm_backend": b.llm_backend,
-            "openai_api_key": b.openai_api_key,
-            "openai_base_url": b.openai_base_url,
-            "openai_model": b.openai_model,
-            "openai_max_tokens": b.openai_max_tokens,
-            "anthropic_api_key": b.anthropic_api_key,
-            "anthropic_model": b.anthropic_model,
-            "anthropic_max_tokens": b.anthropic_max_tokens,
-            "llm_allow_fallback_to_ollama": b.llm_allow_fallback_to_ollama,
-        }
-
     def to_vectordb_interpret_dict(self) -> dict[str, Any]:
         """导出 vectordb-interpret 为 dict；流水线内优先使用 ``self.vectordb_interpret`` 对象。"""
         v = self.vectordb_interpret
-        return {
-            "enabled": v.enabled,
-            "backend": v.backend,
-            "dimension": v.dimension,
-            "weaviate_url": v.weaviate_url,
-            "weaviate_grpc_port": v.weaviate_grpc_port,
-            "weaviate_api_key": v.weaviate_api_key,
-            "collection_name": v.collection_name,
-            "allow_fallback_to_memory": v.allow_fallback_to_memory,
-        }
-
-    def to_vectordb_business_dict(self) -> dict[str, Any]:
-        """导出 vectordb-business 为 dict；流水线内优先使用 ``self.vectordb_business`` 对象。"""
-        v = self.vectordb_business
         return {
             "enabled": v.enabled,
             "backend": v.backend,
@@ -335,9 +267,7 @@ class ProjectConfig(BaseModel):
                 "graph": self.knowledge.graph.model_dump(),
                 "vectordb-code": self.knowledge.to_vectordb_code_dict(),
                 "vectordb-interpret": self.knowledge.to_vectordb_interpret_dict(),
-                "vectordb-business": self.knowledge.to_vectordb_business_dict(),
-                "method_interpretation": self.knowledge.to_interpret_dict(),
-                "business_interpretation": self.knowledge.to_business_interpret_dict(),
+                "topological_interpretation": self.knowledge.to_interpret_dict(),
                 "snapshot": self.knowledge.to_snapshot_dict(),
             },
             "service": self.service.model_dump(),

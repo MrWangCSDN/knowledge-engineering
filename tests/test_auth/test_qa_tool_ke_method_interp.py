@@ -8,7 +8,7 @@ from src.service.qa_engine.tools.ke_method_interp import build_ke_method_interp_
 
 
 class _FakeInterpStore:
-    """模拟 WeaviateMethodInterpretStore.get_by_method_id。"""
+    """模拟 WeaviateTopologicalInterpretStore.get_by_method_id。"""
     _data = {
         "method//abc": {
             "method_entity_id": "method//abc",

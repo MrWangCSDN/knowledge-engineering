@@ -6,7 +6,7 @@ import logging
 from typing import Any, Optional
 
 from src.core.weaviate_defaults import (
-    DEFAULT_COLLECTION_METHOD_INTERPRETATION,
+    DEFAULT_COLLECTION_TOPOLOGICAL_INTERPRETATION,
     DEFAULT_WEAVIATE_GRPC_PORT,
     DEFAULT_WEAVIATE_HTTP_URL,
 )
@@ -17,14 +17,14 @@ from src.knowledge.method_entity_id_normalize import method_entity_id_variants
 _log = logging.getLogger(__name__)
 
 
-class WeaviateMethodInterpretStore(BaseWeaviateStore):
-    """collection：MethodInterpretation 等；method_entity_id ↔ 图谱方法节点。"""
+class WeaviateTopologicalInterpretStore(BaseWeaviateStore):
+    """collection：TopologicalInterpretation；method_entity_id ↔ 图谱方法节点。"""
 
     def __init__(
         self,
         url: str = DEFAULT_WEAVIATE_HTTP_URL,
         grpc_port: int = DEFAULT_WEAVIATE_GRPC_PORT,
-        collection_name: str = DEFAULT_COLLECTION_METHOD_INTERPRETATION,
+        collection_name: str = DEFAULT_COLLECTION_TOPOLOGICAL_INTERPRETATION,
         dimension: int = 64,
         api_key: Optional[str] = None,
     ):
@@ -47,7 +47,7 @@ class WeaviateMethodInterpretStore(BaseWeaviateStore):
         if tenant:
             return coll.with_tenant(tenant)
         _log.warning(
-            "WeaviateMethodInterpretStore 被调用时未传 tenant 参数；"
+            "WeaviateTopologicalInterpretStore 被调用时未传 tenant 参数；"
             "v2.0 多租户已启用，无 tenant 的写入属于 deprecated 行为，未来版本将变为必填。"
         )
         return coll

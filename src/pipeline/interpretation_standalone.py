@@ -13,16 +13,12 @@ from src.core.paths import (
     structure_facts_interpret_cache_path_from_config,
 )
 from src.core.weaviate_defaults import (
-    DEFAULT_COLLECTION_BUSINESS_INTERPRETATION,
-    DEFAULT_COLLECTION_METHOD_INTERPRETATION,
+    DEFAULT_COLLECTION_TOPOLOGICAL_INTERPRETATION,
     DEFAULT_WEAVIATE_GRPC_PORT,
     DEFAULT_WEAVIATE_HTTP_URL,
 )
-from src.knowledge.business_interpretation_context import iter_entities_by_types, structure_class_role
-from src.knowledge.business_interpretation_runner import run_business_interpretations
 from src.knowledge.method_interpretation_runner import _is_trivial_accessor, run_method_interpretations
-from src.knowledge.weaviate_business_store import WeaviateBusinessInterpretStore
-from src.knowledge.weaviate_interpretation_store import WeaviateMethodInterpretStore
+from src.knowledge.weaviate_interpretation_store import WeaviateTopologicalInterpretStore
 from src.models.structure import EntityType, StructureFacts
 from src.persistence.repositories.structure_facts_repository import (
     FileStructureFactsRepository,
@@ -65,10 +61,10 @@ def get_interpretation_progress_from_weaviate(
                 and (e.attributes or {}).get("code_snippet")
                 and not _is_trivial_accessor(e)
             ]
-            store = WeaviateMethodInterpretStore(
+            store = WeaviateTopologicalInterpretStore(
                 url=k.vectordb_interpret.weaviate_url or DEFAULT_WEAVIATE_HTTP_URL,
                 grpc_port=k.vectordb_interpret.weaviate_grpc_port or DEFAULT_WEAVIATE_GRPC_PORT,
-                collection_name=k.vectordb_interpret.collection_name or DEFAULT_COLLECTION_METHOD_INTERPRETATION,
+                collection_name=k.vectordb_interpret.collection_name or DEFAULT_COLLECTION_TOPOLOGICAL_INTERPRETATION,
                 dimension=k.vectordb_interpret.dimension,
                 api_key=k.vectordb_interpret.weaviate_api_key,
             )
@@ -77,32 +73,8 @@ def get_interpretation_progress_from_weaviate(
             finally:
                 store.close()
 
-        if _prog_policy.business_batch_runnable(True):
-            all_classes = [
-                c
-                for c in iter_entities_by_types(structure_facts, [EntityType.CLASS, EntityType.INTERFACE])
-                if structure_class_role(c) in ("Controller", "Service")
-            ]
-            all_methods_biz = [
-                e for e in structure_facts.entities
-                if e.type == EntityType.METHOD and (e.attributes or {}).get("path")
-            ]
-            all_modules = sorted(
-                {e.module_id for e in structure_facts.entities if e.module_id},
-                key=lambda x: x or "",
-            )
-            biz_total = len(all_classes) + len(all_methods_biz) + len(all_modules)
-            store = WeaviateBusinessInterpretStore(
-                url=k.vectordb_business.weaviate_url or DEFAULT_WEAVIATE_HTTP_URL,
-                grpc_port=k.vectordb_business.weaviate_grpc_port or DEFAULT_WEAVIATE_GRPC_PORT,
-                collection_name=k.vectordb_business.collection_name or DEFAULT_COLLECTION_BUSINESS_INTERPRETATION,
-                dimension=k.vectordb_business.dimension,
-                api_key=k.vectordb_business.weaviate_api_key,
-            )
-            try:
-                result[_pb] = {"done": store.count(), "total": biz_total}
-            finally:
-                store.close()
+        # business_interpretation removed in topological-unification refactor; stub zero progress
+        # (WeaviateBusinessInterpretStore / vectordb_business 将在 Task 3 中彻底删除)
     except Exception as e:
         if isinstance(e, (OSError, json.JSONDecodeError)):
             _LOG.warning(
@@ -189,7 +161,7 @@ def run_interpretations_only(
         _step("【仅解读】方法技术解读 …")
         out["interpretation"] = run_method_interpretations(
             structure_facts,
-            k.method_interpretation,
+            k.topological_interpretation,
             k.vectordb_interpret,
             step_callback=_step,
             progress_callback=progress_callback,
@@ -203,24 +175,8 @@ def run_interpretations_only(
     else:
         out["interpretation"] = {"skipped": True, "reason": "未勾选或未启用 method_interpretation/vectordb-interpret"}
 
-    if _policy.business_batch_runnable(include_business_interpretation):
-        _step("【仅解读】业务解读 …")
-        out["business_interpretation"] = run_business_interpretations(
-            structure_facts,
-            domain,
-            k.business_interpretation,
-            k.vectordb_business,
-            step_callback=_step,
-            progress_callback=progress_callback,
-            item_list_callback=_item_biz,
-            item_completed_callback=_done_biz,
-            item_started_callback=_start_biz,
-            interpretation_stats_callback=interpretation_stats_callback,
-            # v2.0：透传 project_id，写入 Weaviate tenant
-            project_id=project_id,
-        )
-    else:
-        out["business_interpretation"] = {"skipped": True, "reason": "未勾选或未启用 business_interpretation/vectordb-business"}
+    # business_interpretation removed in topological-unification refactor (Task 3 will clean up fully)
+    out["business_interpretation"] = {"skipped": True, "reason": "business_interpretation 已移除（拓扑解读统一化）"}
 
     _step("【仅解读】全部结束")
     ir = out.get("interpretation") or {}

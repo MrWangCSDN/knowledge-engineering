@@ -39,7 +39,7 @@ class InterpretationPipelinePolicy:
         include_business_interpretation: Optional[bool] = None,
     ) -> InterpretationPipelinePolicy:
         pipe = k.pipeline
-        mi_on = k.method_interpretation.enabled
+        mi_on = k.topological_interpretation.enabled
         vinterp_on = k.vectordb_interpret.enabled
         vinterp_backend = (k.vectordb_interpret.backend or "").strip().lower()
         interpret_enabled = mi_on and vinterp_on
@@ -50,16 +50,13 @@ class InterpretationPipelinePolicy:
         )
         run_interpret_phase = want_interpret and interpret_enabled
 
-        biz_on = k.business_interpretation.enabled
-        vbiz_on = k.vectordb_business.enabled
-        vbiz_backend = (k.vectordb_business.backend or "").strip().lower()
-        biz_capable = biz_on and vbiz_on and vbiz_backend == "weaviate"
-        want_biz = (
-            include_business_interpretation
-            if include_business_interpretation is not None
-            else pipe.include_business_interpretation_build
-        )
-        run_business_phase = want_biz and biz_capable
+        # business interpretation fields removed (Task 2); stubs for backward compat
+        biz_on = False
+        vbiz_on = False
+        vbiz_backend = ""
+        biz_capable = False
+        want_biz = False
+        run_business_phase = False
 
         return cls(
             mi_on=mi_on,

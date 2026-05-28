@@ -12,7 +12,6 @@ from src.structure import run_structure_layer
 from src.semantic import run_semantic_layer
 from src.knowledge import KnowledgeGraph
 from src.knowledge.method_interpretation_runner import run_method_interpretations
-from src.knowledge.business_interpretation_runner import run_business_interpretations
 from src.knowledge.factories import GraphBackendFactory, VectorStoreFactory
 from src.models import DomainKnowledge
 from src.models.structure import StructureFacts
@@ -408,7 +407,7 @@ class InterpretationStage:
             ctx.step_callback("⑦′ 技术解读：调用 LLM …")
             ctx.interp_stats = run_method_interpretations(
                 ctx.structure_facts,
-                k.method_interpretation,
+                k.topological_interpretation,
                 k.vectordb_interpret,
                 step_callback=ctx.step_callback,
                 progress_callback=ctx.progress_callback,
@@ -426,30 +425,8 @@ class InterpretationStage:
             ctx.step_callback("⑦′ 技术解读：「仅图谱+代码」— 已保留 Weaviate 解读库，未调用 LLM。")
             ctx.interp_stats = {"skipped": True, "written": 0, "failed": 0, "mode": "graph_and_code_only", "interpret_preserved": True}
 
-        if ctx.run_business_phase:
-            ctx.step_callback("⑦· 业务解读：类/接口、API 用例、模块综述（增量续跑）…")
-            try:
-                ctx.biz_stats = run_business_interpretations(
-                    ctx.structure_facts,
-                    ctx.domain,
-                    k.business_interpretation,
-                    k.vectordb_business,
-                    step_callback=ctx.step_callback,
-                    progress_callback=ctx.progress_callback,
-                    item_list_callback=ctx.item_list_callback,
-                    item_completed_callback=ctx.item_completed_callback,
-                    item_started_callback=ctx.item_started_callback,
-                    interpretation_stats_callback=ctx.interpretation_stats_callback,
-                    # v2.0：透传 project_id，写入 Weaviate tenant
-                    project_id=ctx.project_id,
-                )
-            except Exception as e:
-                ctx.biz_stats = {"skipped": True, "error": repr(e)}
-                ctx.step_callback(f"业务解读阶段异常，已跳过：{e!r}")
-        elif ctx.want_biz and not ctx.biz_capable:
-            ctx.biz_stats = {"skipped": True, "mode": "business_config_disabled"}
-        else:
-            ctx.biz_stats = {"skipped": True, "mode": "business_not_requested"}
+        # business_interpretation removed in topological-unification refactor (Task 3 will clean up fully)
+        ctx.biz_stats = {"skipped": True, "mode": "business_interpretation_removed"}
 
 
 
