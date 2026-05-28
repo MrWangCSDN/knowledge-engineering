@@ -352,9 +352,10 @@ async def test_react_system_prompt_omits_tool_section_when_no_tools() -> None:
     await synth.synthesize(_make_ctx())
 
     sys_text = llm.complete_with_tools.call_args.kwargs["messages"][0]["content"]
-    # 不应包含工具名（因为根本没注册）
-    assert "ke_search" not in sys_text
-    assert "ke_callees" not in sys_text
+    # 不应包含动态工具列表段（因为根本没注册）
+    # 注：AGENT_SYSTEM_PROMPT 本身在探索流程引导中会提及 ke_search / ke_callees 名称，
+    # 但动态工具段的标志是段标题「可调用工具」，空 registry 时不应注入该段
+    assert "【可调用工具" not in sys_text
 
 
 # ───────── v1.7: ReAct streaming（伪流式最终答案）─────────
@@ -853,3 +854,31 @@ def test_qa_synthesizer_still_uses_structured_prompt():
     """回归：QASynthesizer（非 chat）仍用 6 段式 SYSTEM_PROMPT，不受 C4 影响。"""
     from src.service.qa_engine.prompts import SYSTEM_PROMPT
     assert "6 段式" in SYSTEM_PROMPT
+
+
+# ─── AGENT_SYSTEM_PROMPT 改造校验 (ReAct 代码层兜底设计) ──────────────────
+
+
+def test_agent_system_prompt_drops_giveup_clause():
+    """AGENT_SYSTEM_PROMPT 不应再含'context 不足以回答时：直接说明未找到'"""
+    from src.service.qa_engine.prompts import AGENT_SYSTEM_PROMPT
+    # 旧 prompt 第 4 条原文（应被删除）
+    forbidden = "context 不足以回答时：直接说明"
+    assert forbidden not in AGENT_SYSTEM_PROMPT, (
+        f"AGENT_SYSTEM_PROMPT 仍包含旧的放弃指令: {forbidden!r}；"
+        f"应在 ReAct 代码层兜底改造中删除（设计 §4）"
+    )
+
+
+def test_agent_system_prompt_contains_exploration_flow():
+    """AGENT_SYSTEM_PROMPT 必须包含'探索流程'引导段。"""
+    from src.service.qa_engine.prompts import AGENT_SYSTEM_PROMPT
+    # 关键标记短语（必须同时存在）
+    required = [
+        "探索流程",           # 段标题
+        "ke_search 用问题里",  # 第一步：扩大候选
+        "level=\"code_entity\"",  # 兜底标记的判断
+        "不要直接放弃",        # 反指令
+    ]
+    missing = [p for p in required if p not in AGENT_SYSTEM_PROMPT]
+    assert not missing, f"AGENT_SYSTEM_PROMPT 缺少探索流程关键短语: {missing}"

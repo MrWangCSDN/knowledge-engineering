@@ -401,6 +401,8 @@ class ReActSynthesizer:
 
 4. **能给最终答案就别再调工具**。tool_call 仅用于"我看了 candidates 还差关键信息"的场景；
    如果 candidates 已经足够回答，直接输出 6 段式 JSON。
+   **但**如果 candidates 全是 level="code_entity"（业务解读缺失），即使候选齐全也至少调 1 次
+   ke_callees / ke_read_entity 补齐代码细节。
 
 5. **错就早错**。tool 返回 `{{"error": "..."}}` 时不要重复同一调用；改 entity_id 或换工具。
 
