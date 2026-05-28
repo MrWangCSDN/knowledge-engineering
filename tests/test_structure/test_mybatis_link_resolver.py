@@ -126,6 +126,53 @@ def test_java_method_without_explicit_language_is_recognized(monkeypatch):
     assert edges[0].attributes.get("synthesizedBy") == "mybatis-java-xml"
 
 
+def test_java_method_uses_class_name_fallback_when_no_qualified_name():
+    """关键回归 #2：javaparser-bridge 不设 qualified_name 时，
+    用 e.attributes['class_name'] + e.name 作 fallback。
+
+    Bug 历史：unit test 之前一直手动设 qualified_name=<FQN>::<method>，
+    所以测试通过；但 mall-swarm 实测 javaparser-bridge 输出的 Java method
+    没有 qualified_name 属性 → 0 边。
+    """
+    java_no_qn = StructureEntity(
+        id="method//java-cls-fallback",
+        type=EntityType.METHOD,
+        name="getMenuList",  # method_name
+        language="",  # 同时模拟 empty language
+        attributes={
+            # 故意不设 qualified_name；用 class_name fallback
+            "class_name": "UmsRoleDao",
+            "signature": "getMenuList(Long)",
+        },
+    )
+    xml_match = _xml_statement("com.macro.mall.dao.UmsRoleDao", "getMenuList")
+    facts = StructureFacts(entities=[java_no_qn, xml_match])
+
+    edges = synthesize_mybatis_java_xml_relations(facts)
+    assert len(edges) == 1, (
+        f"class_name fallback 应当生效；实际 edges={len(edges)}（fix 失效）"
+    )
+    assert edges[0].source_id == "method//java-cls-fallback"
+    assert edges[0].target_id == xml_match.id
+
+
+def test_java_method_without_class_name_or_qn_is_skipped():
+    """class_name 和 qualified_name 都缺时，跳过该 method（不报错）。"""
+    java_orphan = StructureEntity(
+        id="method//java-orphan",
+        type=EntityType.METHOD,
+        name="getMenuList",
+        language="",
+        attributes={},  # 都不设
+    )
+    xml = _xml_statement("com.x.SomeDao", "getMenuList")
+    facts = StructureFacts(entities=[java_orphan, xml])
+
+    edges = synthesize_mybatis_java_xml_relations(facts)
+    # orphan 没法索引；不会产生 edge（也不应抛异常）
+    assert len(edges) == 0
+
+
 def test_xml_explicit_language_not_treated_as_java():
     """language='xml' 的 method 不应被加进 Java 候选索引（防自连）。"""
     # 两个 XML statement 撞名（理论上不会发生，但作为安全网保留）

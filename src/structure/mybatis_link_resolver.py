@@ -47,13 +47,24 @@ def synthesize_mybatis_java_xml_relations(
         # XML method 排除掉；剩下的（含 language=None/空 的 Java method）都视作 Java 候选
         if (e.language or "").lower() == "xml":
             continue
+
+        # 优先用 qualified_name（CodeGraph 风格 FQN::method）；
+        # mall-swarm 实测 javaparser-bridge 不设 qualified_name，
+        # 退而用 e.attributes["class_name"] + e.name 拼合（简单类名 + 方法名）
         qn = e.attributes.get("qualified_name", "")
-        parts = qn.split("::")
-        if len(parts) < 2:
-            continue
-        class_fqn = parts[-2]      # 如 "com.x.UserDao"
-        method_name = parts[-1]    # 如 "findById"
-        class_name = class_fqn.split(".")[-1]  # "UserDao"
+        if qn and "::" in qn:
+            parts = qn.split("::")
+            class_fqn = parts[-2]                  # 如 "com.x.UserDao"
+            method_name = parts[-1]                # 如 "findById"
+            class_name = class_fqn.split(".")[-1]  # "UserDao"
+        else:
+            # fallback：直接拿 simple class_name + method.name
+            # 这是 mall-swarm Java 提取层的真实数据形态
+            class_name = e.attributes.get("class_name", "") or ""
+            method_name = e.name or ""
+            if not class_name or not method_name:
+                continue
+
         key = f"{class_name}::{method_name}"
         java_index.setdefault(key, []).append(e)
 
