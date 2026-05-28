@@ -16,14 +16,11 @@ dependencies = [
     "fastapi>=0.100.0",
     "uvicorn[standard]>=0.22.0",
     "httpx>=0.24.0",
-    "streamlit>=1.28.0",
-    "streamlit-autorefresh>=0.0.6",
 ]
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
 vector = ["chromadb>=0.4.0", "sentence-transformers>=2.2.0"]
-owl = ["rdflib>=7.0.0"]
 # 云端 / 第三方 LLM（技术解读、业务解读的 llm_backend）
 llm-openai = ["openai>=1.40.0"]
 llm-anthropic = ["anthropic>=0.34.0"]
@@ -54,7 +51,3 @@ markers = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-# Streamlit 文案：随 ``app`` 包安装
-[tool.setuptools.package-data]
-"app" = ["resources/*.yaml"]

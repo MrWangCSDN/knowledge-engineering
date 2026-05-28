@@ -60,7 +60,6 @@ class FullPipelineScope:
     graph: Optional[KnowledgeGraph] = None
     interp_stats: dict[str, Any] = field(default_factory=lambda: {"skipped": True})
     biz_stats: dict[str, Any] = field(default_factory=lambda: {"skipped": True})
-    ontology_result: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self.k = self.config.knowledge
@@ -204,21 +203,6 @@ def _segment_interpretation(scope: FullPipelineScope) -> Optional[dict[str, Any]
     return None
 
 
-def _segment_ontology(scope: FullPipelineScope) -> Optional[dict[str, Any]]:
-    from src.pipeline.context_builders import _build_ontology_ctx
-    from src.pipeline.stage_runtime import OntologyStage, _execute_stages
-
-    ontology_ctx = _build_ontology_ctx(
-        graph=scope.graph,  # type: ignore[arg-type]
-        out_dir=scope.out_dir,
-        knowledge_cfg=scope.k,
-        step_callback=scope.step,
-    )
-    _execute_stages([OntologyStage()], ontology_ctx)
-    scope.ontology_result = ontology_ctx.ontology_result
-    return None
-
-
 def _segment_finalize(scope: FullPipelineScope) -> Optional[dict[str, Any]]:
     from src.pipeline.context_builders import _build_finalize_ctx
     from src.pipeline.stage_runtime import FinalizeStage, _execute_stages
@@ -232,7 +216,6 @@ def _segment_finalize(scope: FullPipelineScope) -> Optional[dict[str, Any]]:
         structure_repo=scope.structure_repo,
         structure_facts=scope.structure_facts,  # type: ignore[arg-type]
         config_path=scope.config_path,
-        ontology_result=scope.ontology_result,
         interp_stats=scope.interp_stats,
         biz_stats=scope.biz_stats,
         step_callback=scope.step,
@@ -249,7 +232,6 @@ FULL_PIPELINE_SEGMENT_RUNNERS: list[tuple[str, Callable[[FullPipelineScope], Opt
     ("semantic", _segment_semantic),
     ("knowledge", _segment_knowledge),
     ("interpretation", _segment_interpretation),
-    ("ontology", _segment_ontology),
     ("finalize", _segment_finalize),
 ]
 

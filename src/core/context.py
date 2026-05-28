@@ -18,7 +18,7 @@ T = TypeVar("T")
 
 class AppContext:
     """
-    应用上下文：持有知识图谱与配置，供 Pipeline、API、Streamlit 共享。
+    应用上下文：持有知识图谱与配置，供 Pipeline、API 共享。
     替代原 service.api 中的 _graph、_global_config 全局变量。
     支持单例模式；测试时可调用 reset() 或注入 mock。
     """

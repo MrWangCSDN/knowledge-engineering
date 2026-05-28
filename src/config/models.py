@@ -127,15 +127,6 @@ class SnapshotConfig(BaseModel):
     save_after_build: bool = False
 
 
-class OntologyConfig(BaseModel):
-    """knowledge.ontology 配置。"""
-    enabled: bool = False
-    export_owl: bool = True
-    export_after_build: bool = True
-    reasoner: str = "builtin"
-    write_inferred_to_graph: bool = True
-
-
 class KnowledgeConfig(BaseModel):
     """knowledge 配置。"""
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
@@ -153,7 +144,6 @@ class KnowledgeConfig(BaseModel):
     method_interpretation: MethodInterpretationConfig = Field(default_factory=MethodInterpretationConfig)
     business_interpretation: BusinessInterpretationConfig = Field(default_factory=BusinessInterpretationConfig)
     snapshot: SnapshotConfig = Field(default_factory=SnapshotConfig)
-    ontology: OntologyConfig = Field(default_factory=OntologyConfig)
 
     # Pydantic v2 弃用 class-based Config，改为 model_config
     model_config = ConfigDict(populate_by_name=True, extra="allow")
@@ -173,7 +163,6 @@ class KnowledgeConfig(BaseModel):
         mi = MethodInterpretationConfig.model_validate(r.get("method_interpretation") or {})
         bi = BusinessInterpretationConfig.model_validate(r.get("business_interpretation") or {})
         snap = SnapshotConfig.model_validate(r.get("snapshot") or {})
-        ont = OntologyConfig.model_validate(r.get("ontology") or {})
         return cls(
             pipeline=pipe,
             semantic_embedding=sem,
@@ -184,7 +173,6 @@ class KnowledgeConfig(BaseModel):
             method_interpretation=mi,
             business_interpretation=bi,
             snapshot=snap,
-            ontology=ont,
         )
 
     def to_interpret_dict(self) -> dict[str, Any]:
@@ -290,17 +278,6 @@ class KnowledgeConfig(BaseModel):
             d["project_id"] = project_id
         return d
 
-    def to_ontology_dict(self) -> dict[str, Any]:
-        """供 ontology 使用的 dict。"""
-        o = self.ontology
-        return {
-            "enabled": o.enabled,
-            "export_owl": o.export_owl,
-            "export_after_build": o.export_after_build,
-            "reasoner": o.reasoner,
-            "write_inferred_to_graph": o.write_inferred_to_graph,
-        }
-
     def to_snapshot_dict(self) -> dict[str, Any]:
         """供 snapshot 使用的 dict。"""
         s = self.snapshot
@@ -362,7 +339,6 @@ class ProjectConfig(BaseModel):
                 "method_interpretation": self.knowledge.to_interpret_dict(),
                 "business_interpretation": self.knowledge.to_business_interpret_dict(),
                 "snapshot": self.knowledge.to_snapshot_dict(),
-                "ontology": self.knowledge.to_ontology_dict(),
             },
             "service": self.service.model_dump(),
         }

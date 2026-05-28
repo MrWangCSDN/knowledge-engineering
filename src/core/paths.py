@@ -52,7 +52,7 @@ def interpretation_progress_path(project_root: Path) -> Path:
 
 
 def ui_knowledge_snapshot_dir(project_root: Path) -> Path:
-    """Streamlit 等 UI 加载/保存内存图快照的目录：``<项目根>/out_ui/knowledge_snapshot``。"""
+    """前端/API 加载/保存内存图快照的目录：``<项目根>/out_ui/knowledge_snapshot``。"""
     return out_ui_dir(project_root) / KNOWLEDGE_SNAPSHOT_DIR_NAME
 
 

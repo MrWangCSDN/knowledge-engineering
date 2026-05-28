@@ -227,14 +227,6 @@ knowledge:
         timeout_seconds: 120
   snapshot:
     save_after_build: false
-  # OWL 本体与推理（已关闭 — 传递闭包通过 BFS 实时计算，无需预存）
-  # 关闭理由：模式B实时链路解读 + 影响面BFS已覆盖所有场景，OWL推理仅增加2分钟Pipeline耗时和百万级冗余边
-  ontology:
-    enabled: false
-    export_owl: false
-    export_after_build: false
-    reasoner: builtin   # builtin：传递闭包推理；hermit：需 Java + HermiT
-    write_inferred_to_graph: true
 
 service:
   host: "0.0.0.0"

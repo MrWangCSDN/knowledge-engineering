@@ -333,21 +333,16 @@ class KnowledgeGraph:
         return self._g.number_of_edges()
 
     def iter_nodes(self):
-        """迭代所有节点，产出 (node_id, attrs_dict)。供 OWL 导出等使用。"""
+        """迭代所有节点，产出 (node_id, attrs_dict)。"""
         for nid in self._g.nodes:
             yield nid, dict(self._g.nodes[nid])
 
     def iter_edges(self):
-        """迭代所有边，产出 (source_id, target_id, rel_type, attrs_dict)。供 OWL 导出与推理使用。"""
+        """迭代所有边，产出 (source_id, target_id, rel_type, attrs_dict)。"""
         for u, v, key in self._g.edges(keys=True):
             ed = dict(self._g.edges[u, v, key])
             rel_type = ed.get("rel_type", "RELATED")
             yield u, v, rel_type, ed
-
-    def add_inferred_edge(self, source_id: str, target_id: str, rel_type: str, **attrs: Any) -> None:
-        """添加一条推理得到的边（如传递闭包）。若节点不存在则忽略。"""
-        if self._g.has_node(source_id) and self._g.has_node(target_id):
-            self._g.add_edge(source_id, target_id, rel_type=rel_type, inferred=True, **attrs)
 
     def get_node(self, nid: str) -> Optional[dict]:
         if not self._g.has_node(nid):
@@ -430,14 +425,14 @@ class KnowledgeGraph:
         start_id: str,
         direction: str = "down",
         max_depth: int = 50,
-        exclude_inferred: bool = False,
     ) -> set[str]:
         """
         影响闭包：从 start_id 出发沿边遍历（down=后继，up=前驱），返回可达节点集合。
-        默认沿 MultiDiGraph 上**全部出边/入边**（含 calls、implements、belongs_to 等），不按关系类型过滤。
-        exclude_inferred=True 时仅沿「非推断」边遍历，用于与全图闭包对比、体现推理价值。
+        沿 MultiDiGraph 上**全部出边/入边**（含 calls、implements、belongs_to 等），不按关系类型过滤。
         """
+        # seen 用于去重，避免环引用导致死循环
         seen: set[str] = set()
+        # 使用栈做 DFS（不要求严格层序），depth 仅作为外层迭代步数上限
         stack = [start_id]
         depth = 0
         while stack and depth < max_depth:
@@ -446,22 +441,11 @@ class KnowledgeGraph:
             if nid in seen:
                 continue
             seen.add(nid)
+            # direction="down" → 取后继；否则取前驱
             if direction == "down":
-                if exclude_inferred:
-                    next_ids = [
-                        t for _, t, k in self._g.out_edges(nid, keys=True)
-                        if not self._g.edges[nid, t, k].get("inferred")
-                    ]
-                else:
-                    next_ids = list(self._g.successors(nid))
+                next_ids = list(self._g.successors(nid))
             else:
-                if exclude_inferred:
-                    next_ids = [
-                        s for s, _, k in self._g.in_edges(nid, keys=True)
-                        if not self._g.edges[s, nid, k].get("inferred")
-                    ]
-                else:
-                    next_ids = list(self._g.predecessors(nid))
+                next_ids = list(self._g.predecessors(nid))
             for k in next_ids:
                 if k not in seen:
                     stack.append(k)

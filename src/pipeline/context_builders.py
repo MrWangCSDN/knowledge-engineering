@@ -16,7 +16,6 @@ from src.pipeline.stage_runtime import (
     FinalizeStageContext,
     InterpretationStageContext,
     KnowledgeStageContext,
-    OntologyStageContext,
     SemanticStageContext,
     StructureStageContext,
 )
@@ -138,22 +137,6 @@ def _build_interpretation_ctx(
     )
 
 
-def _build_ontology_ctx(
-    *,
-    graph: KnowledgeGraph,
-    out_dir: Optional[Path],
-    knowledge_cfg: Any,
-    step_callback: Callable[[str], None],
-) -> OntologyStageContext:
-    return OntologyStageContext(
-        graph=graph,
-        out_dir=out_dir,
-        knowledge_cfg=knowledge_cfg,
-        step_callback=step_callback,
-        ontology_result=None,
-    )
-
-
 def _build_finalize_ctx(
     *,
     graph: KnowledgeGraph,
@@ -164,7 +147,6 @@ def _build_finalize_ctx(
     structure_repo: StructureFactsRepository,
     structure_facts: StructureFacts,
     config_path: str | Path,
-    ontology_result: Optional[dict[str, Any]],
     interp_stats: dict[str, Any],
     biz_stats: dict[str, Any],
     step_callback: Callable[[str], None],
@@ -178,7 +160,6 @@ def _build_finalize_ctx(
         structure_repo=structure_repo,
         structure_facts=structure_facts,
         config_path=config_path,
-        ontology_result=ontology_result,
         interp_stats=interp_stats,
         biz_stats=biz_stats,
         step_callback=step_callback,
