@@ -95,8 +95,20 @@ def build_retriever_for_project(project_id: str, request: Request):
     # Neo4jGraphAdapter：绑定 project_id，所有 Cypher 查询带 project_id 过滤
     graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id=project_id)
 
-    # QARetriever：注入上面两个 adapter，本请求专用
-    return QARetriever(business_store=biz_adapter, graph=graph_adapter)
+    # ReAct 代码层兜底（设计 [[ReAct-代码层兜底-设计]]）：
+    # mall-swarm 类工程无 BusinessInterpretation 数据时，用 CodeEntity 向量库兜底。
+    # code_store 由 _try_connect_backends 在 startup 时连接到 app.state.weaviate_code_store；
+    # 未连成功（None）时 composite 自动跳过 fallback，行为与原来一致。
+    from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore
+    code_store = getattr(request.app.state, "weaviate_code_store", None)
+    composite_store = CompositeKnowledgeStore(
+        business_store=biz_adapter,
+        code_store=code_store,
+        project_id=project_id,
+    )
+
+    # QARetriever：注入 composite_store（透传 biz_adapter，BI 空时兜底 CodeEntity）
+    return QARetriever(business_store=composite_store, graph=graph_adapter)
 
 
 async def build_tools_for_project(
@@ -143,9 +155,17 @@ async def build_tools_for_project(
     biz_adapter = WeaviateBusinessAdapter(biz_store)
     graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id=project_id)
 
+    # ke_search 工具也用 composite，BI 空时兜底走 CodeEntity（设计 [[ReAct-代码层兜底-设计]] §2）
+    from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore
+    composite_store = CompositeKnowledgeStore(
+        business_store=biz_adapter,
+        code_store=code_store,
+        project_id=project_id,
+    )
+
     return build_default_registry(
         graph=graph_adapter,
-        business_store=biz_adapter,
+        business_store=composite_store,
         project_id=project_id,
         code_store=code_store,
         method_interp_store=method_interp_store,
