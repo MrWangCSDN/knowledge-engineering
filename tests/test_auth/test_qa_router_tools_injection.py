@@ -187,7 +187,7 @@ async def test_build_tools_for_project_loads_repo_local_path_from_db():
     fake_project = MagicMock()
     fake_project.repo_local_path = "/tmp/fake-repo"
 
-    # mock app.state（Task 3 后：weaviate_interp_store 替代 weaviate_business_store）
+    # mock app.state（Task 3 后：weaviate_interp_store 替代 weaviate_interpretation_store）
     request = MagicMock(spec=Request)
     request.app.state.weaviate_interp_store = MagicMock()
     request.app.state.neo4j_backend = MagicMock()

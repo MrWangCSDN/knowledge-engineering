@@ -108,7 +108,7 @@ async def test_ke_callers_handles_graph_error_gracefully() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ke_search_returns_candidates_from_business_store() -> None:
+async def test_ke_search_returns_candidates_from_interpretation_store() -> None:
     """ke_search(query=X, project_id=P) → 拿到 BusinessInterpretation 命中。"""
     store = MagicMock()
     # store.search_method_hits_by_text 是 Protocol 定义的同步方法

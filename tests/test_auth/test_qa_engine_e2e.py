@@ -27,7 +27,7 @@ from src.service.qa_engine import QARetriever, QASynthesizer
 # 这些 fixtures 当前都 skip。等 W4 把主仓 store 接进来后实现。
 
 @pytest.fixture
-def real_business_store():
+def real_interpretation_store():
     pytest.skip("W4 接入主仓 BusinessInterpretationStore 后启用")
 
 
@@ -45,7 +45,7 @@ def real_llm_provider():
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_e2e_explain_question(real_llm_provider, real_business_store, real_graph):
+async def test_e2e_explain_question(real_llm_provider, real_interpretation_store, real_graph):
     """端到端：问一个真实业务问题，验证答案质量基线。
 
     验收基线：
@@ -54,7 +54,7 @@ async def test_e2e_explain_question(real_llm_provider, real_business_store, real
       - 不能出现"我不知道"之类的回避话术
       - LLM 调用 < 15s（不限制，但记录耗时）
     """
-    retriever = QARetriever(business_store=real_business_store, graph=real_graph)
+    retriever = QARetriever(interpretation_store=real_interpretation_store, graph=real_graph)
     synthesizer = QASynthesizer(llm_provider=real_llm_provider)
 
     ctx = await retriever.retrieve(
@@ -80,13 +80,13 @@ async def test_e2e_explain_question(real_llm_provider, real_business_store, real
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_e2e_no_match_question(real_llm_provider, real_business_store, real_graph):
+async def test_e2e_no_match_question(real_llm_provider, real_interpretation_store, real_graph):
     """问一个明显不存在的功能（如 '量子计算'），LLM 应该承认找不到。
 
     设计上 build_user_prompt 会告诉 LLM：
         "如果 context 不足以回答，只输出一个 overview 段说明未找到相关业务逻辑"
     """
-    retriever = QARetriever(business_store=real_business_store, graph=real_graph)
+    retriever = QARetriever(interpretation_store=real_interpretation_store, graph=real_graph)
     synthesizer = QASynthesizer(llm_provider=real_llm_provider)
 
     ctx = await retriever.retrieve(

@@ -50,7 +50,7 @@ class MethodInterpretationStoreAdapter(InterpretationStoreAdapterProtocol[str]):
 
 
 class BusinessInterpretationStoreAdapter(InterpretationStoreAdapterProtocol[tuple[str, str]]):
-    """适配器：把 WeaviateBusinessInterpretStore 统一成业务解读存储接口。"""
+    """适配器：把 WeaviateTopologicalInterpretStore 统一成拓扑解读存储接口。"""
 
     def __init__(self, store: Any):
         self._store = store

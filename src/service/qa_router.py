@@ -108,7 +108,7 @@ def build_retriever_for_project(project_id: str, request: Request):
     )
 
     # QARetriever：注入 composite_store（透传 interp_adapter，解读库空时兜底 CodeEntity）
-    return QARetriever(business_store=composite_store, graph=graph_adapter)
+    return QARetriever(interpretation_store=composite_store, graph=graph_adapter)
 
 
 async def build_tools_for_project(

@@ -116,7 +116,7 @@ class CompositeKnowledgeStore:
             code_store=app.state.weaviate_code_store,  # 可为 None
             project_id="mall-swarm",
         )
-        retriever = QARetriever(business_store=composite, graph=graph_adapter)
+        retriever = QARetriever(interpretation_store=composite, graph=graph_adapter)
     """
 
     def __init__(

@@ -1,7 +1,7 @@
 """验证 build_default_registry()：一句话推出 6 个内置工具。
 
 让 api.py startup 可以这样写：
-  app.state.qa_tools = build_default_registry(graph=..., business_store=...)
+  app.state.qa_tools = build_default_registry(graph=..., interpretation_store=...)
 不用手动列 6 个。
 """
 from unittest.mock import MagicMock

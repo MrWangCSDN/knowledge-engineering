@@ -1,6 +1,6 @@
 """验证 QARetriever：业务概念 → 候选实体 + 调用链上下文。
 
-mock 掉 business_store 和 graph，不依赖真实 Weaviate / Neo4j。
+mock 掉 interpretation_store 和 graph，不依赖真实 Weaviate / Neo4j。
 """
 from unittest.mock import MagicMock
 
@@ -12,7 +12,7 @@ from src.service.qa_engine.retriever import QARetriever, RetrievedContext
 # ───────── fixtures ─────────
 
 @pytest.fixture
-def mock_business_store():
+def mock_interpretation_store():
     s = MagicMock()
     # 默认返回 2 个候选
     s.search_method_hits_by_text.return_value = [
@@ -33,8 +33,8 @@ def mock_graph():
 # ───────── 基础检索 ─────────
 
 @pytest.mark.asyncio
-async def test_retrieve_returns_context_object(mock_business_store, mock_graph):
-    r = QARetriever(business_store=mock_business_store, graph=mock_graph)
+async def test_retrieve_returns_context_object(mock_interpretation_store, mock_graph):
+    r = QARetriever(interpretation_store=mock_interpretation_store, graph=mock_graph)
     ctx = await r.retrieve(question="存款开户的设计逻辑", project_id="deposit", top_k=5)
     assert isinstance(ctx, RetrievedContext)
     assert ctx.question == "存款开户的设计逻辑"
@@ -42,26 +42,26 @@ async def test_retrieve_returns_context_object(mock_business_store, mock_graph):
 
 
 @pytest.mark.asyncio
-async def test_retrieve_passes_project_id_filter(mock_business_store, mock_graph):
-    """retriever 必须把 project_id 透传给 business_store（多工程隔离的关键）。"""
-    r = QARetriever(business_store=mock_business_store, graph=mock_graph)
+async def test_retrieve_passes_project_id_filter(mock_interpretation_store, mock_graph):
+    """retriever 必须把 project_id 透传给 interpretation_store（多工程隔离的关键）。"""
+    r = QARetriever(interpretation_store=mock_interpretation_store, graph=mock_graph)
     await r.retrieve(question="x", project_id="deposit", top_k=5)
-    # business_store 被调用时应该带 project_id
-    call_kwargs = mock_business_store.search_method_hits_by_text.call_args.kwargs
+    # interpretation_store 被调用时应该带 project_id
+    call_kwargs = mock_interpretation_store.search_method_hits_by_text.call_args.kwargs
     assert call_kwargs.get("project_id") == "deposit"
 
 
 @pytest.mark.asyncio
-async def test_retrieve_top_k_passed(mock_business_store, mock_graph):
-    r = QARetriever(business_store=mock_business_store, graph=mock_graph)
+async def test_retrieve_top_k_passed(mock_interpretation_store, mock_graph):
+    r = QARetriever(interpretation_store=mock_interpretation_store, graph=mock_graph)
     await r.retrieve(question="x", project_id="p", top_k=10)
-    call_kwargs = mock_business_store.search_method_hits_by_text.call_args.kwargs
+    call_kwargs = mock_interpretation_store.search_method_hits_by_text.call_args.kwargs
     assert call_kwargs.get("limit") == 10
 
 
 @pytest.mark.asyncio
-async def test_retrieve_extracts_callees_for_top_candidates(mock_business_store, mock_graph):
-    r = QARetriever(business_store=mock_business_store, graph=mock_graph)
+async def test_retrieve_extracts_callees_for_top_candidates(mock_interpretation_store, mock_graph):
+    r = QARetriever(interpretation_store=mock_interpretation_store, graph=mock_graph)
     ctx = await r.retrieve(question="x", project_id="p", top_k=5)
     # 至少 top 1 候选要有 callees
     assert "method://com.bank.openAccount" in ctx.callees_by_entry
@@ -77,7 +77,7 @@ async def test_retrieve_only_expand_top_3_to_save_cost(mock_graph):
         {"entity_id": f"method://m{i}", "summary_text": "x", "level": "method"}
         for i in range(5)
     ]
-    r = QARetriever(business_store=bs, graph=mock_graph)
+    r = QARetriever(interpretation_store=bs, graph=mock_graph)
     ctx = await r.retrieve(question="x", project_id="p", top_k=10)
     # 5 个候选，但只展开了 top 3
     assert len(ctx.callees_by_entry) <= 3
@@ -91,7 +91,7 @@ async def test_retrieve_no_candidates_returns_empty_context():
     bs = MagicMock()
     bs.search_method_hits_by_text.return_value = []
     g = MagicMock()
-    r = QARetriever(business_store=bs, graph=g)
+    r = QARetriever(interpretation_store=bs, graph=g)
     ctx = await r.retrieve(question="不存在的功能", project_id="p", top_k=5)
     assert ctx.entry_candidates == []
     assert ctx.callees_by_entry == {}
@@ -129,7 +129,7 @@ async def test_dependency_skill_expands_call_chain_to_depth_2():
         return {"A": ["Z"], "Z": ["Y"]}.get(nid, [])
     g.predecessors.side_effect = pred
 
-    r = QARetriever(business_store=bs, graph=g)
+    r = QARetriever(interpretation_store=bs, graph=g)
 
     # 1) Architecture（默认 skill_id）只取 1 跳
     ctx_arch = await r.retrieve(question="A 怎么实现", project_id="p", top_k=5)
@@ -165,7 +165,7 @@ async def test_business_skill_promotes_class_and_module_level_candidates() -> No
     g.successors.return_value = []
     g.predecessors.return_value = []
 
-    r = QARetriever(business_store=bs, graph=g)
+    r = QARetriever(interpretation_store=bs, graph=g)
     ctx = await r.retrieve(
         question="有什么业务规则", project_id="p", top_k=5, skill_id="business"
     )
@@ -186,7 +186,7 @@ async def test_business_skill_does_not_affect_default_ordering() -> None:
     g = MagicMock()
     g.successors.return_value = []
     g.predecessors.return_value = []
-    r = QARetriever(business_store=bs, graph=g)
+    r = QARetriever(interpretation_store=bs, graph=g)
     ctx = await r.retrieve(question="x", project_id="p", top_k=5)  # 默认 architecture
     # 顺序应该跟 store 返回值一致
     assert [c["entity_id"] for c in ctx.entry_candidates] == ["M1", "C1"]
@@ -213,7 +213,7 @@ async def test_data_flow_skill_extracts_tables_from_summary_text() -> None:
     g.successors.return_value = []
     g.predecessors.return_value = []
 
-    r = QARetriever(business_store=bs, graph=g)
+    r = QARetriever(interpretation_store=bs, graph=g)
     ctx = await r.retrieve(
         question="数据怎么流的", project_id="p", top_k=5, skill_id="data-flow"
     )
@@ -234,19 +234,19 @@ async def test_data_flow_skill_does_not_extract_for_other_skills() -> None:
     g = MagicMock()
     g.successors.return_value = []
     g.predecessors.return_value = []
-    r = QARetriever(business_store=bs, graph=g)
+    r = QARetriever(interpretation_store=bs, graph=g)
     ctx = await r.retrieve(question="x", project_id="p", top_k=5)  # default architecture
     # architecture 不抽 summary_text 里的表；图谱没边 → 空列表
     assert ctx.table_access_by_entry["M1"] == []
 
 
 @pytest.mark.asyncio
-async def test_retrieve_graph_failure_does_not_crash(mock_business_store):
+async def test_retrieve_graph_failure_does_not_crash(mock_interpretation_store):
     """图查询出错（如节点不存在）时不能整个流程崩，应该静默跳过。"""
     g = MagicMock()
     g.successors.side_effect = Exception("node not found")
     g.predecessors.return_value = []
-    r = QARetriever(business_store=mock_business_store, graph=g)
+    r = QARetriever(interpretation_store=mock_interpretation_store, graph=g)
     ctx = await r.retrieve(question="x", project_id="p", top_k=5)
     # 候选还在
     assert len(ctx.entry_candidates) == 2
@@ -257,14 +257,14 @@ async def test_retrieve_graph_failure_does_not_crash(mock_business_store):
 @pytest.mark.asyncio
 async def test_retrieve_chit_chat_short_circuits():
     """skill_id='chit-chat' → 不查 KG，直接返回空 ctx。"""
-    # 准备 mock 的 business_store 和 graph_backend
+    # 准备 mock 的 interpretation_store 和 graph_backend
     # chit-chat 短路意味着这两个 mock 都不应被调用
-    business_store = MagicMock()
-    business_store.search_method_hits_by_text = MagicMock()  # 不应被 await
+    interpretation_store = MagicMock()
+    interpretation_store.search_method_hits_by_text = MagicMock()  # 不应被 await
     graph = MagicMock()
 
     retriever = QARetriever(
-        business_store=business_store,
+        interpretation_store=interpretation_store,
         graph=graph,
     )
 
@@ -281,5 +281,5 @@ async def test_retrieve_chit_chat_short_circuits():
     assert ctx.skill_id == "chit-chat"
     assert ctx.entry_candidates == []
 
-    # 验证：business_store 没被调用（短路了）
-    business_store.search_method_hits_by_text.assert_not_called()
+    # 验证：interpretation_store 没被调用（短路了）
+    interpretation_store.search_method_hits_by_text.assert_not_called()

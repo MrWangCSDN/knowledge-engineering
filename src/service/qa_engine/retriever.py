@@ -86,8 +86,8 @@ class QARetriever:
     # dependency skill 拓展深度
     DEPENDENCY_BFS_DEPTH = 2
 
-    def __init__(self, *, business_store: InterpretationStoreProto, graph: GraphProto):
-        self.business_store = business_store
+    def __init__(self, *, interpretation_store: InterpretationStoreProto, graph: GraphProto):
+        self.interpretation_store = interpretation_store
         self.graph = graph
 
     async def retrieve(
@@ -123,7 +123,7 @@ class QARetriever:
         ctx = RetrievedContext(question=question, project_id=project_id, skill_id=skill_id)
 
         # 1. 语义检索候选实体
-        candidates = self.business_store.search_method_hits_by_text(
+        candidates = self.interpretation_store.search_method_hits_by_text(
             text=question, project_id=project_id, limit=top_k
         )
 

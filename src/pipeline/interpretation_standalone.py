@@ -74,7 +74,7 @@ def get_interpretation_progress_from_weaviate(
                 store.close()
 
         # business_interpretation removed in topological-unification refactor; stub zero progress
-        # (WeaviateBusinessInterpretStore / vectordb_business 将在 Task 3 中彻底删除)
+        # 业务解读相关已彻底删除（拓扑解读统一化）
     except Exception as e:
         if isinstance(e, (OSError, json.JSONDecodeError)):
             _LOG.warning(
