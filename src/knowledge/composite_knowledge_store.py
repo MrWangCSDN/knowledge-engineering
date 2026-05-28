@@ -276,17 +276,27 @@ class CompositeKnowledgeStore:
             )
             return []
 
-        # 3. 归一化（列表推导式）：(eid, score) tuple → dict
+        # 3. 归一化 + dedup
+        # code_store 理论上可能返重复 entity_id（shard 重叠 / query rewrite 等情况），
+        # 用 seen set 保留首次出现顺序，避免下游 LLM 看到重复候选
+        # `set[str]`：Python 3.9+ 内置泛型写法，集合内只存字符串
+        seen: set[str] = set()
+        # `list[dict[str, Any]]`：同上，列表内存任意值 dict
+        results: list[dict[str, Any]] = []
         # `for (eid, _score) in hits` 是解包赋值：把 tuple 里的两个值分别绑定到变量
         # `_score` 以下划线开头表示"刻意忽略该值"（分数不需要透传给 caller）
-        # level="code_entity" 让 LLM 判断分支知道这是代码层数据，业务解读缺失
-        return [
-            {
+        for (eid, _score) in hits:
+            # `if x in set` 是 O(1) 查询；list 是 O(N)，所以 set 更适合 dedup
+            if eid in seen:
+                # 已见过，跳过（保留首次出现顺序）
+                continue
+            # 标记为已见
+            seen.add(eid)
+            results.append({
                 "entity_id": eid,
-                "summary_text": "",        # 实事求是：CodeEntity 没业务解读，给空字符串
-                "level": "code_entity",    # 标记兜底来源，区别于 BI 路径的 method/class
+                "summary_text": "",       # 实事求是：CodeEntity 没业务解读
+                "level": "code_entity",   # 标记兜底来源
                 # 不带 name / location —— 节省 token，QARetriever 后续扩展时补
-                # 不带 neighbors —— 与 BI 路径同型（QARetriever 后置扩展负责补图谱邻居）
-            }
-            for (eid, _score) in hits     # 遍历 code_store 返回的 (entity_id, score) 对
-        ]
+                # 不带 neighbors —— 与 BI 路径同型
+            })
+        return results

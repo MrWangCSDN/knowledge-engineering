@@ -5,8 +5,8 @@
 # unittest.mock：标准库，假对象工具
 from unittest.mock import MagicMock
 
-# pytest：测试框架；用 fixture / raises 等
-import pytest
+# logging：用于 caplog 测试日志输出（多处用，hoist 到顶部）
+import logging
 
 # 被测：first run 会 ImportError —— TDD RED 阶段
 from src.knowledge.composite_knowledge_store import (
@@ -140,7 +140,6 @@ def test_bi_raises_generic_error_falls_to_code_warns(caplog):
     )
 
     # `caplog.at_level(level, logger_name)` 设捕获级别和 logger
-    import logging
     with caplog.at_level(logging.WARNING, logger="src.knowledge.composite_knowledge_store"):
         result = composite.search_method_hits_by_text(
             text="x", project_id="mall-swarm", limit=5
@@ -182,7 +181,6 @@ def test_code_store_raises_returns_empty(caplog):
         code_exc=RuntimeError("code store unavailable"),
     )
 
-    import logging
     with caplog.at_level(logging.WARNING, logger="src.knowledge.composite_knowledge_store"):
         result = composite.search_method_hits_by_text(
             text="x", project_id="mall-swarm", limit=5
@@ -203,3 +201,109 @@ def test_code_store_none_skips_fallback():
     assert result == []
     # bi 被调；code 是 None 没法被调
     bi.search_method_hits_by_text.assert_called_once()
+
+
+# ─── get_by_entity 3 个测试 ────────────────────────────────────────────────
+
+
+def test_get_by_entity_delegates_to_bi():
+    """get_by_entity 直接代理 BI 的结果。"""
+    expected_record = {
+        "entity_id": "method//foo",
+        "summary_text": "处理用户登录",
+        "level": "method",
+    }
+    composite, bi, code = _make_composite()
+    # `return_value` 在 mock 没 side_effect 时直接返
+    bi.get_by_entity.return_value = expected_record
+
+    result = composite.get_by_entity("method//foo", level="method")
+
+    assert result == expected_record
+    # 验证带 project_id 调用（adapter 风格）
+    bi.get_by_entity.assert_called_once_with(
+        "method//foo", project_id="mall-swarm", level="method"
+    )
+
+
+def test_get_by_entity_tenant_not_found_returns_none(caplog):
+    """BI.get_by_entity 抛 tenant_not_found → catch + 返 None，DEBUG 日志。"""
+    composite, bi, code = _make_composite()
+    bi.get_by_entity.side_effect = RuntimeError("tenant not found: mall-swarm")
+
+    with caplog.at_level(logging.DEBUG, logger="src.knowledge.composite_knowledge_store"):
+        result = composite.get_by_entity("method//bar")
+
+    assert result is None
+    # tenant_not_found 走 DEBUG（高频，避免噪音）
+    assert any("tenant 不存在" in rec.message for rec in caplog.records)
+
+
+def test_get_by_entity_generic_error_warns_returns_none(caplog):
+    """BI.get_by_entity 抛非 tenant_not_found 异常 → WARNING + 返 None。"""
+    composite, bi, code = _make_composite()
+    bi.get_by_entity.side_effect = ConnectionError("network down")
+
+    with caplog.at_level(logging.WARNING, logger="src.knowledge.composite_knowledge_store"):
+        result = composite.get_by_entity("method//baz")
+
+    assert result is None
+    # generic error 走 WARNING（低频，要看见）
+    assert any("get_by_entity 失败" in rec.message and "ConnectionError" in rec.message
+               for rec in caplog.records)
+
+
+# ─── Task 1 code review carryover ──────────────────────────────────────────
+
+
+def test_get_by_entity_legacy_signature_fallback():
+    """legacy adapter 不接受 project_id kwarg → 走 TypeError fallback 用 2-arg 签名重试。
+
+    覆盖 Task 1 code review I-1：让 TypeError 分支不再是 dead code。
+    """
+    expected_record = {"entity_id": "method//legacy", "level": "method"}
+    composite, bi, code = _make_composite()
+
+    # `side_effect` 用一个函数 / list 模拟"第一次抛 + 第二次返"行为
+    # 这里用 list：[第 1 次结果, 第 2 次结果, ...]；元素是 Exception 实例就 raise，其它直接返
+    bi.get_by_entity.side_effect = [
+        TypeError("get_by_entity() got an unexpected keyword argument 'project_id'"),
+        expected_record,
+    ]
+
+    result = composite.get_by_entity("method//legacy", level="method")
+
+    # 第二次调用（fallback）的结果被返
+    assert result == expected_record
+    # 验证调用了两次：第一次带 project_id，第二次不带
+    assert bi.get_by_entity.call_count == 2
+    # 第一次是 modern signature
+    first_call_kwargs = bi.get_by_entity.call_args_list[0].kwargs
+    assert "project_id" in first_call_kwargs
+    # 第二次是 legacy（无 project_id）
+    second_call_kwargs = bi.get_by_entity.call_args_list[1].kwargs
+    assert "project_id" not in second_call_kwargs
+
+
+def test_code_fallback_dedupes_entity_ids():
+    """code_store 返重复 entity_id → composite 归一化时去重保留首次。
+
+    覆盖 Task 1 code review I-2：归一化层 dedup 防御。
+    """
+    code_hits = [
+        ("method//a", 0.95),
+        ("method//b", 0.85),
+        ("method//a", 0.80),   # 重复 a
+        ("method//c", 0.70),
+        ("method//b", 0.65),   # 重复 b
+    ]
+    composite, bi, code = _make_composite(bi_results=[], code_results=code_hits)
+
+    result = composite.search_method_hits_by_text(
+        text="x", project_id="mall-swarm", limit=5
+    )
+
+    # 5 个 raw 但只 3 unique
+    assert len(result) == 3
+    # 顺序保留首次出现：a, b, c
+    assert [r["entity_id"] for r in result] == ["method//a", "method//b", "method//c"]
