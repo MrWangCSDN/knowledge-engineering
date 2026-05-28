@@ -80,21 +80,56 @@ def _sync_graph_to_neo4j(
         edges = list(g.edges(keys=True))
         n_total, e_total = len(nodes), len(edges)
         total_steps = n_total + e_total
-        step = 0
-        for i, nid in enumerate(nodes):
-            attrs = _neo4j_sanitize(dict(g.nodes[nid]))
-            backend.add_node(nid, **attrs)
-            step += 1
+
+        # ─── 性能优化：用 UNWIND batch 替代 per-item add_node/add_edge ───
+        # staging Neo4j 单 RTT ~120ms × 18000+ edges = 2.5+ 小时；
+        # batch 500/chunk → 18000/500 ≈ 36 RTT × 120ms = ~5s
+        # 如果 backend 没实现 batch 方法（如旧 memory backend），fallback 到 per-item
+        has_batch = (
+            hasattr(backend, "add_nodes_batch")
+            and hasattr(backend, "add_edges_batch")
+        )
+
+        if has_batch:
+            # 1) 批量 node：[(nid, attrs_dict), ...]
+            # 列表推导式一次性 sanitize 所有节点属性
+            node_items = [
+                (nid, _neo4j_sanitize(dict(g.nodes[nid])))
+                for nid in nodes
+            ]
+            backend.add_nodes_batch(node_items)
             if progress_callback and total_steps:
-                progress_callback(step, total_steps, f"同步节点 {i + 1}/{n_total}")
-        for i, (u, v, k) in enumerate(edges):
-            ed = dict(g.edges[u, v, k])
-            rel_type = ed.pop("rel_type", "RELATED")
-            ed = _neo4j_sanitize(ed)
-            backend.add_edge(u, v, rel_type=rel_type, **ed)
-            step += 1
+                # 节点同步一次性算"完成 n_total"步
+                progress_callback(n_total, total_steps, f"同步节点 {n_total}/{n_total} (batch)")
+
+            # 2) 批量 edge：[(sid, tid, rel_type, attrs_dict), ...]
+            edge_items = []
+            for u, v, k in edges:
+                ed = dict(g.edges[u, v, k])
+                rel_type = ed.pop("rel_type", "RELATED")
+                ed = _neo4j_sanitize(ed)
+                edge_items.append((u, v, rel_type, ed))
+            backend.add_edges_batch(edge_items)
             if progress_callback and total_steps:
-                progress_callback(step, total_steps, f"同步边 {i + 1}/{e_total}")
+                progress_callback(total_steps, total_steps, f"同步边 {e_total}/{e_total} (batch)")
+        else:
+            # legacy fallback：原 per-item 实现（兼容老 backend）
+            step = 0
+            for i, nid in enumerate(nodes):
+                attrs = _neo4j_sanitize(dict(g.nodes[nid]))
+                backend.add_node(nid, **attrs)
+                step += 1
+                if progress_callback and total_steps:
+                    progress_callback(step, total_steps, f"同步节点 {i + 1}/{n_total}")
+            for i, (u, v, k) in enumerate(edges):
+                ed = dict(g.edges[u, v, k])
+                rel_type = ed.pop("rel_type", "RELATED")
+                ed = _neo4j_sanitize(ed)
+                backend.add_edge(u, v, rel_type=rel_type, **ed)
+                step += 1
+                if progress_callback and total_steps:
+                    progress_callback(step, total_steps, f"同步边 {i + 1}/{e_total}")
+
         if progress_callback and total_steps:
             progress_callback(total_steps, total_steps, "Neo4j 同步完成")
     finally:

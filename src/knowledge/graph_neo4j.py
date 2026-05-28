@@ -97,6 +97,82 @@ class Neo4jGraphBackend:
                 attrs=edge_attrs,
             )
 
+    # ─── batch 接口：sync 大量数据时用 UNWIND 批量 query，N 个 RTT 摊到 1 个 ──
+
+    def add_nodes_batch(self, items: Sequence[tuple[str, dict[str, Any]]], chunk_size: int = 500) -> None:
+        """批量 MERGE 节点。
+
+        :param items: [(nid, attrs_dict), ...]，attrs 已经被 _neo4j_sanitize 处理
+        :param chunk_size: 每批多少条，默认 500（实测 staging Neo4j 平衡点：太大单次 query 慢，太小 RTT 多）
+
+        实现：每 chunk 一条 `UNWIND $items AS it MERGE (n:Entity {id: it.id}) SET n += it.attrs`，
+        N 个节点 → ceil(N/chunk_size) 个 RTT，对比原来 N 个 RTT，**降低 1-2 个数量级**。
+        """
+        if not items:
+            return
+        # 列表推导 + 过滤 None 属性（保持与单条 add_node 一致的行为）
+        # `dict.copy()` 是浅拷贝，避免修改 caller 传入的 dict
+        rows: list[dict[str, Any]] = []
+        for nid, attrs in items:
+            row_attrs = {k: v for k, v in (attrs or {}).items() if v is not None}
+            if self._project_id:
+                row_attrs["project_id"] = self._project_id
+            rows.append({"id": nid, "attrs": row_attrs})
+
+        cypher = f"""
+        UNWIND $items AS it
+        MERGE (n:{self.LABEL} {{id: it.id}})
+        SET n += it.attrs
+        """
+        # 一个 session 内多次 run，复用 connection；range 步进切片
+        with self._driver.session(database=self._database) as session:
+            for i in range(0, len(rows), chunk_size):
+                chunk = rows[i:i + chunk_size]
+                # session.run 默认 auto-commit transaction；每个 chunk 一个 commit
+                session.run(cypher, items=chunk)
+
+    def add_edges_batch(
+        self,
+        items: Sequence[tuple[str, str, str, dict[str, Any]]],
+        chunk_size: int = 500,
+    ) -> None:
+        """批量 CREATE 边。
+
+        :param items: [(source_id, target_id, rel_type, attrs_dict), ...]
+        :param chunk_size: 默认 500
+
+        实现注意：Neo4j relationship type 不能用参数化（只能写在 Cypher 文本里），
+        所以按 rel_type 分组 → 每组一条 UNWIND。少量 rel_type（calls/belongs_to/...）
+        加起来仍是 N 个 RTT << M edges 个 RTT。
+        """
+        if not items:
+            return
+
+        # 1. 按 rel_type 分组
+        # `dict.setdefault(key, default)` — 不存在时插入并返默认；存在时返已有值
+        by_type: dict[str, list[dict[str, Any]]] = {}
+        for sid, tid, rel, attrs in items:
+            rtype = _rel_type(rel)
+            row_attrs = {"rel_type": rel, **{k: v for k, v in (attrs or {}).items() if v is not None}}
+            if self._project_id:
+                row_attrs["project_id"] = self._project_id
+            by_type.setdefault(rtype, []).append({"sid": sid, "tid": tid, "attrs": row_attrs})
+
+        # 2. 每 rel_type 分组发 chunk 批
+        # 注意：用 CREATE 而非 MERGE 边（与原 add_edge 一致行为 — 一对节点可以有多条同类型边）
+        with self._driver.session(database=self._database) as session:
+            for rtype, rows in by_type.items():
+                cypher = f"""
+                UNWIND $items AS e
+                MERGE (a:{self.LABEL} {{id: e.sid}})
+                MERGE (b:{self.LABEL} {{id: e.tid}})
+                CREATE (a)-[r:{rtype}]->(b)
+                SET r += e.attrs
+                """
+                for i in range(0, len(rows), chunk_size):
+                    chunk = rows[i:i + chunk_size]
+                    session.run(cypher, items=chunk)
+
     def has_node(self, nid: str) -> bool:
         with self._driver.session(database=self._database) as session:
             r = session.run(f"MATCH (n:{self.LABEL} {{id: $id}}) RETURN n", id=nid)
