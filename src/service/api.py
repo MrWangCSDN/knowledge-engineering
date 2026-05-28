@@ -65,7 +65,7 @@ def get_graph() -> KnowledgeGraph:
 
 
 def get_graph_optional() -> Optional[KnowledgeGraph]:
-    """供 Streamlit 等前端使用：返回图实例或 None（未构建时）。"""
+    """供前端等消费方使用：返回图实例或 None（未构建时）。"""
     return get_app_context().get_graph_optional()
 
 
@@ -495,7 +495,7 @@ def _load_config_for_neo4j(ctx: AppContext) -> Optional[dict]:
 
     from src.pipeline.config_bootstrap import load_config
 
-    # Streamlit 常见 cwd 与仓库根不一致；除 cwd 外再尝试本包所在项目根下的默认配置
+    # 启动 cwd 与仓库根可能不一致；除 cwd 外再尝试本包所在项目根下的默认配置
     here = Path(__file__).resolve()
     candidates = [
         Path.cwd() / "config" / "project.yaml",
@@ -530,7 +530,7 @@ def _get_neo4j_calls_backend(ctx: AppContext):
 
 def get_neo4j_backend_optional():
     """
-    供 Streamlit 等使用：若已配置 Neo4j 则返回 Neo4jGraphBackend 实例，否则返回 None。
+    供消费方使用：若已配置 Neo4j 则返回 Neo4jGraphBackend 实例，否则返回 None。
     调用方负责在不再使用时调用 backend.close()。
     """
     ctx = get_app_context()
@@ -584,36 +584,6 @@ def get_callers(
         return {"class_name": class_name, "method_name": method_name, "count": len(items), "callers": items}
     finally:
         backend.close()
-
-
-@app.post("/knowledge/ontology/run")
-def run_ontology(
-    ctx: AppContext = Depends(get_app_context),
-    _user: User = Depends(get_current_user),
-    export_owl: bool = Query(True, description="是否导出 OWL"),
-    reasoner: str = Query("builtin", description="builtin=传递闭包, hermit=需 Java+HermiT"),
-    write_inferred_to_graph: bool = Query(True, description="是否将推理边写回图"),
-) -> dict[str, Any]:
-    """
-    按需执行 OWL 本体流水线：导出 OWL、运行推理、可选写回图。
-    需先运行流水线构建知识图谱；需安装 pip install -e '.[owl]'。
-    """
-    g = _graph_http(ctx)
-    try:
-        from src.knowledge.ontology import run_ontology_pipeline
-    except ImportError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"未安装 OWL 依赖，请执行: pip install -e '.[owl]'；{e!r}",
-        ) from e
-    result = run_ontology_pipeline(
-        g,
-        export_owl=export_owl,
-        export_path=None,
-        run_reasoner=reasoner,
-        write_inferred_to_graph=write_inferred_to_graph,
-    )
-    return result
 
 
 @app.post("/knowledge/load_snapshot")

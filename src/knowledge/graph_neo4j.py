@@ -722,7 +722,7 @@ class Neo4jGraphBackend:
 
     def iter_nodes(self):
         """
-        迭代所有节点，产出 (node_id, attrs_dict)。与 KnowledgeGraph.iter_nodes() 语义一致，供 OWL 导出与推理使用。
+        迭代所有节点，产出 (node_id, attrs_dict)。与 KnowledgeGraph.iter_nodes() 语义一致。
         """
         with self._driver.session(database=self._database) as session:
             r = session.run(f"MATCH (n:{self.LABEL}) RETURN n")
@@ -770,41 +770,3 @@ class Neo4jGraphBackend:
                 attrs = {"rel_type": rel_type}
                 yield str(sid), str(tid), rel_type, attrs
 
-    def add_inferred_edge(self, source_id: str, target_id: str, rel_type: str, **attrs: Any) -> None:
-        """
-        添加一条推理得到的边（带 inferred=True）。使用 MERGE 避免重复边。
-        """
-        rtype = _rel_type(rel_type)
-        with self._driver.session(database=self._database) as session:
-            session.run(
-                f"""
-                MERGE (a:{self.LABEL} {{id: $sid}})
-                MERGE (b:{self.LABEL} {{id: $tid}})
-                MERGE (a)-[r:{rtype}]->(b)
-                SET r.rel_type = $rel_type, r.inferred = true
-                """,
-                sid=source_id,
-                tid=target_id,
-                rel_type=rel_type,
-            )
-
-    def list_inferred_edges(self, limit: int = 500) -> List[dict]:
-        """
-        返回图中标记为 inferred 的边列表，每项 {"source": id, "target": id, "rel_type": str}。
-        用于 OWL 推理 Tab 展示「当前图中的推断边」。
-        """
-        with self._driver.session(database=self._database) as session:
-            # 关系上可能有 inferred 属性；Neo4j 无全局关系属性查询，需按已知关系类型查
-            r = session.run(
-                f"""
-                MATCH (a:{self.LABEL})-[r]->(b:{self.LABEL})
-                WHERE r.inferred = true
-                RETURN a.id AS sid, b.id AS tid, r.rel_type AS rel_type
-                LIMIT $limit
-                """,
-                limit=limit,
-            )
-            return [
-                {"source": rec.get("sid"), "target": rec.get("tid"), "rel_type": rec.get("rel_type") or ""}
-                for rec in r if rec.get("sid") and rec.get("tid")
-            ]

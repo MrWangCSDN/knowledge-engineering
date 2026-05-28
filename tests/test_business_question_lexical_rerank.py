@@ -1,4 +1,4 @@
-"""词面重排纯函数单测（不依赖 Streamlit）。"""
+"""词面重排纯函数单测。"""
 from src.knowledge.business_question_lexical_rerank import (
     merge_method_hits_max_score,
     query_terms_for_rerank,

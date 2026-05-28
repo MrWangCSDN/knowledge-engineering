@@ -16,8 +16,6 @@ dependencies = [
     "fastapi>=0.100.0",
     "uvicorn[standard]>=0.22.0",
     "httpx>=0.24.0",
-    "streamlit>=1.28.0",
-    "streamlit-autorefresh>=0.0.6",
     "weaviate-client>=4.4",
     # qa_engine.docx_exporter 用 python-docx 把 assistant 答案导出 Word；
     # 2026-05-21 发现 dependencies 漏列（生产 clone 后 import api 即 ModuleNotFoundError），补上
@@ -27,7 +25,6 @@ dependencies = [
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
 vector = ["chromadb>=0.4.0", "sentence-transformers>=2.2.0"]
-owl = ["rdflib>=7.0.0"]
 # 云端 / 第三方 LLM（技术解读、业务解读的 llm_backend）
 llm-openai = ["openai>=1.40.0"]
 llm-anthropic = ["anthropic>=0.34.0"]
@@ -58,7 +55,3 @@ markers = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-# Streamlit 文案：随 ``app`` 包安装
-[tool.setuptools.package-data]
-"app" = ["resources/*.yaml"]

@@ -1,8 +1,8 @@
 # 代码知识工程（knowledge-engineering）
 
-一个面向“代码仓库 → 结构事实 → 语义增强 → 知识图谱 →（可选）解读与推理 → 可检索/可解释 UI”的端到端工程。
+一个面向"代码仓库 → 结构事实 → 语义增强 → 知识图谱 →（可选）解读 → 可检索/可解释 API"的端到端工程。
 
-工程以 **流水线（pipeline）** 为核心，并通过 **Streamlit（UI）** 与 **FastAPI（API）** 两种入口消费同一套产物：知识图谱（memory/Neo4j）与向量/解读库（memory/Weaviate）。
+工程以 **流水线（pipeline）** 为核心，通过 **FastAPI** 对外提供检索、影响分析、子图查询等能力；前端在独立仓 `knowledge-engineering-web` 中维护（前后端分离）。后端单一交付物是 API 服务，消费同一套底层产物：知识图谱（memory/Neo4j）与向量/解读库（memory/Weaviate）。
 
 ---
 
@@ -19,11 +19,9 @@
    - **技术解读（method_interpretation）**：为方法写入 LLM 解读文本，并入 Weaviate 的 `vectordb-interpret` 集合。
    - **业务解读（business_interpretation）**：为类/API/模块写入三层业务综述，并入 Weaviate 的 `vectordb-business` 集合。
    - 两类解读均支持增量续跑（跳过已存在的键）。
-5. **OWL 推理（Ontology，可选）**
-   - 基于图谱执行本体推理，可选将推断边写回图谱。
-6. **可检索/可解释消费**
-   - Streamlit 提供“步骤化探索 UI”（构建、统计、检索、影响分析、解读专区、场景可视化）。
-   - FastAPI 提供检索与影响分析 API，必要时走 Neo4j 查询直接调用关系。
+5. **可检索/可解释消费**
+   - FastAPI 提供检索、影响分析、子图、解读拉取等 API，必要时走 Neo4j 查询直接调用关系。
+   - 前端（`knowledge-engineering-web`，独立仓库）消费上述 API 完成步骤化探索、影响分析、解读浏览、场景可视化等界面。
 
 ---
 
@@ -74,9 +72,9 @@
 
 **典型入口**
 
-- Streamlit “解读给定的 method” 场景：先看源码，再看该方法已有技术解读。
-- “业务问题找代码”“反向从代码看意图”等向量检索场景：先召回候选方法，再展开查看方法级解读。
-- `WeaviateDataService.fetch_method_interpretation(...)` 一类按 `method_entity_id` 的读取链路。
+- 前端"解读给定的 method"场景：先看源码，再看该方法已有技术解读。
+- "业务问题找代码""反向从代码看意图"等向量检索场景：先召回候选方法，再展开查看方法级解读。
+- API 端按 `method_entity_id` 拉取方法解读的读取链路。
 
 **优点 / 约束**
 
@@ -133,17 +131,17 @@
 | 成本 | 主要发生在离线构建阶段 | 主要发生在每次实时分析时 |
 | 是否依赖预构建 | 依赖。需先写入 Weaviate 解读库 | 可不依赖已有解读库，但依赖图谱 / 结构事实 / 调用边 |
 | 适合场景 | 搜索、浏览、候选定位、方法速读 | 链路说明、业务流程分析、需求覆盖率分析 |
-| 当前接入状态 | 已接入 Streamlit 场景与 Weaviate 消费链路 | 解释引擎已实现，当前主要体现在核心代码 / 脚本能力，尚未像模式 A 那样完整接入 UI/API 主流程 |
+| 当前接入状态 | 已接入 API 与 Weaviate 消费链路 | 解释引擎已实现，当前主要体现在核心代码 / 脚本能力，尚未像模式 A 那样完整接入 API 主流程 |
 
 ### 5）当前项目中的落地状态
 
 - **模式 A 已是主路径能力**
-  - 已有完整的“生成 → 落库 → UI 消费”闭环。
-  - 当前 Streamlit 的方法详情、向量检索、业务问题找代码等场景，都是围绕这套方法级解读库展开。
+  - 已有完整的"生成 → 落库 → API 消费"闭环。
+  - 当前前端的方法详情、向量检索、业务问题找代码等场景，都是围绕这套方法级解读库展开。
 - **模式 B 已有能力内核，但仍偏引擎 / demo 形态**
   - `CallChainInterpreter` 已实现实时链路展开、接口到实现跳转、SQL 注入和结构化 prompt 生成。
   - `run_requirement_analysis.py` 已把模式 B 用在需求覆盖率分析 demo 中。
-  - 但它目前还没有像模式 A 那样，全面接入现有 Streamlit / FastAPI 主流程，不能简单视为“已上线的统一主入口能力”。
+  - 但它目前还没有像模式 A 那样，全面接入现有 FastAPI 主流程，不能简单视为"已上线的统一主入口能力"。
 
 ### 6）推荐使用策略
 
@@ -163,15 +161,13 @@
 
 ## 运行方式（快速开始）
 
-### 1）启动 Streamlit UI
-
-项目入口脚本为仓库根的 `main.py`：
+### 1）启动 FastAPI 服务
 
 ```bash
-python main.py
+uvicorn src.service.api:app --reload --host 0.0.0.0 --port 8000
 ```
 
-该脚本会调用 `streamlit run src/app/streamlit_app.py`，并设置服务为 `http://localhost:8501`。
+API 文档：`http://localhost:8000/docs`。前端在独立仓 `knowledge-engineering-web` 中启动，通过 API 消费数据。
 
 ### 2）运行流水线（结构/语义/知识/解读）
 
@@ -214,7 +210,6 @@ python -m src.pipeline.cli --config config/project.yaml --until knowledge
   - `graph`：图后端（`memory | neo4j`）
   - `vectordb-code / vectordb-interpret / vectordb-business`：三个向量库集合的启用、后端与 Weaviate 连接参数
   - `method_interpretation / business_interpretation`：LLM 选择、timeout 与 max_* 的分批增量策略
-  - `ontology`：OWL 推理开关与写回策略
 
 ---
 
@@ -222,20 +217,19 @@ python -m src.pipeline.cli --config config/project.yaml --until knowledge
 
 ### 1）分层与依赖方向（读者视角）
 
-- **`src/app/`（UI / presentation）**：Streamlit 页面、组件与步骤化渲染
 - **`src/pipeline/`（orchestration）**：加载配置、构建段（stage）与执行顺序表
 - **`src/structure/` & `src/semantic/`（计算层）**：结构抽取与语义增强
 - **`src/knowledge/`（图谱与解读 domain logic）**：
-  - 图谱构建/同步、向量库适配、技术/业务解读 runner、OWL 集成
+  - 图谱构建/同步、向量库适配、技术/业务解读 runner
 - **`src/persistence/`（storage 抽象）**：结构事实缓存、知识快照等持久化接口
 - **`src/service/`（FastAPI API）**：检索/影响分析/子图数据等对外接口
 - **`src/core/`（横切能力）**：上下文、枚举、路径与默认值（单一来源）
 
-设计要点：UI/API 不需要理解流水线内部实现细节，优先通过 `src/pipeline/gateways.py` 的窄接口加载配置与解读进度。
+设计要点：API 层与外部前端不需要理解流水线内部实现细节，优先通过 `src/pipeline/gateways.py` 的窄接口加载配置与解读进度。
 
 ### 2）主数据流（pipeline）
 
-当用户点击 UI 的“运行流水线”（或在命令行触发）时，系统执行：
+当用户通过 API 或命令行触发"运行流水线"时，系统执行：
 
 1. `StructureStage`
    - `load_code_source` 构建输入源
@@ -248,23 +242,14 @@ python -m src.pipeline.cli --config config/project.yaml --until knowledge
 4. `InterpretationStage`（可选）
    - `run_method_interpretations`（技术解读）
    - `run_business_interpretations`（业务解读）
-5. `OntologyStage`（可选）
-6. `FinalizeStage`
+5. `FinalizeStage`
    - 统计图谱规模、生成返回消息与快照/缓存
 
-这套顺序由 `src/pipeline/full_pipeline_orchestrator.py` 的“段表（table）”显式定义，保证系统行为稳定、可测试、可扩展。
+这套顺序由 `src/pipeline/full_pipeline_orchestrator.py` 的"段表（table）"显式定义，保证系统行为稳定、可测试、可扩展。
 
 ---
 
 ## 模块划分（按目录）
-
-### `src/app/`：Streamlit 前端与场景
-
-- `streamlit_app.py`：入口（缓存 `AppServices`，注入默认 `project.yaml`，渲染 Sidebar/MainContent）
-- `facades/`：侧边栏/主内容/影响分析等“页面编排器”
-- `components/`：进度条、表格、解读专区等可复用组件
-- `views/scene_template_room/`：场景模板（方法解读、调用关系展开、能力实现概览等）
-- `services/`：Weaviate 拉取服务 `WeaviateDataService`
 
 ### `src/pipeline/`：流水线编排与入口
 
@@ -293,7 +278,7 @@ python -m src.pipeline.cli --config config/project.yaml --until knowledge
   - 能力路径匹配（path_pattern）
   - embed_text 拼接（供向量化）
 
-### `src/knowledge/`：图谱构建、向量适配、解读与 OWL
+### `src/knowledge/`：图谱构建、向量适配、解读
 
 - `graph.py`：`KnowledgeGraph`（内存图 + 向量后端统一视图）
 - `graph_neo4j.py`：Neo4j 后端封装（影响闭包、calls/pred/succ 查询等）
@@ -327,7 +312,6 @@ python -m src.pipeline.cli --config config/project.yaml --until knowledge
 在 `pyproject.toml` 中已经按能力分组了可选依赖：
 - `neo4j`：Neo4j 驱动
 - `vector`：如果扩展本地向量相关实现
-- `owl`：OWL/推理依赖（rdflib）
 - `llm-openai` / `llm-anthropic` / `llm`：云端 LLM provider
 
 本地默认可先以 `memory` 图后端 + `weaviate` 向量后端 + `ollama` embedding/LLM 的组合跑通主链路。
@@ -372,7 +356,6 @@ python -m src.pipeline.cli --config config/project.yaml --until knowledge
 cd knowledge-engineering
 pip install -e ".[neo4j]"   # 可选: 使用 Neo4j 持久化
 pip install -e ".[vector]"  # 可选: 向量检索
-pip install -e ".[owl]"     # 可选: OWL 本体导出与推理机（传递闭包等）
 pip install -e ".[llm]"     # 可选: 技术/业务解读使用 OpenAI 或 Anthropic（见下）
 # 或仅其一: pip install -e ".[llm-openai]" / pip install -e ".[llm-anthropic]"
 ```
@@ -384,23 +367,14 @@ pip install -e ".[llm]"     # 可选: 技术/业务解读使用 OpenAI 或 Anthr
 - `repo.path`: 目标代码库本地路径（或 Git 克隆路径）
 - `repo.modules`: 模块/服务列表（如 Maven 子模块名）
 - `domain`: 领域词表与「服务—业务域」映射
-- `knowledge.ontology`: 可选 OWL 推理——`enabled: true` 时在构建后导出 OWL、运行内置传递闭包推理并将推断边写回图
 - `knowledge.vectordb-code`: 源代码向量库。`backend: weaviate` 且 `enabled: true` 时，流水线会把**每个方法的代码片段**写入 Weaviate，`entity_id` 与知识图谱中的方法节点一一对应，便于按代码语义检索并关联回图谱。Weaviate 连接信息（含 API Key）见 `config/project.yaml` 与你的 `docker-compose.yaml`。
-- **`knowledge.pipeline.include_method_interpretation_build`**：`false`（默认）时每次流水线**只**重建图谱 + 代码向量，**不清空、不重算**技术解读库（适合日常迭代）。`true` 或与 Streamlit 勾选「包含技术解读」、命令行 `--with-interpretation` 时，会清空解读库并调用 LLM 全量重建（极慢）。
+- **`knowledge.pipeline.include_method_interpretation_build`**：`false`（默认）时每次流水线**只**重建图谱 + 代码向量，**不清空、不重算**技术解读库（适合日常迭代）。`true` 或命令行 `--with-interpretation` 时，会清空解读库并调用 LLM 全量重建（极慢）。
 - **稳定实体 ID（canonical_v1）**：`file://` + 仓库相对路径；`class//`、`method//` 为对「路径 + 类型名 + 签名」的确定性 SHA256 短哈希。同一方法路径与签名不变则 `method_id` 不变，解读库可与多次「仅图谱+代码」构建对齐。**文件移动或方法改签会换新 ID**，旧解读可能残留，需再跑一轮带解读的构建或后续做增量清理。
 - **`knowledge.method_interpretation` + `knowledge.vectordb-interpret`**：调用 LLM 生成技术解读；`language: zh` / `en`。解读写入独立 Weaviate collection。CLI：`python -m src.pipeline.cli --with-interpretation` / `--without-interpretation` 覆盖配置。
   - **`llm_backend`**：`ollama`（默认，本地）、`openai`（官方或兼容 API）、`anthropic`。OpenAI 需安装 `.[llm-openai]`，配置 `openai_api_key` 或环境变量 `OPENAI_API_KEY`；可选 `openai_base_url`（转发网关、Azure 等）。Anthropic 需 `.[llm-anthropic]` 与 `anthropic_api_key` / `ANTHROPIC_API_KEY`。
   - **`llm_allow_fallback_to_ollama`**：默认 `false`。为 `true` 时，若选了 `openai`/`anthropic` 但未安装对应 Python 包，会回退到本地 Ollama；为 `false` 则直接报错（fail-fast）。
 - **`knowledge.business_interpretation`**：同上，独立 `llm_backend` 与各提供商字段。
 - **`knowledge.vectordb-code` 等向量库**：**`allow_fallback_to_memory`** 默认 `false`。Weaviate 创建失败时是否回退内存向量库；生产环境建议保持 `false`，避免误以为数据已进 Weaviate。
-
-## 启动 Web 应用（推荐）
-
-```bash
-python main.py
-```
-
-浏览器访问 http://localhost:8501。在侧栏选择配置文件并点击「运行流水线」构建知识图谱后，可使用检索、影响分析、图谱子图、统计等能力。
 
 ## 运行流水线（命令行）
 
@@ -420,7 +394,7 @@ uvicorn src.service.api:app --reload --host 0.0.0.0 --port 8000
 
 API 文档: http://localhost:8000/docs
 
-- **OWL 推理**：安装 `.[owl]` 后，配置 `knowledge.ontology.enabled: true` 可在流水线结束后自动执行；或调用 `POST /knowledge/ontology/run` 按需执行导出与推理。
+前端：独立仓 `knowledge-engineering-web`，启动后通过 CORS 访问本服务。
 
 ## 项目结构
 

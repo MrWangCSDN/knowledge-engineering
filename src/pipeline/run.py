@@ -21,7 +21,6 @@ from src.pipeline.context_builders import (
     _build_finalize_ctx,
     _build_interpretation_ctx,
     _build_knowledge_ctx,
-    _build_ontology_ctx,
     _build_semantic_ctx,
     _build_structure_ctx,
 )
@@ -38,8 +37,6 @@ from src.pipeline.stage_runtime import (
     KnowledgeAwareStageContext,
     KnowledgeStage,
     KnowledgeStageContext,
-    OntologyStage,
-    OntologyStageContext,
     PipelineStage,
     SemanticStage,
     SemanticStageContext,
@@ -70,13 +67,10 @@ __all__ = [
     "FinalizeStageContext",
     "FinalizeStage",
     "InterpretationStage",
-    "OntologyStageContext",
-    "OntologyStage",
     "_build_structure_ctx",
     "_build_semantic_ctx",
     "_build_knowledge_ctx",
     "_build_interpretation_ctx",
-    "_build_ontology_ctx",
     "_build_finalize_ctx",
 ]
 

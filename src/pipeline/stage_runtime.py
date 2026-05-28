@@ -329,7 +329,6 @@ class FinalizeStageContext(KnowledgeAwareStageContext):
     structure_repo: StructureFactsRepository
     structure_facts: StructureFacts
     config_path: str | Path
-    ontology_result: Optional[dict[str, Any]]
     interp_stats: dict[str, Any]
     biz_stats: dict[str, Any]
     result: Optional[dict[str, Any]] = None
@@ -363,8 +362,6 @@ class FinalizeStage:
             msg += "；未配置 Neo4j（knowledge.graph.backend 非 neo4j）"
         elif neo4j_status is None:
             msg += "；Neo4j 同步未执行"
-        if ctx.ontology_result and not ctx.ontology_result.get("errors"):
-            msg += f"；OWL 推理完成（推断边 {ctx.ontology_result.get('inferred_count', 0)} 条，写回 {ctx.ontology_result.get('written_to_graph', 0)} 条）"
         if ctx.interp_stats.get("mode") == "graph_and_code_only":
             msg += "；技术解读库已保留（未重建）"
         elif ctx.interp_stats.get("mode") == "interpret_config_disabled":
@@ -399,8 +396,6 @@ class FinalizeStage:
             "interpretation": ctx.interp_stats,
             "business_interpretation": ctx.biz_stats,
         }
-        if ctx.ontology_result is not None:
-            result["ontology"] = ctx.ontology_result
         ctx.result = result
 
 
@@ -457,40 +452,4 @@ class InterpretationStage:
             ctx.biz_stats = {"skipped": True, "mode": "business_not_requested"}
 
 
-@dataclass
-class OntologyStageContext(KnowledgeAwareStageContext):
-    """OWL 阶段上下文：最小抽离，不改变既有回调与输出语义。"""
-
-    graph: KnowledgeGraph
-    out_dir: Optional[Path]
-    ontology_result: Optional[dict[str, Any]]
-
-
-class OntologyStage:
-    """OWL 本体推理阶段。"""
-
-    def execute(self, ctx: OntologyStageContext) -> None:
-        ont_cfg = ctx.knowledge_cfg.ontology
-        if ont_cfg.enabled:
-            ctx.step_callback("⑧ OWL 推理与写回 …")
-            try:
-                from src.knowledge.ontology import run_ontology_pipeline
-
-                export_path = None
-                if ctx.out_dir and ont_cfg.export_after_build:
-                    export_path = ctx.out_dir / "knowledge_ontology.ttl"
-                ctx.ontology_result = run_ontology_pipeline(
-                    ctx.graph,
-                    export_owl=ont_cfg.export_owl,
-                    export_path=export_path,
-                    run_reasoner=ont_cfg.reasoner,
-                    write_inferred_to_graph=ont_cfg.write_inferred_to_graph,
-                )
-            except ImportError as e:
-                ctx.ontology_result = {"errors": [f"未安装 OWL 依赖: {e!r}，请执行: pip install -e '.[owl]'"]}
-            except Exception as e:
-                ctx.ontology_result = {"errors": [f"本体推理失败: {e!r}"]}
-            ctx.step_callback("⑨ OWL 步骤结束")
-        else:
-            ctx.step_callback("⑧⑨ OWL 未启用，已跳过")
 

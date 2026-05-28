@@ -1,7 +1,7 @@
-"""应用层 / 薄服务推荐入口：配置加载与解读进度查询。
+"""薄服务推荐入口：配置加载与解读进度查询。
 
-避免 ``streamlit`` / ``services`` 直接依赖 ``run`` 聚合模块或 ``stage_runtime``，
-依赖方向：``app`` → ``gateways`` → ``config_bootstrap`` / ``interpretation_standalone``。
+提供窄接口，避免 ``service`` 等消费方直接依赖 ``run`` 聚合模块或 ``stage_runtime``。
+依赖方向：``service`` → ``gateways`` → ``config_bootstrap`` / ``interpretation_standalone``。
 """
 from __future__ import annotations
 
