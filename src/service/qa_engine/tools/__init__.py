@@ -1,12 +1,12 @@
-"""MCP-style 工具框架：6 个 ke_* 核心工具 + todo_write 元工具 + 4 个文件类工具 + Registry + 默认装配工厂。
+"""MCP-style 工具框架：ke_* 核心工具 + todo_write 元工具 + 4 个文件类工具 + Registry + 默认装配工厂。
 
 设计文档：[[首页设计]] §13 v1.2；[[代码源文件查询工具-设计]] §3
 
 公开 API:
   - Tool / ToolRegistry / ToolNotFound      from .base
-  - build_default_registry(*, graph, business_store, project_id, code_store=None,
+  - build_default_registry(*, graph, interpretation_store, project_id, code_store=None,
       method_interp_store=None, repo_local_path=None) -> ToolRegistry
-  - 6 个 build_ke_xxx_tool 工厂函数 + build_todo_write_tool（生产用 build_default_registry 一把推；测试可单挑）
+  - build_ke_xxx_tool 工厂函数 + build_todo_write_tool（生产用 build_default_registry 一把推；测试可单挑）
   - 4 个文件类工具工厂：build_ke_grep_tool / build_ke_glob_tool / build_ke_read_file_tool / build_ke_ls_tool
 """
 from __future__ import annotations
@@ -14,7 +14,6 @@ from __future__ import annotations
 from typing import Any
 
 from src.service.qa_engine.tools.base import Tool, ToolNotFound, ToolRegistry
-from src.service.qa_engine.tools.ke_business_interp import build_ke_business_interp_tool
 from src.service.qa_engine.tools.ke_callees import build_ke_callees_tool
 from src.service.qa_engine.tools.ke_callers import build_ke_callers_tool
 from src.service.qa_engine.tools.ke_search import build_ke_search_tool
@@ -27,7 +26,7 @@ from src.service.qa_engine.tools.ke_grep import build_ke_grep_tool
 from src.service.qa_engine.tools.ke_glob import build_ke_glob_tool
 from src.service.qa_engine.tools.ke_read_file import build_ke_read_file_tool
 from src.service.qa_engine.tools.ke_ls import build_ke_ls_tool
-from src.service.qa_engine.retriever import BusinessStoreProto, GraphProto
+from src.service.qa_engine.retriever import InterpretationStoreProto, GraphProto
 
 
 # `__all__` 显式暴露公开 API；用 import * 时只会导入这些名字
@@ -38,7 +37,6 @@ __all__ = [
     "build_ke_callees_tool",
     "build_ke_callers_tool",
     "build_ke_search_tool",
-    "build_ke_business_interp_tool",
     "build_ke_table_access_tool",
     "build_ke_impact_tool",
     "build_ke_read_entity_tool",
@@ -55,7 +53,7 @@ __all__ = [
 def build_default_registry(
     *,
     graph: GraphProto,
-    business_store: BusinessStoreProto,
+    interpretation_store: InterpretationStoreProto,
     project_id: str,
     code_store: Any | None = None,
     method_interp_store: Any | None = None,
@@ -65,16 +63,17 @@ def build_default_registry(
 
     v1.3 修复（2026-05-26）：新增必填 project_id，闭包透传给 ke_search（修 LLM 猜 tenant bug）。
     v1.4（2026-05-27）：新增 repo_local_path，注册 4 个文件类工具。
+    Task 3（2026-05-28）：business_store 参数 → interpretation_store；删 ke_business_interp 注册。
     其他 ke_* 工具的 project_id 由 graph adapter（如 Neo4jGraphAdapter）实例化时绑定，
     本函数不直接经手。
 
-    本函数构造 6 个核心 ke_* 工具（ke_search / ke_business_interp / ke_callees / ke_callers /
+    本函数构造 ke_* 核心工具（ke_search / ke_callees / ke_callers /
     ke_table_access / ke_impact）+ todo_write 元工具（设计 §3.3，无后端依赖始终注册）+ 2 个可选
     ke_* 工具（ke_read_entity / ke_method_interp，分别依赖 code_store / method_interp_store，
     None 时优雅缺省）+ 4 个文件类工具（ke_grep / ke_glob / ke_read_file / ke_ls，始终注册）。
 
     :param graph: 已绑 project_id 的 GraphProto adapter（如 Neo4jGraphAdapter(..., project_id=...)）
-    :param business_store: BusinessInterpretation store 的 adapter
+    :param interpretation_store: TopologicalInterpretation store 的 adapter（实现 InterpretationStoreProto）
     :param project_id: 当前请求工程 ID — 透传给 ke_search 闭包
     :param code_store: 可选 CodeEntity store
     :param method_interp_store: 可选 MethodInterpretation store
@@ -84,8 +83,7 @@ def build_default_registry(
     """
     registry = ToolRegistry()
     # ke_search 闭包绑 project_id（与 Neo4jGraphAdapter 设计对齐）
-    registry.register(build_ke_search_tool(business_store, project_id))
-    registry.register(build_ke_business_interp_tool(business_store))
+    registry.register(build_ke_search_tool(interpretation_store, project_id))
     registry.register(build_ke_callees_tool(graph))
     registry.register(build_ke_callers_tool(graph))
     registry.register(build_ke_table_access_tool(graph))

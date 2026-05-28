@@ -79,18 +79,19 @@ async def test_build_tools_for_project_passes_optional_stores(monkeypatch):
     code_sentinel = object()
     interp_sentinel = object()
 
-    def _fake_build_default_registry(*, graph, business_store, project_id, code_store=None, method_interp_store=None, repo_local_path=None):
+    def _fake_build_default_registry(*, graph, interpretation_store, project_id, code_store=None, method_interp_store=None, repo_local_path=None):
         captured["code_store"] = code_store
         captured["method_interp_store"] = method_interp_store
         from src.service.qa_engine.tools.base import ToolRegistry
         return ToolRegistry()
 
-    # 伪造 request.app.state：含 4 个后端
+    # 伪造 request.app.state：含后端（Task 3 后只需 weaviate_interp_store + neo4j + code_store）
+    interp_sentinel_store = object()
+
     class _State:
-        weaviate_business_store = object()
         neo4j_backend = object()
         weaviate_code_store = code_sentinel
-        weaviate_method_interp_store = interp_sentinel
+        weaviate_interp_store = interp_sentinel_store
 
     class _App:
         state = _State()
@@ -106,17 +107,17 @@ async def test_build_tools_for_project_passes_optional_stores(monkeypatch):
     # monkeypatch build_default_registry 捕获透传；adapter 构造换轻量替身（不真连后端）
     # 注意：build_tools_for_project 内部是局部 import
     #   `from src.service.qa_engine.tools import build_default_registry`
-    #   `from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateBusinessAdapter`
+    #   `from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateTopologicalAdapter`
     # 局部 import 在调用时按模块属性取值 → 必须 patch 这两个**源模块**的属性。
     import src.service.qa_engine.tools as _tools_mod
     import src.service.qa_engine.adapters as _adapters
     monkeypatch.setattr(_tools_mod, "build_default_registry", _fake_build_default_registry)
     monkeypatch.setattr(_adapters, "Neo4jGraphAdapter", lambda backend, project_id: object())
-    monkeypatch.setattr(_adapters, "WeaviateBusinessAdapter", lambda store: object())
+    monkeypatch.setattr(_adapters, "WeaviateTopologicalAdapter", lambda store: object())
 
     await qa_router.build_tools_for_project("proj-a", _Req(), fake_db)
     assert captured["code_store"] is code_sentinel
-    assert captured["method_interp_store"] is interp_sentinel
+    assert captured["method_interp_store"] is interp_sentinel_store
 
 
 @pytest.mark.asyncio
@@ -126,8 +127,8 @@ async def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch
     关键不变量：ke_search 收到 LLM 的 input 即使**没**含 project_id 也能正常用闭包查；
     即使 LLM 误传 project_id="wrong" 也被忽略。
 
-    ke_search handler 调用 WeaviateBusinessAdapter.search_method_hits_by_text；
-    这里 monkeypatch WeaviateBusinessAdapter 使其返回带 spy 的替身，验证 project_id 是闭包值。
+    ke_search handler 调用 WeaviateTopologicalAdapter.search_method_hits_by_text；
+    这里 monkeypatch WeaviateTopologicalAdapter 使其返回带 spy 的替身，验证 project_id 是闭包值。
     """
     from unittest.mock import MagicMock, AsyncMock
     import src.service.qa_engine.adapters as _adapters
@@ -136,9 +137,9 @@ async def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch
     spy_adapter = MagicMock()
     spy_adapter.search_method_hits_by_text.return_value = []
 
-    # monkeypatch WeaviateBusinessAdapter 构造，让它直接返回 spy_adapter
+    # monkeypatch WeaviateTopologicalAdapter 构造，让它直接返回 spy_adapter
     monkeypatch.setattr(
-        _adapters, "WeaviateBusinessAdapter",
+        _adapters, "WeaviateTopologicalAdapter",
         lambda store: spy_adapter,
     )
     # Neo4jGraphAdapter 也替换成轻量替身（不真连 Neo4j）
@@ -147,12 +148,11 @@ async def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch
         lambda backend, project_id: MagicMock(),
     )
 
-    # 伪造 request.app.state：含 4 个后端（值是什么不重要，adapter 已被 patch）
+    # 伪造 request.app.state（值是什么不重要，adapter 已被 patch）
     class _State:
-        weaviate_business_store = object()
+        weaviate_interp_store = object()
         neo4j_backend = object()
         weaviate_code_store = None
-        weaviate_method_interp_store = None
 
     class _App:
         state = _State()
@@ -187,12 +187,11 @@ async def test_build_tools_for_project_loads_repo_local_path_from_db():
     fake_project = MagicMock()
     fake_project.repo_local_path = "/tmp/fake-repo"
 
-    # mock app.state
+    # mock app.state（Task 3 后：weaviate_interp_store 替代 weaviate_business_store）
     request = MagicMock(spec=Request)
-    request.app.state.weaviate_business_store = MagicMock()
+    request.app.state.weaviate_interp_store = MagicMock()
     request.app.state.neo4j_backend = MagicMock()
     request.app.state.weaviate_code_store = None
-    request.app.state.weaviate_method_interp_store = None
 
     # mock db.get(Project, ...)
     fake_db = AsyncMock()

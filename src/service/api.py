@@ -91,8 +91,8 @@ app.include_router(audit_router)           # v2.0 Task 11：审计日志查询�
 async def init_qa_engine() -> None:
     """启动时初始化 QA 引擎（注入到 app.state）。
 
-    v2.0 Task 22：
-      - 只保存底层 singleton 资源：weaviate_business_store、neo4j_backend、llm
+    v2.0 Task 22 / Task 3：
+      - 只保存底层 singleton 资源：weaviate_interp_store、neo4j_backend、llm
       - 不再预构造 qa_retriever / qa_tools（改为 per-request 构造，见 qa_router.py）
       - synthesizer / router 仍是 singleton（无状态，线程安全）
 
@@ -162,7 +162,7 @@ async def init_qa_engine() -> None:
         # `from None` 是 Python 异常链的"切断"语法；这里直接打日志不抛出
         _log.error("[startup] DashScope LLM 初始化失败: %s", e)
         # LLM 挂了，所有下游都没意义；清零 state
-        app.state.weaviate_business_store = None
+        app.state.weaviate_interp_store = None
         app.state.neo4j_backend = None
         app.state.llm = None
         app.state.qa_synthesizer = None
@@ -170,23 +170,21 @@ async def init_qa_engine() -> None:
         return
 
     # ── 试图连接底层存储（获取 singleton 资源） ─────────────────────────────
-    biz_store, neo4j_backend, code_store, method_interp_store = _try_connect_backends()
+    neo4j_backend, code_store, interp_store = _try_connect_backends()
 
-    if biz_store is not None and neo4j_backend is not None:
+    if neo4j_backend is not None and interp_store is not None:
         # Task 22：只存底层 singleton 资源；qa_retriever / qa_tools 改为 per-request 构造
-        app.state.weaviate_business_store = biz_store
+        app.state.weaviate_interp_store = interp_store
         app.state.neo4j_backend = neo4j_backend
         app.state.weaviate_code_store = code_store
-        app.state.weaviate_method_interp_store = method_interp_store
         app.state.llm = llm
         _log.info("[startup] 底层资源就绪：Weaviate + Neo4j（per-request retriever 模式）")
     else:
         # 后端不可用 → 挂占位 StubRetriever（向后兼容：qa_router.py 检测 qa_retriever 走旧路径）
         from src.service.qa_engine.stub_retriever import StubRetriever
-        app.state.weaviate_business_store = None
+        app.state.weaviate_interp_store = None
         app.state.neo4j_backend = None
         app.state.weaviate_code_store = None
-        app.state.weaviate_method_interp_store = None
         app.state.llm = llm
         # 兼容旧路径：qa_router.py explain 检查 qa_retriever；
         # 后端未就绪时仍提供 StubRetriever 让 chat 能跑（context 为空）
@@ -226,51 +224,38 @@ async def init_qa_engine() -> None:
     app.state.qa_router = SkillRouter(llm_provider=llm)
 
 
-def _try_connect_backends() -> tuple[Any, Any, Any, Any]:
-    """连接底层存储资源；任意后端失败就返回 (None, None)。
+def _try_connect_backends() -> tuple[Any, Any, Any]:
+    """连接底层存储资源；任意后端失败就返回 (None, None, None)。
 
-    Task 22：只返回 singleton 原始 store 对象（WeaviateBusinessInterpretStore 和
-    Neo4jGraphBackend）。不再预构造 adapter / retriever / tool_registry；
+    Task 22/Task 3：只返回 singleton 原始 store 对象（Neo4jGraphBackend +
+    WeaviateVectorStore + WeaviateTopologicalInterpretStore）。
+    不再预构造 adapter / retriever / tool_registry；
     这些改由 qa_router.py 的 build_retriever_for_project / build_tools_for_project
     在每个请求时按 project_id 按需构造。
 
     分两步：
-      1. 连 Weaviate BusinessInterpretation
-      2. 连 Neo4j
+      1. 连 Neo4j
+      2. 连 Weaviate（CodeEntity + TopologicalInterpretation）
 
-    任一步失败都视作整体失败 → 退回 StubRetriever（避免半连接状态）。
+    Neo4j 失败视作整体失败 → 退回 StubRetriever（避免半连接状态）。
+    Weaviate store 失败不致命：对应工具优雅不注册。
 
-    :return: (WeaviateBusinessInterpretStore 或 None, Neo4jGraphBackend 或 None,
-              WeaviateVectorStore 或 None, WeaviateTopologicalInterpretStore 或 None)
+    :return: (Neo4jGraphBackend 或 None,
+              WeaviateVectorStore 或 None,
+              WeaviateTopologicalInterpretStore 或 None)
     """
     import os
     import logging
 
     _log = logging.getLogger("qa_engine.startup")
 
-    # ─── 1) Weaviate ───
-    try:
-        # 主仓的业务解读 store；直接用它的默认参数 + .env 覆盖 URL/Key
-        from src.knowledge.weaviate_business_store import WeaviateBusinessInterpretStore
+    weaviate_url = os.environ.get("WEAVIATE_URL", "http://localhost:8080")
+    weaviate_grpc_port = int(os.environ.get("WEAVIATE_GRPC_PORT", "50051"))
+    weaviate_api_key = os.environ.get("WEAVIATE_API_KEY") or None
+    # 维度固定 1024（bge-m3 输出维度）；如果将来换 embedding 模型再环境变量化
+    weaviate_dimension = int(os.environ.get("WEAVIATE_DIMENSION", "1024"))
 
-        weaviate_url = os.environ.get("WEAVIATE_URL", "http://localhost:8080")
-        weaviate_grpc_port = int(os.environ.get("WEAVIATE_GRPC_PORT", "50051"))
-        weaviate_api_key = os.environ.get("WEAVIATE_API_KEY") or None
-        # 维度固定 1024（bge-m3 输出维度）；如果将来换 embedding 模型再环境变量化
-        weaviate_dimension = int(os.environ.get("WEAVIATE_DIMENSION", "1024"))
-
-        biz_store = WeaviateBusinessInterpretStore(
-            url=weaviate_url,
-            grpc_port=weaviate_grpc_port,
-            dimension=weaviate_dimension,
-            api_key=weaviate_api_key,
-        )
-        _log.info("[startup] Weaviate 业务解读 store 连接成功: %s", weaviate_url)
-    except Exception as e:
-        _log.warning("[startup] Weaviate 业务解读连接失败: %s", e)
-        return None, None, None, None
-
-    # ─── 2) Neo4j ───
+    # ─── 1) Neo4j ───
     try:
         from src.knowledge.graph_neo4j import Neo4jGraphBackend
 
@@ -282,7 +267,7 @@ def _try_connect_backends() -> tuple[Any, Any, Any, Any]:
         # 密码必填，没设就直接放弃（避免 driver 抛一个让人困惑的认证错）
         if not neo4j_password:
             _log.warning("[startup] NEO4J_PASSWORD 未设 → 跳过 Neo4j → 不构造真实 retriever")
-            return None, None, None, None
+            return None, None, None
 
         neo4j_backend = Neo4jGraphBackend(
             uri=neo4j_uri, user=neo4j_user, password=neo4j_password, database=neo4j_database
@@ -292,12 +277,12 @@ def _try_connect_backends() -> tuple[Any, Any, Any, Any]:
         _log.info("[startup] Neo4j 连接成功: %s", neo4j_uri)
     except Exception as e:
         _log.warning("[startup] Neo4j 连接失败: %s", e)
-        return None, None, None, None
+        return None, None, None
 
-    # ─── 3) CodeEntity + MethodInterpretation store（Plan B2：ke_read_entity / ke_method_interp 用）───
+    # ─── 2) Weaviate CodeEntity + TopologicalInterpretation store ───
     # 连接失败不致命：返回 None，对应工具优雅不注册（build_default_registry 条件注册）
     code_store = None
-    method_interp_store = None
+    interp_store = None
     try:
         from src.knowledge.vector_store_weaviate import WeaviateVectorStore
         code_store = WeaviateVectorStore(
@@ -311,18 +296,18 @@ def _try_connect_backends() -> tuple[Any, Any, Any, Any]:
         _log.warning("[startup] Weaviate CodeEntity store 连接失败（ke_read_entity 不可用）: %s", e)
     try:
         from src.knowledge.weaviate_interpretation_store import WeaviateTopologicalInterpretStore
-        method_interp_store = WeaviateTopologicalInterpretStore(
+        interp_store = WeaviateTopologicalInterpretStore(
             url=weaviate_url,
             grpc_port=weaviate_grpc_port,
             dimension=weaviate_dimension,
             api_key=weaviate_api_key,
         )
-        _log.info("[startup] Weaviate MethodInterpretation store 连接成功")
+        _log.info("[startup] Weaviate TopologicalInterpretation store 连接成功: %s", weaviate_url)
     except Exception as e:
-        _log.warning("[startup] Weaviate MethodInterpretation store 连接失败（ke_method_interp 不可用）: %s", e)
+        _log.warning("[startup] Weaviate TopologicalInterpretation store 连接失败（ke_search 不可用）: %s", e)
 
-    # Task 22：只返回原始 singleton 资源，不在这里预构造 adapter / retriever / tools
-    return biz_store, neo4j_backend, code_store, method_interp_store
+    # Task 22/Task 3：只返回原始 singleton 资源，不在这里预构造 adapter / retriever / tools
+    return neo4j_backend, code_store, interp_store
 
 
 @app.on_event("shutdown")

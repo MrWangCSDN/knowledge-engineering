@@ -3,11 +3,11 @@ QARetriever Protocol 期望的接口形状。
 
 设计要点（[[首页设计]] §6.1）：
 
-1. **不改主仓代码**：主仓的 `WeaviateBusinessInterpretStore` 和 `Neo4jGraphBackend`
+1. **不改主仓代码**：主仓的 `WeaviateTopologicalInterpretStore` 和 `Neo4jGraphBackend`
    一字未动；这里只做"翻译"。
 
 2. **多层级检索**：原 `search_method_hits_by_text` 仅返回 level=api 的 method,
-   不够喂"整体架构 / 业务规则"类问题。本 adapter 改成对 BusinessInterpretation
+   不够喂"整体架构 / 业务规则"类问题。本 adapter 改成对 TopologicalInterpretation
    做全库 near_vector，覆盖 method / class / module / api 各层。
 
 3. **v2.0 Native Multi-Tenancy**：使用 Weaviate `with_tenant(project_id)` 把每个
@@ -15,7 +15,7 @@ QARetriever Protocol 期望的接口形状。
    tenant 绑定。schema 层面要求 Weaviate collection 开启 Multi-Tenancy。
 
 4. **get_by_entity + project_id**：Task 20 新增 project_id 必填参数；
-   主仓 WeaviateBusinessInterpretStore.get_by_entity 暂未接受 tenant 参数
+   主仓 WeaviateTopologicalInterpretStore.get_by_entity 暂未接受 tenant 参数
    （Task 23 才改主仓），这里用 try/except 兜底：先尝试带 tenant 的私有方法，
    失败则 fallback 到原来的 get_by_entity（TODO 标注）。
 
@@ -29,8 +29,8 @@ import logging
 # typing 模块：给静态类型检查器看的，运行时不影响
 from typing import Any, Optional
 
-# 主仓的业务解读 store；通过 PYTHONPATH 拉到（两个仓是 worktree 同根，src 路径一致）
-from src.knowledge.weaviate_business_store import WeaviateBusinessInterpretStore
+# 主仓的拓扑解读 store；通过 PYTHONPATH 拉到（两个仓是 worktree 同根，src 路径一致）
+from src.knowledge.weaviate_interpretation_store import WeaviateTopologicalInterpretStore
 # 主仓的 Neo4j 后端（带 successors / predecessors 完整 API）
 from src.knowledge.graph_neo4j import Neo4jGraphBackend
 
@@ -40,18 +40,18 @@ _log = logging.getLogger(__name__)
 
 # ─── 业务解读 adapter ────────────────────────────────────────────────────────
 
-class WeaviateBusinessAdapter:
-    """实现 `qa_engine.retriever.BusinessStoreProto`。
+class WeaviateTopologicalAdapter:
+    """实现 `qa_engine.retriever.InterpretationStoreProto`。
 
-    内部就是包一层 `WeaviateBusinessInterpretStore`，但把检索结果
+    内部就是包一层 `WeaviateTopologicalInterpretStore`，但把检索结果
     从 list[(method_id, score)] 翻译成 QARetriever 期望的 list[dict]，
     并且不强制 level=api，支持跨层级问答。
     """
 
-    def __init__(self, store: WeaviateBusinessInterpretStore) -> None:
+    def __init__(self, store: WeaviateTopologicalInterpretStore) -> None:
         """构造函数：注入已经连好的 store。
 
-        :param store: 主仓的 `WeaviateBusinessInterpretStore` 实例（已 connect）
+        :param store: 主仓的 `WeaviateTopologicalInterpretStore` 实例（已 connect）
         """
         # 把外部传入的 store 存到实例属性；下划线开头表示"模块内部使用"
         self._store = store
@@ -63,10 +63,10 @@ class WeaviateBusinessAdapter:
         project_id: str,
         level: str | None = None,
     ) -> dict[str, Any] | None:
-        """按 entity_id 精确查一条业务解读；找不到返回 None。
+        """按 entity_id 精确查一条拓扑解读；找不到返回 None。
 
         v2.0：新增必填 project_id，绑定 Weaviate tenant 做数据隔离。
-        主仓 WeaviateBusinessInterpretStore 的 get_by_entity_with_tenant 方法由
+        主仓 WeaviateTopologicalInterpretStore 的 get_by_entity_with_tenant 方法由
         Task 23 添加；这里先用 try/except 兜底，失败时 fallback 到无 tenant 版本。
 
         :param entity_id: 形如 'method//xxx' / 'class//xxx' / 'module//xxx'
@@ -104,12 +104,12 @@ class WeaviateBusinessAdapter:
         project_id: str,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
-        """语义检索 BusinessInterpretation collection。
+        """语义检索 TopologicalInterpretation collection。
 
         v2.0：使用 Weaviate Native Multi-Tenancy，通过 with_tenant(project_id)
         把查询限定在 project_id 对应的 tenant 分区内，实现多工程数据物理隔离。
 
-        匹配 `BusinessStoreProto` 的接口签名（命名参数 + 完全相同的 kwargs）。
+        匹配 `InterpretationStoreProto` 的接口签名（命名参数 + 完全相同的 kwargs）。
 
         :param text: 用户的问题原文
         :param project_id: 必填，作为 Weaviate tenant 标识（= 项目 ID）；
@@ -173,7 +173,7 @@ class WeaviateBusinessAdapter:
         except Exception as e:
             # 任何异常（向量化失败 / 网络断开 / Weaviate 连不上 / tenant 不存在）都不上抛
             # 上层 QARetriever 会基于空 candidates 走"未找到"分支
-            _log.warning("Weaviate 业务解读检索失败 project_id=%s: %s", project_id, e)
+            _log.warning("Weaviate 拓扑解读检索失败 project_id=%s: %s", project_id, e)
             return []
 
         # 排序：score 从高到低，截断到 limit

@@ -1,8 +1,8 @@
 """检索阶段：业务概念 → 候选入口方法 + 调用链上下文。
 
 跨仓依赖说明：
-  实际的 business_store / graph 实例来自 knowledge-engineering 主仓
-  （src/knowledge/weaviate_business_store.py 和 src/knowledge/__init__.py）。
+  实际的 interpretation_store / graph 实例来自 knowledge-engineering 主仓
+  （src/knowledge/weaviate_interpretation_store.py 和 src/knowledge/__init__.py）。
   本仓只用 Protocol 定义"我期望它有什么方法"，运行时 api.py 启动注入实例。
   这样 auth 仓不需要 import 主仓代码，编译/单测可独立。
 
@@ -18,10 +18,10 @@ from typing import Any, Protocol
 
 # ─── 结构类型（Protocol）─ 不导入主仓，只定义"接口"────────────────────────
 
-class BusinessStoreProto(Protocol):
-    """跟 src/knowledge/weaviate_business_store.py:BusinessInterpretationStore 兼容。
+class InterpretationStoreProto(Protocol):
+    """跟 src/knowledge/weaviate_interpretation_store.py:WeaviateTopologicalInterpretStore 兼容。
 
-    v1.2 起新增 get_by_entity，给 ke_business_interp tool 用。
+    提供 search_method_hits_by_text（语义检索）和 get_by_entity（精确查询）两个方法。
     """
 
     def search_method_hits_by_text(
@@ -32,7 +32,7 @@ class BusinessStoreProto(Protocol):
     def get_by_entity(
         self, entity_id: str, level: str | None = None
     ) -> dict[str, Any] | None:
-        """按 entity_id 精确查一条业务解读；找不到返回 None。"""
+        """按 entity_id 精确查一条拓扑解读；找不到返回 None。"""
         ...
 
 
@@ -86,7 +86,7 @@ class QARetriever:
     # dependency skill 拓展深度
     DEPENDENCY_BFS_DEPTH = 2
 
-    def __init__(self, *, business_store: BusinessStoreProto, graph: GraphProto):
+    def __init__(self, *, business_store: InterpretationStoreProto, graph: GraphProto):
         self.business_store = business_store
         self.graph = graph
 

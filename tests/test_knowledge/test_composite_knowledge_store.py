@@ -19,14 +19,14 @@ from src.knowledge.composite_knowledge_store import (
 
 
 def _make_composite(
-    bi_results=None,        # business_store.search_method_hits_by_text 的返回值
-    bi_exc=None,            # business_store.search_method_hits_by_text 抛的异常（覆盖 bi_results）
+    bi_results=None,        # interpretation_store.search_method_hits_by_text 的返回值
+    bi_exc=None,            # interpretation_store.search_method_hits_by_text 抛的异常（覆盖 bi_results）
     code_results=None,      # code_store.search_by_text 的返回值（[(eid, score), ...]）
     code_exc=None,
     has_code=True,          # 是否注入 code_store；False 模拟未连
 ):
-    """造一个 CompositeKnowledgeStore + mock 子组件，返回 (composite, bi_mock, code_mock)。"""
-    # bi 是 BusinessStoreProto 兼容 mock（search_method_hits_by_text + get_by_entity）
+    """造一个 CompositeKnowledgeStore + mock 子组件，返回 (composite, interp_mock, code_mock)。"""
+    # interp 是 InterpretationStoreProto 兼容 mock（search_method_hits_by_text + get_by_entity）
     bi = MagicMock()
     if bi_exc is not None:
         # `side_effect` 设为异常实例时，调用时会 raise 该异常
@@ -45,7 +45,7 @@ def _make_composite(
             code.search_by_text.return_value = code_results or []
 
     composite = CompositeKnowledgeStore(
-        business_store=bi,
+        interpretation_store=bi,
         code_store=code,
         project_id="mall-swarm",
     )
@@ -146,8 +146,8 @@ def test_bi_raises_generic_error_falls_to_code_warns(caplog):
         )
 
     assert len(result) == 1
-    # 验证日志：含 generic error 提示
-    assert any("BI" in rec.message and "ConnectionError" in rec.message for rec in caplog.records)
+    # 验证日志：含 generic error 提示（Task 3 后 log message 改为"解读库"）
+    assert any("ConnectionError" in rec.message for rec in caplog.records)
 
 
 def test_code_fallback_normalizes_to_canonical_shape():

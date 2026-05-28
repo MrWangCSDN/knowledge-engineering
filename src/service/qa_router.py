@@ -6,7 +6,7 @@
   POST /api/projects/{pid}/qa/explain    流式问答（SSE）
 
 依赖（Task 22 per-request 模式）：
-  app.state.weaviate_business_store  WeaviateBusinessInterpretStore singleton
+  app.state.weaviate_interp_store    WeaviateTopologicalInterpretStore singleton
   app.state.neo4j_backend            Neo4jGraphBackend singleton
   app.state.qa_synthesizer           QASynthesizer 实例（startup 注入，singleton）
   app.state.qa_router                SkillRouter 实例（startup 注入，singleton）
@@ -67,47 +67,47 @@ router = APIRouter(
 def build_retriever_for_project(project_id: str, request: Request):
     """每个请求构造一个绑定 project_id 的 QARetriever。
 
-    使用 app.state 里的 singleton 底层资源（weaviate_business_store + neo4j_backend），
+    使用 app.state 里的 singleton 底层资源（weaviate_interp_store + neo4j_backend），
     为每个请求分别构造 adapter，确保 Neo4jGraphAdapter 绑定正确的 project_id，
     实现多租户数据隔离。
 
     :param project_id: URL path 中的工程 ID，非空字符串
     :param request: FastAPI Request，用于访问 app.state singleton 资源
     :return: QARetriever 实例（已绑定 project_id）
-    :raises RuntimeError: weaviate_business_store 或 neo4j_backend 未就绪时抛出
+    :raises RuntimeError: weaviate_interp_store 或 neo4j_backend 未就绪时抛出
     """
     # 从 app.state 取 singleton 底层资源（startup 时已连接）
-    biz_store = getattr(request.app.state, "weaviate_business_store", None)
+    interp_store = getattr(request.app.state, "weaviate_interp_store", None)
     neo4j_backend = getattr(request.app.state, "neo4j_backend", None)
 
-    if biz_store is None or neo4j_backend is None:
+    if interp_store is None or neo4j_backend is None:
         raise RuntimeError(
-            "底层存储资源未就绪（weaviate_business_store / neo4j_backend）"
+            "底层存储资源未就绪（weaviate_interp_store / neo4j_backend）"
         )
 
     # 延迟导入：避免 module-level 循环依赖
-    from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateBusinessAdapter
+    from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateTopologicalAdapter
     from src.service.qa_engine.retriever import QARetriever
 
     # 每个请求构造新的 adapter 实例：
-    # WeaviateBusinessAdapter：包装 singleton store，本身无状态，轻量
-    biz_adapter = WeaviateBusinessAdapter(biz_store)
+    # WeaviateTopologicalAdapter：包装 singleton store，本身无状态，轻量
+    interp_adapter = WeaviateTopologicalAdapter(interp_store)
     # Neo4jGraphAdapter：绑定 project_id，所有 Cypher 查询带 project_id 过滤
     graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id=project_id)
 
     # ReAct 代码层兜底（设计 [[ReAct-代码层兜底-设计]]）：
-    # mall-swarm 类工程无 BusinessInterpretation 数据时，用 CodeEntity 向量库兜底。
+    # mall-swarm 类工程无 TopologicalInterpretation 数据时，用 CodeEntity 向量库兜底。
     # code_store 由 _try_connect_backends 在 startup 时连接到 app.state.weaviate_code_store；
     # 未连成功（None）时 composite 自动跳过 fallback，行为与原来一致。
     from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore
     code_store = getattr(request.app.state, "weaviate_code_store", None)
     composite_store = CompositeKnowledgeStore(
-        business_store=biz_adapter,
+        interpretation_store=interp_adapter,
         code_store=code_store,
         project_id=project_id,
     )
 
-    # QARetriever：注入 composite_store（透传 biz_adapter，BI 空时兜底 CodeEntity）
+    # QARetriever：注入 composite_store（透传 interp_adapter，解读库空时兜底 CodeEntity）
     return QARetriever(business_store=composite_store, graph=graph_adapter)
 
 
@@ -131,17 +131,17 @@ async def build_tools_for_project(
     :return: ToolRegistry 实例（已绑定 project_id 的 adapter + repo_local_path）
     :raises RuntimeError: 底层资源未就绪时抛出
     """
-    biz_store = getattr(request.app.state, "weaviate_business_store", None)
+    interp_store = getattr(request.app.state, "weaviate_interp_store", None)
     neo4j_backend = getattr(request.app.state, "neo4j_backend", None)
 
-    if biz_store is None or neo4j_backend is None:
+    if interp_store is None or neo4j_backend is None:
         raise RuntimeError(
-            "底层存储资源未就绪（weaviate_business_store / neo4j_backend）"
+            "底层存储资源未就绪（weaviate_interp_store / neo4j_backend）"
         )
 
     # 可选 store（未连时为 None → build_default_registry 不注册对应工具）
     code_store = getattr(request.app.state, "weaviate_code_store", None)
-    method_interp_store = getattr(request.app.state, "weaviate_method_interp_store", None)
+    method_interp_store = getattr(request.app.state, "weaviate_interp_store", None)
 
     # v2.x 新增：从 DB 拿 repo_local_path（4 个文件类工具需要这个路径）
     # db.get 是 SQLAlchemy async 单行主键查询，等效于 SELECT ... WHERE id = project_id LIMIT 1
@@ -149,23 +149,23 @@ async def build_tools_for_project(
     project = await db.get(_ProjectModel, project_id)
     repo_local_path = project.repo_local_path if project else None
 
-    from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateBusinessAdapter
+    from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateTopologicalAdapter
     from src.service.qa_engine.tools import build_default_registry
 
-    biz_adapter = WeaviateBusinessAdapter(biz_store)
+    interp_adapter = WeaviateTopologicalAdapter(interp_store)
     graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id=project_id)
 
-    # ke_search 工具也用 composite，BI 空时兜底走 CodeEntity（设计 [[ReAct-代码层兜底-设计]] §2）
+    # ke_search 工具也用 composite，解读库空时兜底走 CodeEntity（设计 [[ReAct-代码层兜底-设计]] §2）
     from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore
     composite_store = CompositeKnowledgeStore(
-        business_store=biz_adapter,
+        interpretation_store=interp_adapter,
         code_store=code_store,
         project_id=project_id,
     )
 
     return build_default_registry(
         graph=graph_adapter,
-        business_store=composite_store,
+        interpretation_store=composite_store,
         project_id=project_id,
         code_store=code_store,
         method_interp_store=method_interp_store,
@@ -295,9 +295,9 @@ async def explain(
         retriever = _legacy_retriever
     else:
         # Task 22 新路径（per-request）：按 project_id 构造绑定的 QARetriever
-        _biz_store = getattr(_app.state, "weaviate_business_store", None)
+        _interp_store = getattr(_app.state, "weaviate_interp_store", None)
         _neo4j = getattr(_app.state, "neo4j_backend", None)
-        if _biz_store is None or _neo4j is None:
+        if _interp_store is None or _neo4j is None:
             raise HTTPException(
                 status_code=503,
                 detail="QA 引擎未就绪（底层存储资源不可用）",

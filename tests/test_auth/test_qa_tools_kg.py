@@ -1,16 +1,17 @@
-"""验证 5 个 ke_* 知识图谱工具。
+"""验证 ke_* 知识图谱工具。
 
 测试策略：
-  - 用 mock GraphProto / BusinessStoreProto 注入到 build_xxx 工厂函数
+  - 用 mock GraphProto / InterpretationStoreProto 注入到 build_xxx 工厂函数
   - 验证 handler 输入 dict / 输出 dict / 调用底层方法的方式
   - 不打真实 Weaviate / Neo4j（那是 e2e 测试的事）
+
+注意：ke_business_interp 工具（Task 2 删除）的测试已随工具一起移除。
 """
 from unittest.mock import MagicMock
 
 import pytest
 
 from src.service.qa_engine.tools.base import Tool
-from src.service.qa_engine.tools.ke_business_interp import build_ke_business_interp_tool
 from src.service.qa_engine.tools.ke_callees import build_ke_callees_tool
 from src.service.qa_engine.tools.ke_callers import build_ke_callers_tool
 from src.service.qa_engine.tools.ke_search import build_ke_search_tool
@@ -163,62 +164,6 @@ async def test_ke_search_missing_query_returns_empty() -> None:
     assert "error" in out
     # 底层 store 不应被调用（保护接口契约）
     store.search_method_hits_by_text.assert_not_called()
-
-
-# ───────── RED 8: ke_business_interp 工具（按 entity_id 取完整业务解读）─────────
-
-
-@pytest.mark.asyncio
-async def test_ke_business_interp_returns_full_record_for_entity() -> None:
-    """ke_business_interp(entity_id=X) → 返回该实体的完整业务解读 dict。
-
-    跟 ke_search 互补：前者是『模糊搜』，这个是『按 ID 精确查』。
-    LLM 看到入口方法后想看它的完整业务说明 → 调这个。
-    """
-    store = MagicMock()
-    store.get_by_entity.return_value = {
-        "entity_id": "method//X1",
-        "entity_type": "method",
-        "level": "api",
-        "summary_text": "完整业务解读……",
-        "business_domain": "医疗诊疗",
-        "business_capabilities": "兽医管理",
-    }
-
-    tool = build_ke_business_interp_tool(store)
-    assert tool.name == "ke_business_interp"
-
-    out = await tool.handler({"entity_id": "method//X1"})
-    # 整条 record 透传
-    assert out["interpretation"]["entity_id"] == "method//X1"
-    assert out["interpretation"]["business_capabilities"] == "兽医管理"
-    # 底层调用参数验证
-    store.get_by_entity.assert_called_once_with("method//X1", level=None)
-
-
-@pytest.mark.asyncio
-async def test_ke_business_interp_with_level_filter() -> None:
-    """level 参数透传到 store.get_by_entity，让结果限制在 class / api / module 等。"""
-    store = MagicMock()
-    store.get_by_entity.return_value = {"entity_id": "class//C1", "level": "class"}
-
-    tool = build_ke_business_interp_tool(store)
-    out = await tool.handler({"entity_id": "class//C1", "level": "class"})
-
-    assert out["interpretation"]["level"] == "class"
-    store.get_by_entity.assert_called_once_with("class//C1", level="class")
-
-
-@pytest.mark.asyncio
-async def test_ke_business_interp_returns_null_when_not_found() -> None:
-    """实体不存在时 store 返回 None；tool 返回 interpretation=None + error 字段。"""
-    store = MagicMock()
-    store.get_by_entity.return_value = None
-    tool = build_ke_business_interp_tool(store)
-
-    out = await tool.handler({"entity_id": "method//missing"})
-    assert out["interpretation"] is None
-    assert "not found" in out["error"].lower()
 
 
 # ───────── RED 9: ke_table_access 工具 ─────────

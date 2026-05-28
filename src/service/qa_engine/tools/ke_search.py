@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.service.qa_engine.retriever import BusinessStoreProto
+from src.service.qa_engine.retriever import InterpretationStoreProto
 from src.service.qa_engine.tools.base import Tool
 
 
@@ -33,10 +33,10 @@ _KE_SEARCH_SCHEMA: dict[str, Any] = {
 }
 
 
-def build_ke_search_tool(store: BusinessStoreProto, project_id: str) -> Tool:
+def build_ke_search_tool(store: InterpretationStoreProto, project_id: str) -> Tool:
     """构造一个绑定到指定 store + project_id 的 ke_search Tool。
 
-    :param store: BusinessInterpretation 向量库 store（实现 BusinessStoreProto）
+    :param store: 拓扑解读库 store（实现 InterpretationStoreProto）
     :param project_id: 当前请求的工程 ID（Weaviate tenant 标识）。
         必须非空，由 build_tools_for_project 从 URL path 传入。
     :raises ValueError: project_id 为空字符串。
@@ -79,7 +79,7 @@ def build_ke_search_tool(store: BusinessStoreProto, project_id: str) -> Tool:
 
     return Tool(
         name="ke_search",
-        description="在 BusinessInterpretation 向量库语义检索代码实体（method / class / module / api）；project_id 已由后端绑定，无需提供。",
+        description="在拓扑解读库（TopologicalInterpretation）语义检索代码实体（method / class / module / api）；project_id 已由后端绑定，无需提供。",
         input_schema=_KE_SEARCH_SCHEMA,
         handler=handler,
     )

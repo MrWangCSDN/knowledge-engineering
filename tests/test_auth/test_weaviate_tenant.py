@@ -1,4 +1,4 @@
-"""测试 WeaviateBusinessAdapter 的 Native Multi-Tenancy 支持（Task 20）。
+"""测试 WeaviateTopologicalAdapter 的 Native Multi-Tenancy 支持（Task 20）。
 
 验证 v2.0 核心改动：search_method_hits_by_text 和 get_by_entity 都必须通过
 with_tenant(project_id) 把查询绑定到对应的 Weaviate tenant 分区。
@@ -12,8 +12,8 @@ import pytest
 # patch：临时替换模块中的某个名字（用完自动还原）
 from unittest.mock import MagicMock, patch
 
-# 被测对象：WeaviateBusinessAdapter
-from src.service.qa_engine.adapters import WeaviateBusinessAdapter
+# 被测对象：WeaviateTopologicalAdapter
+from src.service.qa_engine.adapters import WeaviateTopologicalAdapter
 
 
 # ─── 工具函数：构造一个配置好的 fake store ───────────────────────────────────
@@ -41,7 +41,7 @@ def _make_adapter_with_fake_store():
     fake_store._collection_name = "BusinessInterpretation"
 
     # 创建 adapter 并注入 fake_store
-    adapter = WeaviateBusinessAdapter(fake_store)
+    adapter = WeaviateTopologicalAdapter(fake_store)
     return adapter, fake_store, fake_collection, fake_tenant_view
 
 
@@ -102,7 +102,7 @@ def test_search_returns_empty_when_project_id_empty():
     防止 with_tenant("") 造成跨租户误查或 Weaviate 报错。
     """
     fake_store = MagicMock()
-    adapter = WeaviateBusinessAdapter(fake_store)
+    adapter = WeaviateTopologicalAdapter(fake_store)
 
     # 调用时 project_id="" → 应该直接 return []，不碰 store
     result = adapter.search_method_hits_by_text(text="任意问题", project_id="", limit=5)
@@ -115,7 +115,7 @@ def test_search_returns_empty_when_project_id_empty():
 def test_search_returns_empty_when_text_empty():
     """text 为空字符串时，直接返回 []，不调用 Weaviate。"""
     fake_store = MagicMock()
-    adapter = WeaviateBusinessAdapter(fake_store)
+    adapter = WeaviateTopologicalAdapter(fake_store)
 
     result = adapter.search_method_hits_by_text(text="", project_id="petclinic", limit=5)
 
@@ -126,7 +126,7 @@ def test_search_returns_empty_when_text_empty():
 def test_search_returns_empty_when_text_whitespace_only():
     """text 只有空白字符时也视为空，直接返回 []。"""
     fake_store = MagicMock()
-    adapter = WeaviateBusinessAdapter(fake_store)
+    adapter = WeaviateTopologicalAdapter(fake_store)
 
     result = adapter.search_method_hits_by_text(text="   \t\n", project_id="petclinic", limit=5)
 
@@ -186,7 +186,7 @@ def test_get_by_entity_calls_with_tenant_method():
         "entity_id": "method://x", "summary_text": "test"
     }
 
-    adapter = WeaviateBusinessAdapter(fake_store)
+    adapter = WeaviateTopologicalAdapter(fake_store)
     result = adapter.get_by_entity("method://x", project_id="petclinic")
 
     # 应该调用了带 tenant 的方法
@@ -211,7 +211,7 @@ def test_get_by_entity_fallback_when_with_tenant_not_implemented():
     fake_store.get_by_entity_with_tenant = MagicMock(side_effect=AttributeError("no such method"))
     fake_store.get_by_entity.return_value = {"entity_id": "method://x", "summary_text": "fallback"}
 
-    adapter = WeaviateBusinessAdapter(fake_store)
+    adapter = WeaviateTopologicalAdapter(fake_store)
     result = adapter.get_by_entity("method://x", project_id="petclinic")
 
     # fallback 路径：应该调用了无 tenant 的版本
@@ -225,7 +225,7 @@ def test_get_by_entity_returns_none_on_unexpected_error():
     # 模拟网络超时等意外异常
     fake_store.get_by_entity_with_tenant.side_effect = TimeoutError("connection timeout")
 
-    adapter = WeaviateBusinessAdapter(fake_store)
+    adapter = WeaviateTopologicalAdapter(fake_store)
     result = adapter.get_by_entity("method://x", project_id="petclinic")
 
     # 不抛异常，返回 None

@@ -1,14 +1,14 @@
-"""CompositeKnowledgeStore：BusinessInterpretation + CodeEntity 双源兜底适配器。
+"""CompositeKnowledgeStore：TopologicalInterpretation + CodeEntity 双源兜底适配器。
 
 设计：[[ReAct-代码层兜底-设计]]
 
 为什么需要：mall-swarm 类工程跑完 P0 pipeline 后 CodeEntity 已有数据（7789 个 1024 维向量 +
-Neo4j 图谱）但没跑 with-interpretation，BusinessInterpretation 是空的。
-QARetriever 与 ke_search 只查 BI → 空 context → ReAct LLM 投降不调任何工具。
+Neo4j 图谱）但没跑 with-interpretation，TopologicalInterpretation 是空的。
+QARetriever 与 ke_search 只查解读库 → 空 context → ReAct LLM 投降不调任何工具。
 
-本类包装 (business_store, code_store) 实现 BusinessStoreProto：
-  - search_method_hits_by_text：BI 有数据 → 用 BI；BI 空/失败 → 走 CodeEntity 兜底
-  - get_by_entity：仅代理 BI（业务解读语义专属，CodeEntity 没对应概念）
+本类包装 (interpretation_store, code_store) 实现 InterpretationStoreProto：
+  - search_method_hits_by_text：解读库有数据 → 用解读库；解读库空/失败 → 走 CodeEntity 兜底
+  - get_by_entity：仅代理解读库（拓扑解读语义专属，CodeEntity 没对应概念）
 
 设计原则（§5 错误处理）：
   - 永不抛 —— caller 拿 [] 走原有"未找到"路径
@@ -68,8 +68,8 @@ def _is_tenant_missing(exc: Exception) -> bool:
 # ─── Protocol：让 mock 在测试里能 duck-type ────────────────────────────────
 
 
-class _BusinessStoreLike(Protocol):
-    """business_store 必须有的两个方法 (与 BusinessStoreProto 兼容)。
+class _InterpretationStoreLike(Protocol):
+    """interpretation_store 必须有的两个方法 (与 InterpretationStoreProto 兼容)。
 
     Protocol（结构子类型）：Python 3.8 引入，类似 Go 的 interface。
     不需要显式继承，只要对象有这两个方法签名就视为实现了该 Protocol。
@@ -107,12 +107,12 @@ class _CodeStoreLike(Protocol):
 
 
 class CompositeKnowledgeStore:
-    """BI + CodeEntity 双源兜底，实现 BusinessStoreProto。
+    """TopologicalInterpretation + CodeEntity 双源兜底，实现 InterpretationStoreProto。
 
     用法（DI 在 build_retriever_for_project / build_tools_for_project）：
 
         composite = CompositeKnowledgeStore(
-            business_store=biz_adapter,    # WeaviateBusinessAdapter
+            interpretation_store=interp_adapter,    # WeaviateTopologicalAdapter
             code_store=app.state.weaviate_code_store,  # 可为 None
             project_id="mall-swarm",
         )
@@ -122,23 +122,23 @@ class CompositeKnowledgeStore:
     def __init__(
         self,
         *,                               # `*` 之后的参数都必须用关键字传（keyword-only），防止位置传参混乱
-        business_store: _BusinessStoreLike,
+        interpretation_store: _InterpretationStoreLike,
         code_store: Optional[_CodeStoreLike],
         project_id: str,
     ):
-        """构造：注入 BI / code_store / project_id。
+        """构造：注入解读库 / code_store / project_id。
 
         Args:
-            business_store: 主要数据源（BusinessInterpretation adapter）
+            interpretation_store: 主要数据源（TopologicalInterpretation adapter）
             code_store: 兜底数据源（CodeEntity vector store）；None 时跳过兜底
             project_id: 当前请求绑定的工程 ID（写入 fallback candidates 用）
         """
         # 按惯例，实例属性以 `_` 开头表示"内部实现，不建议外部直接访问"（约定俗成，非强制）
-        self._business_store = business_store
+        self._interpretation_store = interpretation_store
         self._code_store = code_store
         self._project_id = project_id
 
-    # ─── BusinessStoreProto.search_method_hits_by_text ────────────────────
+    # ─── InterpretationStoreProto.search_method_hits_by_text ────────────────────
 
     def search_method_hits_by_text(
         self,
@@ -147,22 +147,22 @@ class CompositeKnowledgeStore:
         project_id: str,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
-        """先 BI，BI 空/失败 → CodeEntity 兜底。
+        """先查解读库，解读库空/失败 → CodeEntity 兜底。
 
         永不抛：fail-soft 设计，让 caller 拿 [] 走原有"未找到"路径。
 
         Args:
             text: 查询文本
-            project_id: 工程 ID（用于 BI 查询）
+            project_id: 工程 ID（用于解读库查询）
             limit: 最多返回条数
 
         Returns:
             命中列表（每项是 dict），可能为 []
         """
-        # 1. 调 BI；catch 所有异常分流
+        # 1. 调解读库；catch 所有异常分流
         # `try...except Exception as exc` 捕获所有非系统退出异常
         try:
-            bi_hits = self._business_store.search_method_hits_by_text(
+            interp_hits = self._interpretation_store.search_method_hits_by_text(
                 text=text, project_id=project_id, limit=limit
             )
         except Exception as exc:
@@ -170,37 +170,37 @@ class CompositeKnowledgeStore:
             # 其它异常走 WARNING，让运维知道有异常但不影响用户
             if _is_tenant_missing(exc):
                 _LOG.info(
-                    "BI tenant 不存在 (project_id=%s)，走 CodeEntity 兜底",
+                    "解读库 tenant 不存在 (project_id=%s)，走 CodeEntity 兜底",
                     project_id,
                 )
             else:
                 # `%s` 是 logging 的延迟格式化占位符（不用 f-string，性能更好）
                 # `type(exc).__name__` 取异常类名（如 "ConnectionError"）
                 _LOG.warning(
-                    "BI search 失败，走 CodeEntity 兜底 (project_id=%s): %s: %s",
+                    "解读库 search 失败，走 CodeEntity 兜底 (project_id=%s): %s: %s",
                     project_id, type(exc).__name__, exc,
                 )
             # 不管哪种异常，都走 CodeEntity 兜底
             return self._code_fallback(text=text, limit=limit)
 
-        # 2. BI 有数据 → 直接返（truthiness 判断：非空列表为 True）
-        if bi_hits:
-            return bi_hits
+        # 2. 解读库有数据 → 直接返（truthiness 判断：非空列表为 True）
+        if interp_hits:
+            return interp_hits
 
-        # 3. BI 返空 → 走兜底
+        # 3. 解读库返空 → 走兜底
         _LOG.debug(
-            "BI 返空 (project_id=%s)，触发 CodeEntity 兜底", project_id
+            "解读库返空 (project_id=%s)，触发 CodeEntity 兜底", project_id
         )
         return self._code_fallback(text=text, limit=limit)
 
-    # ─── BusinessStoreProto.get_by_entity（不做兜底，仅代理） ──────────────
+    # ─── InterpretationStoreProto.get_by_entity（不做兜底，仅代理） ──────────────
 
     def get_by_entity(
         self,
         entity_id: str,
         level: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """get_by_entity 仅代理 BI，业务解读语义无 CodeEntity 兜底。
+        """get_by_entity 仅代理解读库，拓扑解读语义无 CodeEntity 兜底。
 
         tenant_not_found / 异常都返 None；不影响 caller。
 
@@ -209,18 +209,18 @@ class CompositeKnowledgeStore:
             level: 可选的层级过滤（method/class/package 等）
 
         Returns:
-            BI 实体 dict，或 None
+            解读库实体 dict，或 None
         """
         try:
             # 尝试用 modern signature（带 project_id kwarg）
-            # 新版 WeaviateBusinessAdapter 支持 project_id 参数
-            return self._business_store.get_by_entity(
+            # 新版 WeaviateTopologicalAdapter 支持 project_id 参数
+            return self._interpretation_store.get_by_entity(
                 entity_id, project_id=self._project_id, level=level
             )
         except TypeError:
             # `TypeError` 在参数不匹配时抛出，这里用于兼容旧 signature（无 project_id 参数）
             try:
-                return self._business_store.get_by_entity(entity_id, level=level)
+                return self._interpretation_store.get_by_entity(entity_id, level=level)
             except Exception as exc:
                 self._log_get_by_entity_exc(entity_id, exc)
                 return None
@@ -252,7 +252,7 @@ class CompositeKnowledgeStore:
     # ─── 私有：CodeEntity 兜底 ────────────────────────────────────────────
 
     def _code_fallback(self, *, text: str, limit: int) -> list[dict[str, Any]]:
-        """从 CodeEntity 向量库取候选，归一化成 BusinessStoreProto 期望的 dict。
+        """从 CodeEntity 向量库取候选，归一化成 InterpretationStoreProto 期望的 dict。
 
         永不抛：code_store 异常 → 返 []。
 
