@@ -91,10 +91,15 @@ class _CodeStoreLike(Protocol):
     """code_store 必须有的方法（与 WeaviateVectorStore.search_by_text 兼容）。"""
 
     def search_by_text(
-        self, query_text: str, top_k: int = 10
+        self,
+        query_text: str,
+        top_k: int = 10,
+        *,
+        tenant: Optional[str] = None,
     ) -> list[tuple[str, float]]:
         # 返回值是 [(entity_id, score), ...] 列表
         # tuple[str, float] 是 Python 3.9+ 的内置泛型写法
+        # v2.x: tenant 参数用于 multi-tenant collection 的隔离查询
         ...
 
 
@@ -265,9 +270,9 @@ class CompositeKnowledgeStore:
 
         # 2. 调 code_store，catch 所有异常实现 fail-soft
         try:
-            # WeaviateVectorStore.search_by_text(query_text, top_k) -> [(eid, score), ...]
-            # `top_k` 是 WeaviateVectorStore 的参数名，对应我们的 limit
-            hits = self._code_store.search_by_text(text, top_k=limit)
+            # WeaviateVectorStore.search_by_text(query_text, top_k, tenant) -> [(eid, score), ...]
+            # v2.x: tenant 参数透传 project_id，确保查到当前工程的 multi-tenant 分区
+            hits = self._code_store.search_by_text(text, top_k=limit, tenant=self._project_id)
         except Exception as exc:
             # code_store 异常不应该阻断整个查询，记录警告后返空
             _LOG.warning(

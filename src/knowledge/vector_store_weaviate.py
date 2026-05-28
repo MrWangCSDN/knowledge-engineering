@@ -112,13 +112,26 @@ class WeaviateVectorStore(BaseWeaviateStore):
         except Exception:
             return 0
 
-    def search_by_vector(self, query_vector: list[float], top_k: int = 10) -> list[tuple[str, float]]:
+    def search_by_vector(
+        self,
+        query_vector: list[float],
+        top_k: int = 10,
+        *,
+        tenant: Optional[str] = None,
+    ) -> list[tuple[str, float]]:
+        """按向量近邻检索。
+
+        v2.x: 增加 tenant 参数，支持 multi-tenant collection 的隔离查询。
+        """
         self._last_search_error = None
         self._last_search_detail = None
         if not query_vector or len(query_vector) < self._dim:
             return []
         try:
             coll = self._get_collection()
+            # tenant 非空时绑定到指定租户分区；空时走默认（兼容老调用方）
+            if tenant:
+                coll = coll.with_tenant(tenant)
             # 注意：在某些 weaviate-python-client 版本组合下，如果不显式指定 return_properties，
             # result.objects 可能会为空（即便集合里有数据）。因此这里强制指定返回的字段。
             from weaviate.classes.query import MetadataQuery
@@ -228,9 +241,19 @@ class WeaviateVectorStore(BaseWeaviateStore):
             self._last_search_error = traceback.format_exc()
             return []
 
-    def search_by_text(self, query_text: str, top_k: int = 10) -> list[tuple[str, float]]:
+    def search_by_text(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        *,
+        tenant: Optional[str] = None,
+    ) -> list[tuple[str, float]]:
+        """按文本检索（内部先 embed 再 search_by_vector）。
+
+        v2.x: 增加 tenant 参数，透传到 search_by_vector 实现 multi-tenant 隔离。
+        """
         vec = get_embedding(query_text, self._dim)
-        return self.search_by_vector(vec, top_k=top_k)
+        return self.search_by_vector(vec, top_k=top_k, tenant=tenant)
 
     def get_by_entity_id(self, entity_id: str) -> Optional[dict[str, Any]]:
         """按 entity_id（图谱方法节点 id）取 Weaviate 中对应对象，用于「从方法查源代码」双向关联。"""

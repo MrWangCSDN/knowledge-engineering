@@ -104,8 +104,8 @@ def test_bi_returns_empty_falls_to_code_entity():
     )
 
     assert len(result) == 2
-    # code_store.search_by_text 被调一次，参数是 text + limit
-    code.search_by_text.assert_called_once_with("getMenuList 怎么用", top_k=5)
+    # code_store.search_by_text 被调一次，参数是 text + limit + tenant
+    code.search_by_text.assert_called_once_with("getMenuList 怎么用", top_k=5, tenant="mall-swarm")
     # entity_id 透传
     assert result[0]["entity_id"] == "method//11cd3f041163"
     assert result[1]["entity_id"] == "method//a8e3f1f41a55d734"
@@ -307,3 +307,24 @@ def test_code_fallback_dedupes_entity_ids():
     assert len(result) == 3
     # 顺序保留首次出现：a, b, c
     assert [r["entity_id"] for r in result] == ["method//a", "method//b", "method//c"]
+
+
+def test_code_fallback_passes_tenant_to_code_store():
+    """_code_fallback 调 code_store.search_by_text 时必须带 tenant=project_id。
+
+    Task 5 E2E 修复：mall-swarm 7789 CodeEntity 都在 with_tenant('mall-swarm') 分区下，
+    不传 tenant 会查到默认（空）分区。
+    """
+    composite, bi, code = _make_composite(
+        bi_results=[],
+        code_results=[("method//x", 0.9)],
+    )
+
+    composite.search_method_hits_by_text(
+        text="UmsRoleDao", project_id="mall-swarm", limit=5
+    )
+
+    # 验证 search_by_text 被调时带 tenant kwarg
+    code.search_by_text.assert_called_once_with(
+        "UmsRoleDao", top_k=5, tenant="mall-swarm"
+    )
