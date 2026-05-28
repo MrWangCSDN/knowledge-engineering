@@ -38,11 +38,14 @@ def synthesize_mybatis_java_xml_relations(
               留给调用方控制时机）
     """
     # 1. 索引 Java/Kotlin method by <ClassName>::<methodName>
+    # 注：javaparser-bridge 当前不显式设 e.language，所以这里用"非 xml = Java 候选"
+    # 的反向判断（mall-swarm 项目结构是纯 Java + XML，启发式足够稳）
     java_index: dict[str, list[StructureEntity]] = {}
     for e in facts.entities:
         if e.type != EntityType.METHOD:
             continue
-        if (e.language or "").lower() not in ("java", "kotlin"):
+        # XML method 排除掉；剩下的（含 language=None/空 的 Java method）都视作 Java 候选
+        if (e.language or "").lower() == "xml":
             continue
         qn = e.attributes.get("qualified_name", "")
         parts = qn.split("::")
