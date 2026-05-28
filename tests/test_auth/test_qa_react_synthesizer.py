@@ -882,3 +882,32 @@ def test_agent_system_prompt_contains_exploration_flow():
     ]
     missing = [p for p in required if p not in AGENT_SYSTEM_PROMPT]
     assert not missing, f"AGENT_SYSTEM_PROMPT 缺少探索流程关键短语: {missing}"
+
+
+def test_build_user_prompt_free_format_drops_giveup_clause():
+    """build_user_prompt(free_format=True) 的尾部任务块不应含旧放弃指令。
+
+    Task 4 code review I-1 修复：与 AGENT_SYSTEM_PROMPT 的探索流程指令保持一致，
+    避免双指令冲突让 LLM 倾向放弃路径。
+    """
+    from src.service.qa_engine.prompts import build_user_prompt
+
+    # 用最简 context 调（不会触发别的分支）
+    user_msg = build_user_prompt(
+        question="UmsRoleDao.getMenuList 怎么用？",
+        context={},   # 空 context，触发"context 不足"的边缘场景
+        free_format=True,
+    )
+
+    # 旧放弃指令的关键短语（在 free_format 分支里）应已被替换
+    forbidden = "直接说明未找到并建议换个说法"
+    assert forbidden not in user_msg, (
+        f"build_user_prompt(free_format=True) 仍含旧放弃指令: {forbidden!r}；"
+        f"应改为与 AGENT_SYSTEM_PROMPT 探索流程一致的措辞（设计 §4 I-1 修复）"
+    )
+
+    # 新引导关键短语：应当出现
+    assert "「探索流程」" in user_msg or "探索流程" in user_msg, (
+        "build_user_prompt(free_format=True) 缺少"
+        "「按 system prompt 的探索流程」引导（设计 §4 I-1 修复）"
+    )

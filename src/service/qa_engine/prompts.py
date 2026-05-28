@@ -288,7 +288,10 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
         # 自由格式（chat/agent，设计 §7）：自然 markdown，不套 6 段
         parts.append("用自然的 markdown 作答（标题/列表/代码块按需），不必套固定结构。")
         parts.append("提到方法/类/表时用 `[entity_id|显示文本]` 标注；只能基于 context/工具返回的真实实体，不得编造 entity_id。")
-        parts.append("如果 context 不足以回答，直接说明未找到并建议换个说法。")
+        # v1.5 ReAct 代码层兜底：context 不足时**不要直接放弃**，按 system prompt 的「探索流程」
+        # 主动调 ke_search / ke_callees 等工具补齐；探索 2-3 轮仍无果再按"第三步"格式输出。
+        # 详见 [[ReAct-代码层兜底-设计]] §4
+        parts.append("如果 candidates 不足，按 system prompt 里的「探索流程」主动调用工具补齐再回答；探索仍无果时再说明并建议补充。")
     else:
         # 结构化 6 段（非 chat / QASynthesizer，保持原样）
         parts.append("先按 system prompt 里的 Step 1 选 1 个主视角，再按该视角侧重组织 6 段式答案。")
