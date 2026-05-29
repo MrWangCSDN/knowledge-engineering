@@ -138,6 +138,11 @@ domain:
 structure:
   extract_cross_service: true
   java_source_extensions: [".java"]
+  # 架构分层采集（设计：架构分层采集-设计.md）。adapter=ssm 用内置 SSM 范式基座，无需手写 layers。
+  layering:
+    enabled: true
+    adapter: ssm
+    fallback_layer: unknown
 
 # 表结构 + 方法-表访问（方法查表 / 表查方法）
 schema:
