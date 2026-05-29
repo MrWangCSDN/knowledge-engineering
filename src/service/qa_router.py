@@ -355,6 +355,11 @@ async def explain(
 
         # 2. 写 fs (per-message file)
         # 局部 import 同 S4/S5：保持模块顶部 import 轻量
+        # 强一致语义（2026-05-28 修复，回归 sess_11cd1cd6756c）：
+        # fs 写失败 → ERROR 级日志（让运维可见） + 早返回（不更新 DB message_count）
+        # 这样 MySQL session 计数永远与 fs 真实状态一致 — 不会再产生孤儿 session
+        # （sidebar 看见但点开空白）。代价：fs 写失败时用户已看到 SSE 答案，但下次
+        # 打开历史不会看到，比"前端永久幽灵 session"好（用户能感知到丢失而非困惑）。
         try:
             from src.service.memory.session import write_message_to_fs
             from src.service.memory.vfs import MemoryFS as _MemFS
@@ -368,16 +373,17 @@ async def explain(
                 msg_id=assistant_msg_id, role="assistant", content=None,
                 sections=sections, msg_metadata=metadata, created_at=now,
             )
-        except Exception:
-            # 中层失败语义（§7.7）：debug + 静默；用户已看 SSE 答案 → 主答完好
-            _log.debug(
-                "persist_messages fs write failed for session %s, silently ignored",
-                session_id, exc_info=True,
+        except Exception as exc:
+            _log.error(
+                "persist_messages fs write failed for session %s, "
+                "skipping DB message_count update to keep DB/fs consistent: %r",
+                session_id, exc, exc_info=True,
             )
+            return  # 强一致：fs 写失败 → DB 不更新、不 commit
 
         # 3. 更新 qa_session.message_count（QASession 仍在 DB；不在 S6 scope）
-        # 注：辅助显示元数据；即使 step 2 fs write 失败仍执行 — divergence 可接受
-        #     详情读取走 fs 真相源（get_session_detail / SessionCompactor.compact），不依赖此计数
+        # 仅在 fs 写成功后执行，保证 DB message_count 永远 == fs 实际消息数 / 2
+        # 详情读取走 fs 真相源（get_session_detail / SessionCompactor.compact）
         async with db.begin_nested() if db.in_transaction() else _noop_ctx():
             sess = await db.get(QASession, session_id)
             if sess is not None:

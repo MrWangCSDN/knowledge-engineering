@@ -283,6 +283,54 @@ async def test_explain_persists_user_and_assistant_messages(session_maker, seed_
         assert sess_count[0].message_count == 2
 
 
+@pytest.mark.asyncio
+async def test_explain_fs_write_failure_does_not_commit_message_count(
+    session_maker, seed_ready_project, monkeypatch,
+):
+    """回归：fs 写失败时不应更新 DB message_count（强一致）。
+
+    bug 历史（2026-05-28 排查 sess_11cd1cd6756c）：persist_messages 在
+    qa_router.py:343-385 try/except 静默吞 write_message_to_fs 异常（只 _log.debug），
+    但仍照常 commit message_count += 2 到 DB，导致 MySQL 显示该 session 有消息
+    但 fs 上没文件 — 前端 sidebar 看见 session 但点开是空白（孤儿 session，
+    fs 数据彻底无法恢复）。
+
+    修复后契约：write_message_to_fs 抛异常 → 不更新 message_count、不 commit DB；
+    DB 与 fs 始终一致；主答（SSE 流）不受影响仍能返回给用户。
+    """
+    # mock write_message_to_fs 抛异常（模拟磁盘失败 / asyncio race / 权限错）
+    async def _raising_write(*args, **kw):
+        raise IOError("simulated fs write failure")
+    monkeypatch.setattr(
+        "src.service.memory.session.write_message_to_fs",
+        _raising_write,
+    )
+
+    app = _build_app(session_maker)
+    client = TestClient(app)
+    token = _login(client)
+
+    with client.stream(
+        "POST",
+        f"/projects/{seed_ready_project}/qa/explain",
+        headers=_auth(token),
+        json={"question": "存款开户的设计逻辑"},
+    ) as r:
+        body = "".join(r.iter_text())
+    # 主答仍 OK（SSE 流应正常完成 — fs 写失败不应中断流）
+    assert "event: done" in body
+
+    # 关键断言：fs 写失败时 message_count 必须仍为 0（强一致）
+    async with session_maker() as db:
+        sess_list = (await db.execute(select(QASession))).scalars().all()
+        # session 元数据可能被创建（标题生成等不在 try 块），但 message_count 不应增
+        if sess_list:
+            assert sess_list[0].message_count == 0, (
+                f"fs 写失败时 message_count 应保持为 0（强一致），"
+                f"实际为 {sess_list[0].message_count}"
+            )
+
+
 # ───────── v1.5 docx 导出 ─────────
 
 
