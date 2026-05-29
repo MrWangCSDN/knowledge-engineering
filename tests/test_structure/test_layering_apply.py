@@ -117,5 +117,28 @@ def test_disabled_skips():
     # skipped 应为 True
     assert stats["skipped"] is True
 
-    # 第一个实体（Controller 类）不应有 layer 属性（验证确实 no-op）
-    assert "layer" not in facts.entities[0].attributes
+    # 三个实体的 attributes 都不应写入 layer/layer_name（验证确实 no-op，覆盖 class + 两个 method）
+    for e in facts.entities:
+        assert "layer" not in e.attributes
+        assert "layer_name" not in e.attributes
+
+
+def test_belongs_to_wins_over_contains():
+    """同一 method 同时有 BELONGS_TO 和 CONTAINS 指向不同类时，BELONGS_TO 胜出。"""
+    # business 类（OrderService→business 层）与 entry 类（OrderController→entry 层）
+    biz = StructureEntity(id="class//Biz", type=EntityType.CLASS, name="OrderService",
+                          language="java", attributes={})
+    ent = StructureEntity(id="class//Ent", type=EntityType.CLASS, name="OrderController",
+                          language="java", attributes={"path": "/o"})
+    # method 自身无信号；CONTAINS 来自 entry 类，BELONGS_TO 指向 business 类
+    m = StructureEntity(id="method//doIt", type=EntityType.METHOD, name="doIt",
+                        language="java", attributes={})
+    rels = [
+        StructureRelation(type=RelationType.CONTAINS, source_id="class//Ent", target_id="method//doIt"),
+        StructureRelation(type=RelationType.BELONGS_TO, source_id="method//doIt", target_id="class//Biz"),
+    ]
+    facts = StructureFacts(entities=[biz, ent, m], relations=rels)
+    apply_layering(facts, LayeringConfig(enabled=True, adapter="ssm"))
+    by_id = {e.id: e for e in facts.entities}
+    # method 继承自 BELONGS_TO 目标（business 层），而非 CONTAINS 来源（entry 层）
+    assert by_id["method//doIt"].attributes["layer"] == "business"

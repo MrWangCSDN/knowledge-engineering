@@ -119,8 +119,8 @@ def apply_layering(facts: StructureFacts, config: Optional[LayeringConfig]) -> d
                 cid = owner.get(e.id)
 
                 # cid 不为 None 且存在于 class_layer 字典中，则继承
-                # Python 中 None 是 falsy，if cid 等价于 if cid is not None（此处 cid 为 str，不含空串风险）
-                if cid and cid in class_layer:
+                # 用 is not None 而非 if cid：实体 id 类型为 str 理论上可为空串，is not None 语义更精确
+                if cid is not None and cid in class_layer:
                     layer = class_layer[cid]  # 继承所属类的 layer_id
 
             # 写入 layer 和 layer_name（与 class 处理逻辑相同）
