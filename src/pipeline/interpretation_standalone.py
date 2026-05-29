@@ -73,8 +73,6 @@ def get_interpretation_progress_from_weaviate(
             finally:
                 store.close()
 
-        # business_interpretation removed in topological-unification refactor; stub zero progress
-        # 业务解读相关已彻底删除（拓扑解读统一化）
     except Exception as e:
         if isinstance(e, (OSError, json.JSONDecodeError)):
             _LOG.warning(
@@ -102,7 +100,6 @@ def run_interpretations_only(
     progress_callback: Optional[Any] = None,
     step_callback: Optional[Any] = None,
     include_method_interpretation: bool = True,
-    include_business_interpretation: bool = True,
     item_list_callback: Optional[Any] = None,
     item_list_callback_tech: Optional[Any] = None,
     item_list_callback_biz: Optional[Any] = None,
@@ -117,7 +114,7 @@ def run_interpretations_only(
     project_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    不重建图谱、不清 Neo4j、不写代码向量：仅基于已缓存的结构事实跑技术解读与/或业务解读。
+    不重建图谱、不清 Neo4j、不写代码向量：仅基于已缓存的结构事实跑拓扑解读。
     适用：代码未变，只需继续或补跑 LLM 解读。
 
     ``app_context``：刷新配置快照的目标；省略时使用 ``AppContext`` 单例。
@@ -175,16 +172,10 @@ def run_interpretations_only(
     else:
         out["interpretation"] = {"skipped": True, "reason": "未勾选或未启用 method_interpretation/vectordb-interpret"}
 
-    # business_interpretation removed in topological-unification refactor (Task 3 will clean up fully)
-    out["business_interpretation"] = {"skipped": True, "reason": "business_interpretation 已移除（拓扑解读统一化）"}
-
     _step("【仅解读】全部结束")
     ir = out.get("interpretation") or {}
-    br = out.get("business_interpretation") or {}
     parts = []
     if not ir.get("skipped") and ir.get("written") is not None:
-        parts.append(f"技术解读 本轮 {ir.get('written', 0)} 条")
-    if not br.get("skipped") and br.get("written") is not None:
-        parts.append(f"业务解读 本轮 {br.get('written', 0)} 条")
+        parts.append(f"拓扑解读 本轮 {ir.get('written', 0)} 条")
     out["message"] = "；".join(parts) if parts else "未执行解读步骤"
     return out

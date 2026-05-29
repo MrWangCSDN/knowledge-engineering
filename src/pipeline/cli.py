@@ -33,23 +33,12 @@ def main() -> None:
     ig.add_argument(
         "--with-interpretation",
         action="store_true",
-        help="清空并重建技术解读（LLM，极慢）；默认以配置 knowledge.pipeline.include_method_interpretation_build 为准",
+        help="清空并重建拓扑解读（LLM，极慢）；默认以配置 knowledge.pipeline.include_topological_interpretation_build 为准",
     )
     ig.add_argument(
         "--without-interpretation",
         action="store_true",
         help="仅重建图谱与代码向量，不跑方法技术解读",
-    )
-    bg = parser.add_mutually_exclusive_group()
-    bg.add_argument(
-        "--with-business-interpretation",
-        action="store_true",
-        help="本趟执行业务解读（类/API/模块，增量）；默认读 pipeline.include_business_interpretation_build",
-    )
-    bg.add_argument(
-        "--without-business-interpretation",
-        action="store_true",
-        help="本趟不执行业务解读",
     )
     args = parser.parse_args()
 
@@ -66,18 +55,11 @@ def main() -> None:
     elif args.without_interpretation:
         include_interp = False
 
-    include_biz = None
-    if args.with_business_interpretation:
-        include_biz = True
-    elif args.without_business_interpretation:
-        include_biz = False
-
     result = run_pipeline(
         config_path=config_path,
         until=args.until,
         output_dir=args.output_dir,
         include_method_interpretation=include_interp,
-        include_business_interpretation=include_biz,
         # args.force_full 由 argparse 把 --force-full 自动转 snake_case
         force_full=args.force_full,
     )

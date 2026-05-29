@@ -145,10 +145,9 @@ schema:
   mapper_glob: "**/mapper/*Mapper.xml"  # 相对 repo.path，MyBatis Mapper XML
 
 knowledge:
-  # 侧栏勾选默认值：方法技术解读 / 业务解读（均需 YAML 中对应能力启用；均为增量续跑、不清空 Weaviate 库）
+  # 侧栏勾选默认值：拓扑解读（需 YAML 中对应能力启用；增量续跑，不清空 Weaviate 库）
   pipeline:
-    include_method_interpretation_build: false
-    include_business_interpretation_build: false
+    include_topological_interpretation_build: false  # 是否跑拓扑解读
   # 语义向量：DashScope text-embedding-v4（1024 维，与 vectordb dimension 一致）
   # API key 走 env var DASHSCOPE_API_KEY（与 weaviate/neo4j 一致，secret 不入 git）
   semantic_embedding:
@@ -175,44 +174,14 @@ knowledge:
     weaviate_url: "http://localhost:8080"
     weaviate_grpc_port: 50051
     weaviate_api_key: "user-a-key"
-    collection_name: "MethodInterpretation"
-  vectordb-business:
-    enabled: true
-    backend: weaviate
-    dimension: 1024
-    weaviate_url: "http://localhost:8080"
-    weaviate_grpc_port: 50051
-    weaviate_api_key: "user-a-key"
-    collection_name: "BusinessInterpretation"
-  method_interpretation:
+    collection_name: "TopologicalInterpretation"
+  topological_interpretation:
     enabled: true
     language: zh
     llm_backend: multi                # 双LLM负载均衡：Qwen + MiniMax 轮询
     timeout_seconds: 90
     max_methods: 0                    # 0 = 全部方法
     max_workers: 8                    # 8路并发，两个平台各分一半
-    multi_providers:
-      - name: qwen
-        backend: openai
-        openai_api_key: "sk-sp-a0500def35904c299f60885ba9e8fb8a"
-        openai_base_url: "https://coding.dashscope.aliyuncs.com/v1"
-        openai_model: "qwen3.5-plus"
-        timeout_seconds: 90
-      - name: minimax
-        backend: openai
-        openai_api_key: "sk-cp-e6KP84n0STVUVo4S2NNRr1FefEQKUm5PHXDgT61RcvP2qV_ho6w-cNVfIDu2vnF5T2JysSUfqDi8Ra5sm8LvuiBt_ViJDTMI04L4slZ61cRFi_Xf-v6PUPY"
-        openai_base_url: "https://api.minimax.chat/v1"
-        openai_model: "MiniMax-M2.5"
-        timeout_seconds: 120
-  business_interpretation:
-    enabled: true
-    language: zh
-    llm_backend: multi
-    timeout_seconds: 120
-    max_classes: 80
-    max_apis: 120
-    max_modules: 10
-    max_workers: 6
     multi_providers:
       - name: qwen
         backend: openai

@@ -38,8 +38,7 @@ class StructureConfig(BaseModel):
 
 class PipelineConfig(BaseModel):
     """knowledge.pipeline 配置。"""
-    include_method_interpretation_build: bool = False
-    include_business_interpretation_build: bool = False
+    include_topological_interpretation_build: bool = False
 
 
 class SemanticEmbeddingConfig(BaseModel):

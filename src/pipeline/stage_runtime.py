@@ -53,17 +53,13 @@ class InterpretationStageContext(KnowledgeAwareStageContext):
     want_interpret: bool
     mi_on: bool
     vinterp_on: bool
-    run_business_phase: bool
-    want_biz: bool
-    biz_capable: bool
     progress_callback: Optional[Any]
     item_list_callback: Optional[Any]
     item_completed_callback: Optional[Any]
     item_started_callback: Optional[Callable[[str, InterpretPhase], None]]
     interpretation_stats_callback: Optional[Callable[[int, int, InterpretPhase], None]]
     interp_stats: dict[str, Any]
-    biz_stats: dict[str, Any]
-    # v2.0：多租户 project_id，透传到 run_business_interpretations(project_id=...)
+    # v2.0：多租户 project_id，透传到 run_method_interpretations(project_id=...)
     project_id: Optional[str] = None
 
 
@@ -206,7 +202,7 @@ class KnowledgeStage:
         graph_backend = graph_cfg.backend
         ctx.step_callback(
             "⑤ 清理 Neo4j（Entity）与 Weaviate 代码库"
-            + (" + 技术解读库 …" if ctx.run_interpret_phase else "（保留技术解读库）…")
+            + (" + 拓扑解读库 …" if ctx.run_interpret_phase else "（保留拓扑解读库）…")
         )
 
         if graph_backend == "neo4j":
@@ -312,7 +308,7 @@ class KnowledgeStage:
             ctx.progress_callback(
                 78 if ctx.interpret_enabled else 100,
                 100,
-                "准备技术解读（将调用 LLM）…" if ctx.interpret_enabled else "流水线主体完成（已跳过技术解读，解读库未清空）",
+                "准备拓扑解读（将调用 LLM）…" if ctx.interpret_enabled else "流水线主体完成（已跳过拓扑解读，解读库未清空）",
             )
         ctx.graph = graph
 
@@ -329,7 +325,6 @@ class FinalizeStageContext(KnowledgeAwareStageContext):
     structure_facts: StructureFacts
     config_path: str | Path
     interp_stats: dict[str, Any]
-    biz_stats: dict[str, Any]
     result: Optional[dict[str, Any]] = None
 
 
@@ -362,16 +357,11 @@ class FinalizeStage:
         elif neo4j_status is None:
             msg += "；Neo4j 同步未执行"
         if ctx.interp_stats.get("mode") == "graph_and_code_only":
-            msg += "；技术解读库已保留（未重建）"
+            msg += "；拓扑解读库已保留（未重建）"
         elif ctx.interp_stats.get("mode") == "interpret_config_disabled":
-            msg += "；技术解读未执行（请启用 method_interpretation 与 vectordb-interpret）"
+            msg += "；拓扑解读未执行（请启用 topological_interpretation 与 vectordb-interpret）"
         elif not ctx.interp_stats.get("skipped"):
-            msg += f"；技术解读写入 {ctx.interp_stats.get('written', 0)} 条（失败/跳过 {ctx.interp_stats.get('failed', 0)}）"
-        if not ctx.biz_stats.get("skipped") and ctx.biz_stats.get("candidates_class") is not None:
-            msg += (
-                f"；业务解读本轮 {ctx.biz_stats.get('written', 0)} 条"
-                f"（类 {ctx.biz_stats.get('todo_this_run_class', 0)}，API {ctx.biz_stats.get('todo_this_run_api', 0)}，模块 {ctx.biz_stats.get('todo_this_run_module', 0)}）"
-            )
+            msg += f"；拓扑解读写入 {ctx.interp_stats.get('written', 0)} 条（失败/跳过 {ctx.interp_stats.get('failed', 0)}）"
 
         try:
             ctx.structure_repo.save(ctx.structure_facts, config_path=ctx.config_path, write_cache=True)
@@ -393,18 +383,17 @@ class FinalizeStage:
             "neo4j_sync": neo4j_status,
             "message": msg,
             "interpretation": ctx.interp_stats,
-            "business_interpretation": ctx.biz_stats,
         }
         ctx.result = result
 
 
 class InterpretationStage:
-    """技术解读 + 业务解读阶段（最小拆分，不改变现有回调时序）。"""
+    """拓扑解读阶段（最小拆分，不改变现有回调时序）。"""
 
     def execute(self, ctx: InterpretationStageContext) -> None:
         k = ctx.knowledge_cfg
         if ctx.run_interpret_phase:
-            ctx.step_callback("⑦′ 技术解读：调用 LLM …")
+            ctx.step_callback("⑦′ 拓扑解读：调用 LLM …")
             ctx.interp_stats = run_method_interpretations(
                 ctx.structure_facts,
                 k.topological_interpretation,
@@ -419,14 +408,8 @@ class InterpretationStage:
                 project_id=ctx.project_id,
             )
         elif ctx.want_interpret and not (ctx.mi_on and ctx.vinterp_on):
-            ctx.step_callback("⑦′ 技术解读：已请求执行，但配置未同时启用 method_interpretation 与 vectordb-interpret，已跳过。")
+            ctx.step_callback("⑦′ 拓扑解读：已请求执行，但配置未同时启用 topological_interpretation 与 vectordb-interpret，已跳过。")
             ctx.interp_stats = {"skipped": True, "written": 0, "failed": 0, "mode": "interpret_config_disabled"}
         else:
-            ctx.step_callback("⑦′ 技术解读：「仅图谱+代码」— 已保留 Weaviate 解读库，未调用 LLM。")
+            ctx.step_callback("⑦′ 拓扑解读：「仅图谱+代码」— 已保留 Weaviate 解读库，未调用 LLM。")
             ctx.interp_stats = {"skipped": True, "written": 0, "failed": 0, "mode": "graph_and_code_only", "interpret_preserved": True}
-
-        # business_interpretation removed in topological-unification refactor (Task 3 will clean up fully)
-        ctx.biz_stats = {"skipped": True, "mode": "business_interpretation_removed"}
-
-
-

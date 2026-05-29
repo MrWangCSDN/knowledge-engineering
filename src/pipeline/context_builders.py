@@ -105,9 +105,6 @@ def _build_interpretation_ctx(
     want_interpret: bool,
     mi_on: bool,
     vinterp_on: bool,
-    run_business_phase: bool,
-    want_biz: bool,
-    biz_capable: bool,
     step_callback: Callable[[str], None],
     progress_callback: Optional[Any],
     item_list_callback: Optional[Any],
@@ -124,9 +121,6 @@ def _build_interpretation_ctx(
         want_interpret=want_interpret,
         mi_on=mi_on,
         vinterp_on=vinterp_on,
-        run_business_phase=run_business_phase,
-        want_biz=want_biz,
-        biz_capable=biz_capable,
         step_callback=step_callback,
         progress_callback=progress_callback,
         item_list_callback=item_list_callback,
@@ -134,8 +128,7 @@ def _build_interpretation_ctx(
         item_started_callback=item_started_callback,
         interpretation_stats_callback=interpretation_stats_callback,
         interp_stats={"skipped": True},
-        biz_stats={"skipped": True},
-        # v2.0：多租户 project_id，透传到 InterpretationStage → run_business_interpretations
+        # v2.0：多租户 project_id，透传到 InterpretationStage → run_method_interpretations
         project_id=project_id,
     )
 
@@ -151,7 +144,6 @@ def _build_finalize_ctx(
     structure_facts: StructureFacts,
     config_path: str | Path,
     interp_stats: dict[str, Any],
-    biz_stats: dict[str, Any],
     step_callback: Callable[[str], None],
 ) -> FinalizeStageContext:
     return FinalizeStageContext(
@@ -164,7 +156,6 @@ def _build_finalize_ctx(
         structure_facts=structure_facts,
         config_path=config_path,
         interp_stats=interp_stats,
-        biz_stats=biz_stats,
         step_callback=step_callback,
         result=None,
     )

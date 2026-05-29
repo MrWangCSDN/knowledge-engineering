@@ -10,7 +10,7 @@
 
 v1.4（Plan C4 §7）：新增 AGENT_SYSTEM_PROMPT 自由格式变体供 chat/agent（ReAct）路径——
 放开第 1 条的 6 段 JSON 强制（改自然 markdown），第 2 条反幻觉约束仍严格保留；
-结构化 6 段（SYSTEM_PROMPT）保留给非 chat 的"结构化技术解读"模式。
+结构化 6 段（SYSTEM_PROMPT）保留给非 chat 的"结构化拓扑解读"模式。
 
 W6 会在这里进一步加入：
   - 业务术语词典（business_terms.yaml 100 条）
@@ -133,7 +133,7 @@ reference 字段：
 # ─── 自由格式 system prompt（v1.4 / Plan C4，设计 §7）────────────────────────
 # chat/agent（ReAct）路径用：保留分析师角色 + 视角 + 反幻觉 + 引用标记 + Mermaid 约定，
 # 但**不**强制 6 段式 JSON——模型自然 markdown 作答。结构化 6 段能力保留在 SYSTEM_PROMPT
-# 给"结构化技术解读"非 chat 场景。输出由 _parse_sections 降级分支接住（非 JSON → 单段）。
+# 给"结构化拓扑解读"非 chat 场景。输出由 _parse_sections 降级分支接住（非 JSON → 单段）。
 AGENT_SYSTEM_PROMPT = """你是企业代码知识分析师。你的任务是把代码翻译成业务方/新人能读懂的业务说明，并直接回答用户的问题。
 
 【作答风格】
@@ -150,7 +150,7 @@ AGENT_SYSTEM_PROMPT = """你是企业代码知识分析师。你的任务是把�
 
 判断 context 充足的标准：
   - candidates 数量 ≥ 3 且至少有一个 level 不是 "code_entity" → 充足
-  - candidates 全部是 level="code_entity" → 仅代码层数据，**业务解读缺失**
+  - candidates 全部是 level="code_entity" → 仅代码层数据，**拓扑解读缺失**
   - candidates 为空 → context 严重不足
 
 context 不足时**不要直接放弃**，先用工具探索：
@@ -162,14 +162,14 @@ context 不足时**不要直接放弃**，先用工具探索：
 2. **第二步：理解候选**
    - 拿到 entity_id → ke_callees / ke_callers 看依赖
    - 想看代码 → ke_read_entity 看 attrs + code_snippet
-   - 想看技术解读 → ke_method_interp（无解读也 ok，至少有 signature）
+   - 想看拓扑解读 → ke_method_interp（无解读也 ok，至少有 signature）
 
 3. **第三步：判定是否真的没有**
    - 探索 2-3 轮后仍无有用结果 → 输出"我尝试了 ke_search('xxx') / ke_callees(yyy) 等工具，未能找到符合的 entity。建议补充：1) 完整类全限定名 2) 业务关键词 3) entity_id"
    - **不要无尝试就投降**
 
-特殊情况：candidates 全是 level="code_entity"（业务解读缺失）：
-  - 说明此工程只跑了代码索引，没跑业务解读
+特殊情况：candidates 全是 level="code_entity"（拓扑解读缺失）：
+  - 说明此工程只跑了代码索引，没跑拓扑解读
   - 你能基于代码本身解读：方法签名、调用关系、SQL preview（MyBatis）等
   - **不要**因 summary_text 为空就说"未找到"——代码层数据已经足够给出有意义的回答
 

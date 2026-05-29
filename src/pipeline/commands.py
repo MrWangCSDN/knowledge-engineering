@@ -91,7 +91,6 @@ class FullPipelineCommand(PipelineCommand):
         *,
         config_path: str,
         include_method_interpretation: Optional[bool],
-        include_business_interpretation: Optional[bool],
         progress_callback: Optional[Any],
         step_callback: Optional[Any],
         item_list_callback: Optional[Any],
@@ -104,7 +103,6 @@ class FullPipelineCommand(PipelineCommand):
     ):
         self._config_path = config_path
         self._include_method_interpretation = include_method_interpretation
-        self._include_business_interpretation = include_business_interpretation
         self._progress_callback = progress_callback
         self._step_callback = step_callback
         self._item_list_callback = item_list_callback
@@ -121,7 +119,6 @@ class FullPipelineCommand(PipelineCommand):
             progress_callback=self._progress_callback,
             step_callback=self._step_callback,
             include_method_interpretation=self._include_method_interpretation,
-            include_business_interpretation=self._include_business_interpretation,
             item_list_callback=self._item_list_callback,
             item_completed_callback=self._item_completed_callback,
             item_started_callback=self._item_started_callback,
@@ -141,7 +138,6 @@ class InterpretOnlyCommand(PipelineCommand):
         progress_callback: Optional[Any],
         step_callback: Optional[Any],
         include_method_interpretation: bool,
-        include_business_interpretation: bool,
         item_list_callback_tech: Optional[Any],
         item_list_callback_biz: Optional[Any],
         item_completed_callback_tech: Optional[Any],
@@ -157,7 +153,6 @@ class InterpretOnlyCommand(PipelineCommand):
         self._progress_callback = progress_callback
         self._step_callback = step_callback
         self._include_method_interpretation = include_method_interpretation
-        self._include_business_interpretation = include_business_interpretation
         self._item_list_callback_tech = item_list_callback_tech
         self._item_list_callback_biz = item_list_callback_biz
         self._item_completed_callback_tech = item_completed_callback_tech
@@ -175,7 +170,6 @@ class InterpretOnlyCommand(PipelineCommand):
             progress_callback=self._progress_callback,
             step_callback=self._step_callback,
             include_method_interpretation=self._include_method_interpretation,
-            include_business_interpretation=self._include_business_interpretation,
             item_list_callback_tech=self._item_list_callback_tech,
             item_list_callback_biz=self._item_list_callback_biz,
             item_completed_callback_tech=self._item_completed_callback_tech,

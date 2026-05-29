@@ -41,7 +41,6 @@ class FullPipelineScope:
     item_started_callback: Optional[Callable[[str, InterpretPhase], None]]
     interpretation_stats_callback: Optional[Callable[[int, int, InterpretPhase], None]]
     include_method_interpretation: Optional[bool]
-    include_business_interpretation: Optional[bool]
     # v2.0：多租户 project_id，优先从 run_pipeline(project_id=...) 取，
     # 次选 config.repo.project_id，最终 fallback "default"
     project_id: Optional[str] = None
@@ -62,14 +61,12 @@ class FullPipelineScope:
     semantic_facts: Any = None
     graph: Optional[KnowledgeGraph] = None
     interp_stats: dict[str, Any] = field(default_factory=lambda: {"skipped": True})
-    biz_stats: dict[str, Any] = field(default_factory=lambda: {"skipped": True})
 
     def __post_init__(self) -> None:
         self.k = self.config.knowledge
         self.policy = InterpretationPipelinePolicy.from_knowledge_config(
             self.k,
             include_method_interpretation=self.include_method_interpretation,
-            include_business_interpretation=self.include_business_interpretation,
         )
         self.repo_cfg = self.config.repo
         self.struct_cfg = self.config.structure
@@ -190,9 +187,6 @@ def _segment_interpretation(scope: FullPipelineScope) -> Optional[dict[str, Any]
         want_interpret=scope.policy.want_interpret,
         mi_on=scope.policy.mi_on,
         vinterp_on=scope.policy.vinterp_on,
-        run_business_phase=scope.policy.run_business_phase,
-        want_biz=scope.policy.want_biz,
-        biz_capable=scope.policy.biz_capable,
         step_callback=scope.step,
         progress_callback=scope.progress_callback,
         item_list_callback=scope.item_list_callback,
@@ -204,7 +198,6 @@ def _segment_interpretation(scope: FullPipelineScope) -> Optional[dict[str, Any]
     )
     _execute_stages([InterpretationStage()], interpret_ctx)
     scope.interp_stats = interpret_ctx.interp_stats
-    scope.biz_stats = interpret_ctx.biz_stats
     return None
 
 
@@ -222,7 +215,6 @@ def _segment_finalize(scope: FullPipelineScope) -> Optional[dict[str, Any]]:
         structure_facts=scope.structure_facts,  # type: ignore[arg-type]
         config_path=scope.config_path,
         interp_stats=scope.interp_stats,
-        biz_stats=scope.biz_stats,
         step_callback=scope.step,
     )
     _execute_stages([FinalizeStage()], finalize_ctx)

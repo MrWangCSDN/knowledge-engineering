@@ -45,7 +45,7 @@ class OpenAIProvider:
 
     @classmethod
     def from_config_kwargs(cls, raw: dict[str, Any]) -> OpenAIProvider:
-        """从 method_interpretation / business_interpretation 的配置 dict 构造。"""
+        """从 topological_interpretation 的配置 dict 构造。"""
         return cls(
             api_key=raw.get("openai_api_key"),
             base_url=raw.get("openai_base_url"),

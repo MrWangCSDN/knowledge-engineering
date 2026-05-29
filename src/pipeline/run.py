@@ -83,7 +83,6 @@ def run_pipeline(
     step_callback: Optional[Any] = None,
     *,
     include_method_interpretation: Optional[bool] = None,
-    include_business_interpretation: Optional[bool] = None,
     item_list_callback: Optional[Any] = None,
     item_completed_callback: Optional[Any] = None,
     item_started_callback: Optional[Callable[[str, InterpretPhase], None]] = None,
@@ -104,8 +103,8 @@ def run_pipeline(
     执行到 knowledge 后会将配置与图写入 ``app_context``（省略时使用 ``AppContext`` 单例）。
 
     include_method_interpretation:
-        None 时采用配置 knowledge.pipeline.include_method_interpretation_build；
-        True 清空并 LLM 重建技术解读；False 仅重建图谱与代码向量，保留解读库。
+        None 时采用配置 knowledge.pipeline.include_topological_interpretation_build；
+        True 清空并 LLM 重建拓扑解读；False 仅重建图谱与代码向量，保留解读库。
 
     project_id (v2.0):
         多租户 project_id，写入 Weaviate tenant 与 Neo4j 节点属性。
@@ -143,7 +142,6 @@ def run_pipeline(
         item_started_callback=item_started_callback,
         interpretation_stats_callback=interpretation_stats_callback,
         include_method_interpretation=include_method_interpretation,
-        include_business_interpretation=include_business_interpretation,
         project_id=effective_project_id,
         force_full=force_full,
     )
