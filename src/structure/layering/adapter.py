@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 # typing 模块提供类型注解工具
-# Optional：表示"可以是某类型，也可以是 None"，等价于 Union[T, None]
 # Protocol：结构化类型（鸭子类型的静态版），定义"接口"，任何实现了对应方法的类都视为该协议的实现者
-from typing import Optional, Protocol
+from typing import Protocol
 
 # 从配置模型导入分层规则相关类
 from src.config.models import LayerMatch, LayeringConfig

@@ -52,10 +52,29 @@ def test_language_xml_is_dao():
 
 
 def test_priority_first_layer_wins():
-    """同时像 entry 和 business 时，layers 中靠前的 entry 优先。"""
+    """同时命中多层时，layers 中靠前的 entry 优先。"""
     a = RuleBasedAdapter(_cfg())
-    e = _cls("WeirdControllerService", attrs={"path": "/x"})  # 后缀 Service + 有 path
+    # 名字后缀 Service(→business)，但 has_attr path 命中 entry；entry 在 layers 中靠前 → entry 胜出
+    e = _cls("WeirdControllerService", attrs={"path": "/x"})
     assert a.classify(e) == "entry"
+
+
+def test_has_attr_path_alone_is_entry():
+    """has_attr 信号单独命中：有 path 属性即归入口层（名字/包都不匹配也成立）。"""
+    a = RuleBasedAdapter(_cfg())
+    e = _cls("Foo", attrs={"path": "/x"})   # Foo 不匹配任何 name/package/language 信号
+    assert a.classify(e) == "entry"
+
+
+def test_name_prefix_matches():
+    """name_prefix 信号：以指定前缀开头即命中，否则落 fallback。"""
+    # 单独构造一个用 name_prefix 的配置（_cfg 没有 prefix 规则）
+    cfg = LayeringConfig(enabled=True, fallback_layer="unknown", layers=[
+        LayerSpec(id="base", name="基类层", match=LayerMatch(name_prefix=["Abstract"])),
+    ])
+    a = RuleBasedAdapter(cfg)
+    assert a.classify(_cls("AbstractService")) == "base"     # 以 Abstract 开头 → base
+    assert a.classify(_cls("UserService")) == "unknown"      # 不以 Abstract 开头 → fallback
 
 
 def test_fallback_when_no_match():
