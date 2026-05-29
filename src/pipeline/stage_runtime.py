@@ -90,6 +90,7 @@ class StructureStageContext(StepStageContext):
     out_dir: Optional[Path]
     source: Any = None
     structure_facts: Optional[StructureFacts] = None
+    layering: Any = None        # 新增：架构分层配置（LayeringConfig | None），None 表示跳过分层
 
 
 class StructureStage:
@@ -119,6 +120,7 @@ class StructureStage:
             ctx.source,
             extract_cross_service=ctx.extract_cross_service,
             progress_callback=_wrap_struct_progress(ctx.progress_callback),
+            layering=ctx.layering,                  # 新增：透传分层配置（LayeringConfig | None）
         )
         ctx.step_callback("② 结构层完成")
 

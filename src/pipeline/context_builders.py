@@ -34,6 +34,7 @@ def _build_structure_ctx(
     structure_repo: StructureFactsRepository,
     config_path: str | Path,
     out_dir: Optional[Path],
+    layering: Any = None,           # 新增：架构分层配置（LayeringConfig | None），透传到 StructureStageContext
 ) -> StructureStageContext:
     return StructureStageContext(
         repo_path=repo_path,
@@ -47,6 +48,7 @@ def _build_structure_ctx(
         structure_repo=structure_repo,
         config_path=config_path,
         out_dir=out_dir,
+        layering=layering,          # 新增：把分层配置注入 StructureStageContext.layering 字段
     )
 
 

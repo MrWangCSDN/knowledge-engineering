@@ -113,6 +113,7 @@ def _segment_structure(scope: FullPipelineScope) -> Optional[dict[str, Any]]:
         structure_repo=scope.structure_repo,
         config_path=scope.config_path,
         out_dir=scope.out_dir,
+        layering=scope.struct_cfg.layering,     # 新增：透传分层配置（StructureConfig.layering → LayeringConfig）
     )
     _execute_stages([StructureStage()], structure_ctx)
     scope.source = structure_ctx.source
