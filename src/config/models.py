@@ -30,10 +30,93 @@ class RepoConfig(BaseModel):
     project_id: Optional[str] = None
 
 
+class LayerMatch(BaseModel):
+    """单层匹配规则：各信号之间是 OR（任一命中即归该层）。
+
+    每个字段代表一类「信号」，classify 时只要有任意一条信号命中，就把该实体归入对应层。
+    全部信号的默认值均为空列表，即「不启用该信号」，符合最小配置原则。
+    """
+    # annotation：检测 applied 注解的简单类名，如 "RestController"、"Service"
+    # list[str] 表示「字符串列表」，Python 3.9+ 可以直接写内置 list，无需从 typing 导入
+    annotation: list[str] = Field(default_factory=list)        # applied 注解简单名，如 "RestController"
+
+    # name_suffix：匹配类名/方法名后缀，如 ["Controller"] 可命中 UserController
+    name_suffix: list[str] = Field(default_factory=list)       # 类/方法名后缀
+
+    # name_prefix：匹配类名/方法名前缀，如 ["Abstract"] 可命中 AbstractService
+    name_prefix: list[str] = Field(default_factory=list)       # 类/方法名前缀
+
+    # package_contains：包路径含指定子串，如 ".service" 可命中 com.example.service.UserService
+    package_contains: list[str] = Field(default_factory=list)  # 包路径含子串，如 ".service"
+
+    # has_attr：实体存在且非空的 attribute 键名，如 "path" 表示含有路由 path 属性
+    has_attr: list[str] = Field(default_factory=list)          # 存在且非空的 attribute 键，如 "path"
+
+    # language：限定编程语言，如 ["java"]、["xml"]；空列表 = 不限语言
+    language: list[str] = Field(default_factory=list)          # java / xml
+
+    # 以下两个信号需要上下文（context-backed），Plan 2 才实现，v1 classifier 暂忽略：
+    # bool 字段默认 False 表示「不启用」；xml_paired 需要跨文件查找配对 XML，暂时占位
+    xml_paired: bool = False                                   # 在 mapper/dao 包且有配对 XML
+
+    # extends / implements：需要解析继承/接口关系，Plan 2 实现
+    extends: list[str] = Field(default_factory=list)           # 父类简单名
+    implements: list[str] = Field(default_factory=list)        # 接口简单名
+
+
+class LayerSpec(BaseModel):
+    """一个架构层的定义，包含层 id、中文名以及匹配规则。"""
+    # id：层的唯一标识符，由用户在 project.yaml 中自定义，如 "entry"、"service"
+    id: str                                                    # 层 id，如 "entry"
+
+    # name：层的中文名称，仅用于展示，如 "入口层"
+    name: str                                                  # 层中文名
+
+    # match：该层的匹配规则，默认构造一个空 LayerMatch（即全信号关闭）
+    # default_factory=LayerMatch 表示「每次创建 LayerSpec 时都 new 一个 LayerMatch 实例」
+    # 不能写 default=LayerMatch()，那样会让所有实例共享同一个对象（Python 可变对象的经典坑）
+    match: LayerMatch = Field(default_factory=LayerMatch)      # 匹配规则
+
+    # extractor：Plan 2 预留字段，本层挂载的增强 extractor id；None 表示不挂
+    # Optional[str] = None 等价于 str | None = None，表示该字段可以是字符串或 None
+    extractor: Optional[str] = None                            # Plan 2：本层挂的增强 extractor id
+
+    # extractor_enabled：Plan 2 预留字段，是否启用该 extractor
+    extractor_enabled: bool = True                             # Plan 2：是否启用该 extractor
+
+
+class LayeringConfig(BaseModel):
+    """架构分层采集配置，对应 project.yaml 的 structure.layering 段。
+
+    该配置控制「把每个代码实体归入哪个架构层」的整体行为：
+    - enabled=False 时 apply_layering 直接跳过，保持向后兼容
+    - adapter 决定使用哪个范式基座（内置规则集），layers 可覆盖或追加层定义
+    - fallback_layer 是兜底层名，当所有 layers 都不命中时使用
+    """
+    # enabled：总开关，默认 False 保证向后兼容（已有项目不需要改配置）
+    enabled: bool = False                                      # 总开关，默认关，向后兼容
+
+    # adapter：范式基座 id，决定加载哪组内置规则；"three_tier" 是默认的三层架构基座
+    adapter: str = "three_tier"                                # 范式基座 id
+
+    # fallback_layer：全部层规则都不命中时的兜底层名，建议保持 "unknown"
+    fallback_layer: str = "unknown"                            # classify 全不命中归这层
+
+    # profile_on_missing：Plan 3 预留字段，无 layers 配置时是否自动画像推断层
+    profile_on_missing: bool = False                           # Plan 3：无 layers 时是否自动画像
+
+    # layers：用户在 project.yaml 中定义的层列表，可覆盖范式基座的默认层或新增层
+    # Field(default_factory=list) 确保每个 LayeringConfig 实例都有独立的空列表，而非共享同一个
+    layers: list[LayerSpec] = Field(default_factory=list)      # 层定义（工程覆盖）
+
+
 class StructureConfig(BaseModel):
     """structure 配置。"""
     extract_cross_service: bool = True
     java_source_extensions: list[str] = Field(default_factory=lambda: [".java"])
+    # layering：架构分层采集配置，默认构造一个 enabled=False 的 LayeringConfig（总开关关闭）
+    # default_factory=LayeringConfig 等价于每次 new StructureConfig() 时自动 new 一个 LayeringConfig()
+    layering: LayeringConfig = Field(default_factory=LayeringConfig)  # 新增：架构分层采集配置
 
 
 class PipelineConfig(BaseModel):
