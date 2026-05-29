@@ -5,6 +5,7 @@ import com.github.javaparser.ast.*;
 import com.github.javaparser.ast.body.*;
 import com.github.javaparser.ast.expr.*;
 import com.github.javaparser.ast.type.*;
+import com.github.javaparser.ast.nodeTypes.NodeWithAnnotations;
 import com.github.javaparser.resolution.declarations.ResolvedMethodDeclaration;
 import com.github.javaparser.symbolsolver.JavaSymbolSolver;
 import com.github.javaparser.symbolsolver.resolution.typesolvers.*;
@@ -261,7 +262,8 @@ public class JavaFileProcessor {
                 .moduleId(moduleId)
                 .language("java")
                 .attr("visibility", modifiers)
-                .attr("path", mappingPath != null ? mappingPath : "");
+                .attr("path", mappingPath != null ? mappingPath : "")
+                .attr("annotations", collectAnnotationNames(typeDecl));
 
         if (feignTarget != null) {
             entity.attr("feign_target_service", feignTarget);
@@ -402,7 +404,8 @@ public class JavaFileProcessor {
                 .attr("signature", sig)
                 .attr("class_name", className)
                 .attr("is_getter", isGetter)
-                .attr("is_setter", isSetter);
+                .attr("is_setter", isSetter)
+                .attr("annotations", collectAnnotationNames(method));
 
         if (mappingPath != null) {
             entity.attr("path", mappingPath);
@@ -691,6 +694,16 @@ public class JavaFileProcessor {
             "RequestMapping", "GetMapping", "PostMapping", "PutMapping",
             "DeleteMapping", "PatchMapping"
     );
+
+    /** 取出节点上 applied 注解的简单名列表（如 ["Controller","RequestMapping"]）。
+     *  包级静态以便单测直接调用。 */
+    static List<String> collectAnnotationNames(NodeWithAnnotations<?> node) {
+        List<String> names = new ArrayList<>();
+        for (AnnotationExpr ann : node.getAnnotations()) {
+            names.add(ann.getNameAsString());   // 简单名，不含包前缀
+        }
+        return names;
+    }
 
     private String extractMappingPath(TypeDeclaration<?> typeDecl) {
         for (AnnotationExpr ann : typeDecl.getAnnotations()) {
