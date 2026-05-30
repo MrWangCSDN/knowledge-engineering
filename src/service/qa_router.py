@@ -104,7 +104,7 @@ async def build_retriever_for_project(project_id: str, request: Request, db: Asy
     # 每个请求构造新的 adapter 实例：
     # WeaviateTopologicalAdapter：包装 singleton store，本身无状态，轻量
     interp_adapter = WeaviateTopologicalAdapter(interp_store)
-    # 用该工程的 .codegraph.db（只读）构造图适配器；repo_local_path 为空则下游会报错，属预期
+    # 用该工程的 .codegraph.db（只读）构造图适配器；repo_local_path 为空时 codegraph_db_path 会抛明确的 ValueError（不再是晦涩 TypeError）
     graph_adapter = CodeGraphGraphAdapter(CodeGraphDB(codegraph_db_path(repo_local_path)))
 
     # ReAct 代码层兜底（设计 [[ReAct-代码层兜底-设计]]）：
@@ -131,7 +131,8 @@ async def build_tools_for_project(
     """每个请求构造一个绑定 project_id 的 ToolRegistry。
 
     与 build_retriever_for_project 同理：adapter 按 project_id 绑定，
-    工具里的 project_id 由 adapter（Neo4jGraphAdapter）和 build_default_registry 闭包传入；
+    工具里的 project_id 由 build_default_registry 闭包传入；多租户隔离来自每工程独立的
+    .codegraph.db 文件（物理隔离），CodeGraphGraphAdapter 不接受 project_id 参数。
     LLM 不再需要在 input 里指定 project_id（修 2026-05-26 mall-swarm 实测 LLM 猜错 tenant 的 bug）。
 
     v2.x 新增：从 DB 拿 repo_local_path（4 个文件类工具需要这个路径），
@@ -169,7 +170,7 @@ async def build_tools_for_project(
     from src.integrations.codegraph.paths import codegraph_db_path
 
     interp_adapter = WeaviateTopologicalAdapter(interp_store)
-    # 用该工程的 .codegraph.db（只读）构造图适配器；repo_local_path 为空则下游会报错，属预期
+    # 用该工程的 .codegraph.db（只读）构造图适配器；repo_local_path 为空时 codegraph_db_path 会抛明确的 ValueError（不再是晦涩 TypeError）
     graph_adapter = CodeGraphGraphAdapter(CodeGraphDB(codegraph_db_path(repo_local_path)))
 
     # ke_search 工具也用 composite，解读库空时兜底走 CodeEntity（设计 [[ReAct-代码层兜底-设计]] §2）

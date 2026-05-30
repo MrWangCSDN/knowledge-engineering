@@ -15,6 +15,9 @@ def codegraph_db_path(repo_local_path: str) -> str:
     Returns:
         codegraph.db 文件的完整路径，固定为 <repo>/.codegraph/codegraph.db
     """
-    # os.path.join 按系统分隔符拼路径，自动处理斜杠，比字符串拼接更健壮
-    # 等效于：repo_local_path + "/.codegraph/codegraph.db"（但跨平台安全）
+    if not repo_local_path:                 # None/空 → 明确报错，别让 os.path.join 抛晦涩 TypeError
+        raise ValueError(
+            "repo_local_path 为空，无法定位 CodeGraph 库（该工程可能未配置 repo_local_path）"
+        )
+    # os.path.join 按系统分隔符拼路径
     return os.path.join(repo_local_path, ".codegraph", "codegraph.db")

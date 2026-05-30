@@ -22,3 +22,11 @@ def test_predecessors_returns_durable_keys(tmp_path):
     a = _adapter(tmp_path)
     out = a.predecessors("OmsService::generateOrder#(OrderParam)")
     assert "OmsCtrl::generateOrder#(OrderParam)" in out
+
+
+def test_missing_db_degrades_to_empty():
+    # 库文件不存在时，导航优雅降级为空列表（不抛异常）—— 对齐设计 §8
+    from src.integrations.codegraph.db import CodeGraphDB
+    ad = CodeGraphGraphAdapter(CodeGraphDB("/nonexistent/path/codegraph.db"))
+    assert ad.successors("Foo::bar") == []
+    assert ad.predecessors("Foo::bar") == []

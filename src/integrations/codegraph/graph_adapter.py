@@ -6,9 +6,14 @@ GraphProto 的 entity_id 用 KE 的持久身份(durable_key)；
 """
 from __future__ import annotations  # PEP 563：允许类型注解里提前引用未定义的类名
 
+import logging   # 标准库日志模块；_LOG.warning 用于降级时留下可观测痕迹
+import sqlite3   # 标准库 SQLite3 接口；捕获 sqlite3.Error 做优雅降级
 from typing import Optional  # Optional[X] 表示值可以是 X 或 None
 from src.integrations.codegraph.db import CodeGraphDB, CgNode  # 只读 DB 访问层与节点数据类
 from src.integrations.codegraph.durable_key import durable_key  # 持久身份派生函数
+
+# 模块级 logger：logging.getLogger(__name__) 以本模块全路径命名，方便按模块过滤日志
+_LOG = logging.getLogger(__name__)
 
 # 字典：GraphProto 的 rel_type（KE 语义）→ CodeGraph 边的 kind 字段
 # None 表示调用方没传 rel_type，默认也走 'calls' 边
@@ -53,31 +58,24 @@ class CodeGraphGraphAdapter:
         return exact or cands
 
     def _walk(self, entity_id: str, rel_type: Optional[str], direction: str) -> list[str]:
-        """successors/predecessors 的公共实现，通过 direction 参数区分方向。
-
-        Args:
-            entity_id: 起点/终点节点的持久身份 key
-            rel_type:  KE 关系类型，None 默认为 'calls'
-            direction: 'succ'（出边）或 'pred'（入边）
-        Returns:
-            邻居节点的 durable_key 去重列表
-        """
+        """successors/predecessors 公共逻辑，direction ∈ {'succ','pred'}。"""
         # dict.get(key, default)：取 _REL_TO_KIND[rel_type]，未知类型 fallback 到 'calls'
         kind = _REL_TO_KIND.get(rel_type, "calls")
-        out: list[str] = []    # 结果列表，保持插入顺序
-        seen: set[str] = set() # 集合，O(1) 判重；不同 source 节点可能重复指向同一 target
-        for node in self._resolve(entity_id):  # 遍历所有匹配节点（通常只有 1 个）
-            # 根据方向选 successors（出边）或 predecessors（入边）
-            neighbors = (
-                self._db.successors(node.id, kind)
-                if direction == "succ"
-                else self._db.predecessors(node.id, kind)
-            )
-            for nb in neighbors:            # nb: neighbor，邻居节点 CgNode
-                key = durable_key(nb)       # 把邻居节点转换为持久 key
-                if key not in seen:         # 去重检查
-                    seen.add(key)           # 标记已见
-                    out.append(key)         # 加入结果
+        out: list[str] = []
+        seen: set[str] = set()              # 去重（不同 source 节点可能指向同一目标）
+        try:
+            for node in self._resolve(entity_id):
+                # 根据方向选 successors（出边）或 predecessors（入边）
+                neighbors = (self._db.successors(node.id, kind) if direction == "succ"
+                             else self._db.predecessors(node.id, kind))
+                for nb in neighbors:
+                    key = durable_key(nb)
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(key)
+        except sqlite3.Error as e:          # 库缺失/损坏/锁 → 优雅降级返空，不整体崩（设计 §8，对齐旧 Neo4j 契约）
+            _LOG.warning("[codegraph] 导航查询失败，降级返回空 (entity_id=%s): %s", entity_id, e)
+            return []
         return out
 
     def successors(self, entity_id: str, rel_type: Optional[str] = None) -> list[str]:

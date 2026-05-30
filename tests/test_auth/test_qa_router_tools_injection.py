@@ -178,6 +178,43 @@ async def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_build_retriever_uses_codegraph_graph_adapter(monkeypatch):
+    """build_retriever_for_project 实际构造 CodeGraphGraphAdapter（headline 换 adapter 的断言）。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.service.qa_router import build_retriever_for_project
+    from src.integrations.codegraph.graph_adapter import CodeGraphGraphAdapter
+    import src.integrations.codegraph.paths as _cg_paths_mod
+
+    # patch codegraph_db_path 返回哑路径（CodeGraphDB 惰性打开文件，不会立即失败）
+    monkeypatch.setattr(_cg_paths_mod, "codegraph_db_path", lambda path: "/dev/null")
+
+    # 伪造 request.app.state：weaviate_interp_store 非 None，不需要 neo4j_backend
+    class _State:
+        weaviate_interp_store = object()   # 非 None，通过就绪检查
+        weaviate_code_store = None         # 可选；None 时 composite 跳过 fallback
+
+    class _App:
+        state = _State()
+
+    class _Req:
+        app = _App()
+
+    # 伪造 db：db.get(Project, project_id) 返回带 repo_local_path 的假 Project
+    fake_project = MagicMock()
+    fake_project.repo_local_path = "/repos/x"   # 非空，让 codegraph_db_path 正常走（已 patch）
+    fake_db = AsyncMock()
+    fake_db.get = AsyncMock(return_value=fake_project)
+
+    # patch WeaviateTopologicalAdapter 避免真连 Weaviate
+    import src.service.qa_engine.adapters as _adapters
+    monkeypatch.setattr(_adapters, "WeaviateTopologicalAdapter", lambda store: MagicMock())
+
+    retriever = await build_retriever_for_project("p1", _Req(), fake_db)
+    # 核心断言：graph 字段是 CodeGraphGraphAdapter 实例（而非旧的 Neo4jGraphAdapter）
+    assert isinstance(retriever.graph, CodeGraphGraphAdapter)
+
+
+@pytest.mark.asyncio
 async def test_build_tools_for_project_loads_repo_local_path_from_db():
     """build_tools_for_project 从 DB Project 拿 repo_local_path 闭包给 4 工具。"""
     from unittest.mock import MagicMock, AsyncMock

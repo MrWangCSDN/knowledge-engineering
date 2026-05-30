@@ -15,3 +15,13 @@ def test_index_command():
         ["codegraph", "index", "/repos/mall-swarm", "--force"]
     assert build_index_command("/repos/mall-swarm", force=False) == \
         ["codegraph", "index", "/repos/mall-swarm"]
+
+
+def test_db_path_none_raises():
+    # repo_local_path 为空 → 明确 ValueError（而非晦涩 TypeError）
+    import pytest
+    from src.integrations.codegraph.paths import codegraph_db_path
+    with pytest.raises(ValueError):
+        codegraph_db_path(None)
+    with pytest.raises(ValueError):
+        codegraph_db_path("")
