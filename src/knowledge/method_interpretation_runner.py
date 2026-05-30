@@ -6,7 +6,7 @@ import logging
 import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional, Union
 
 from src.models.structure import EntityType, RelationType, StructureFacts, StructureEntity, StructureRelation
 from src.core.domain_enums import InterpretPhase
@@ -20,14 +20,35 @@ from src.knowledge.interpretation_store_adapter import MethodInterpretationStore
 from src.knowledge.llm import LLMProviderFactory
 from src.knowledge.base_interpretation_runner import BaseInterpretationRunner
 from src.knowledge.interpretation_item_helpers import interpret_one_llm_embed_store
-from src.knowledge.interpretation_runner_inputs import (
-    MethodInterpretInput,
-    VectorDbInterpretInput,
-    coerce_method_interpretation_config,
-    coerce_vectordb_config,
-)
+from src.config.models import TopologicalInterpretationConfig, VectorDBConfig
 
 _LOG = logging.getLogger(__name__)
+
+
+# 下面的类型别名与 coerce 辅助原属 src/knowledge/interpretation_runner_inputs.py。
+# 该模块在「拓扑解读统一化」重构中作为业务解读相关文件被删除，但 method（拓扑/方法级）解读仍需这 4 个符号，
+# 且本文件是它们唯一的使用方，故内联于此；同时把配置类型从已被重命名删除的 MethodInterpretationConfig
+# 切换到现在的 TopologicalInterpretationConfig（二者字段一致，仅改名）。
+# Union[A, B] 表示「A 或 B」的联合类型；Mapping[str, Any] 表示键为 str、值任意的只读映射（普通 dict 也满足）。
+MethodInterpretInput = Union[TopologicalInterpretationConfig, Mapping[str, Any]]
+VectorDbInterpretInput = Union[VectorDBConfig, Mapping[str, Any]]
+
+
+def coerce_method_interpretation_config(cfg: MethodInterpretInput) -> TopologicalInterpretationConfig:
+    """把入参规整为 TopologicalInterpretationConfig：已是该类型则原样返回，否则按 dict 校验后构造。"""
+    # isinstance(x, T)：判断 x 是否为 T（或其子类）的实例。已经是目标类型就直接返回，省去一次重复校验。
+    if isinstance(cfg, TopologicalInterpretationConfig):
+        return cfg
+    # model_validate 是 Pydantic v2 的类方法：对 dict 逐字段校验后构造模型实例（字段类型不符会抛 ValidationError）。
+    # 先用 dict(cfg) 把任意 Mapping 转成普通 dict，以兼容传入的是其它映射类型的情况。
+    return TopologicalInterpretationConfig.model_validate(dict(cfg))
+
+
+def coerce_vectordb_config(cfg: VectorDbInterpretInput) -> VectorDBConfig:
+    """把入参规整为 VectorDBConfig：逻辑同 coerce_method_interpretation_config。"""
+    if isinstance(cfg, VectorDBConfig):
+        return cfg
+    return VectorDBConfig.model_validate(dict(cfg))
 
 
 def _entity_name_by_id(entities: list[StructureEntity], eid: str) -> str:
