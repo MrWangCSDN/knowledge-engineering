@@ -114,6 +114,22 @@ class CodeGraphDB:
             ).fetchone()   # fetchone：只取第一行；没有匹配返回 None
         return self._row_to_node(row) if row else None  # 条件表达式（三元）
 
+    def iter_method_nodes(self) -> list[CgNode]:
+        """列出所有 kind='method' 的节点（重灌 CodeEntity 用）。
+
+        一次性把全部方法节点读进内存；mall-swarm ~1.5 万条，可接受。
+        Returns:
+            method 节点 CgNode 列表
+        """
+        # 一次性查全部方法节点；mall-swarm ~1.5万，全量读进内存可接受
+        with self._connect() as conn:
+            # WHERE kind = 'method'：只取方法节点，过滤掉类/接口/字段等
+            rows = conn.execute(
+                f"SELECT {_COLS} FROM nodes WHERE kind = 'method'"
+            ).fetchall()   # fetchall：把结果集全部取回成列表
+        # 列表推导式：把每一行 sqlite3.Row 转换为 CgNode 数据类实例
+        return [self._row_to_node(r) for r in rows]
+
     @staticmethod
     def _prefixed(alias: str) -> str:
         """把 _COLS 每列加表别名前缀，如 't.id,t.kind,...'，用于 JOIN 查询避免列名冲突。
