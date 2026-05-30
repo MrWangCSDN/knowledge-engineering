@@ -99,3 +99,78 @@ def repopulate_code_entities(
     # %d 是整数格式化占位符；logging 的延迟格式化只有真正输出时才拼串，节省 CPU
     _LOG.info("[codegraph] CodeEntity 重灌：扫描 %d，embed %d", scanned, embedded)
     return stats
+
+
+def repopulate_incremental(
+    *,
+    db: CodeGraphDB,            # 只读 SQLite 访问层（Phase 1）
+    repo_root: str,             # 工程源码根目录（读片段用）
+    project_id: str,            # 多租户 ID，等同 tenant
+    embed_batch: EmbedBatch,    # 批量 embed 函数（真用 get_embeddings_batch，测试用假的）
+    store: Any,                 # 向量库（需有 add + delete 方法；Any 保留灵活性）
+    checkpoint: Any,            # ContentCheckpoint 实例（内容 hash 持久化）
+    batch_size: int = 10,       # 每批 embed 多少条（DashScope 上限 10）
+) -> dict:
+    """增量重灌：只 embed 内容变化/新增的方法；删 CodeGraph 已不存在的孤儿。
+
+    与全量 repopulate_code_entities 的区别：
+    - 全量：每次都 embed 所有 skip_keys 以外的节点
+    - 增量：通过 ContentCheckpoint 比对代码 hash，内容没变就不重 embed，节省 API 调用
+
+    store 需有 add(...) 与 delete(entity_id, *, tenant)（删孤儿用；无 delete 则只记日志）。
+
+    Args:
+        db:          只读 CodeGraphDB
+        repo_root:   工程源码根
+        project_id:  多租户 tenant
+        embed_batch: 批量 embed 函数
+        store:       向量库（需有 add；有 delete 则删孤儿）
+        checkpoint:  ContentCheckpoint 实例（内容 hash 比对 + 持久化）
+        batch_size:  每批 embed 多少条
+    Returns:
+        统计字典 {"embedded": int, "deleted": int, "current": int}
+    """
+    # pending：需要重新 embed 的三元组列表；(durable_key, 短名, 代码片段)
+    # list[tuple[str, str, str]] 是类型注解，说明列表元素是三个字符串的元组
+    pending: list[tuple[str, str, str]] = []
+    # current_keys：当前 CodeGraph 里所有方法的 durable_key 集合（用于后续算孤儿）
+    current_keys: set[str] = set()
+
+    # 遍历所有 method 节点，收集需要重 embed 的节点
+    for node in db.iter_method_nodes():
+        key = durable_key(node)                     # 派生持久身份（行号无关）
+        current_keys.add(key)                       # 无论是否需要重 embed，都加入当前集合
+        snippet = read_snippet(repo_root, node.file_path, node.start_line, node.end_line)
+        if not snippet:                             # 读不到源码则跳过（文件缺失/行号越界）
+            continue
+        # checkpoint.changed：比对内容 hash；新 key 或代码改了才需要重 embed
+        if checkpoint.changed(key, snippet):
+            pending.append((key, node.name, snippet))
+
+    embedded = 0  # 实际 embed 并写入 store 的条数
+
+    # range(0, len, batch_size) 按批次切分，配合 DashScope API 每次 ≤10 条限制
+    for i in range(0, len(pending), batch_size):
+        chunk = pending[i:i + batch_size]
+        # 批量向量化：只传 snippet（文本），返回等长的向量列表
+        vecs = embed_batch([s for _, _, s in chunk])
+        # zip 同步迭代 chunk 和 vecs，一一对应处理
+        for (key, name, snip), vec in zip(chunk, vecs):
+            store.add(key, vec, entity_type="method", name=name, code_snippet=snip, tenant=project_id)
+            checkpoint.mark(key, snip)              # 记录新 hash（embed 成功后才记）
+            embedded += 1
+
+    deleted = 0  # 从 Weaviate 删除的孤儿条数
+
+    # getattr(obj, "delete", None)：安全取属性；store 没有 delete 方法时返回 None（best-effort）
+    delete_method = getattr(store, "delete", None)
+    # checkpoint.orphans(current_keys)：返回已记录但当前 CodeGraph 里不存在的 key
+    for orphan in checkpoint.orphans(current_keys):
+        # callable() 判断对象是否可调用；None 不可调用，真实 delete 方法可调用
+        if callable(delete_method):
+            delete_method(orphan, tenant=project_id)  # 从 Weaviate 删除孤儿向量
+        checkpoint.drop(orphan)                     # 从 checkpoint 移除（避免下次又算孤儿）
+        deleted += 1
+
+    checkpoint.flush()                              # 原子写盘（临时文件 → rename）
+    return {"embedded": embedded, "deleted": deleted, "current": len(current_keys)}

@@ -283,4 +283,23 @@ class WeaviateVectorStore(BaseWeaviateStore):
         except Exception:
             return None
 
+    def delete(self, entity_id: str, *, tenant: Optional[str] = None) -> None:
+        """按 entity_id 删除一条记录（增量更新删孤儿用）。
+
+        逻辑与 add() 镜像：_get_collection → with_tenant（可选）→ data.delete_by_id。
+        删失败不抛异常（best-effort）：若对象不存在或 Weaviate 不可达，静默忽略。
+
+        Args:
+            entity_id: durable_key（与 add() 写入时一致）
+            tenant:    租户 ID；非空时绑定 with_tenant 分区（同 add()）
+        """
+        try:
+            coll = self._get_collection()               # 获取 collection 引用
+            if tenant:
+                coll = coll.with_tenant(tenant)         # 绑定租户分区（Multi-Tenancy）
+            # _to_uuid：用 sha256 将任意字符串确定性地转成合法 UUID；与 add() 时写入的 uuid 一致
+            coll.data.delete_by_id(self._to_uuid(entity_id))
+        except Exception:
+            pass                                        # 删失败不阻断增量流程（best-effort）
+
     # clear/close/__del__ 由 BaseWeaviateStore 提供
