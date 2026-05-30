@@ -7,9 +7,10 @@
 
 依赖（Task 22 per-request 模式）：
   app.state.weaviate_interp_store    WeaviateTopologicalInterpretStore singleton
-  app.state.neo4j_backend            Neo4jGraphBackend singleton
   app.state.qa_synthesizer           QASynthesizer 实例（startup 注入，singleton）
   app.state.qa_router                SkillRouter 实例（startup 注入，singleton）
+
+注意：结构导航已改走 CodeGraph 直读 SQLite（CG-T1.6），neo4j_backend 不再是必要依赖。
 
 向后兼容（旧 singleton 模式，用于测试夹具）：
   如果 app.state.qa_retriever 已经挂上，explain endpoint 会直接用它
@@ -64,36 +65,47 @@ router = APIRouter(
 # ─── per-request 构造 helpers（Task 22） ─────────────────────────────────────
 
 
-def build_retriever_for_project(project_id: str, request: Request):
+async def build_retriever_for_project(project_id: str, request: Request, db: AsyncSession):
     """每个请求构造一个绑定 project_id 的 QARetriever。
 
-    使用 app.state 里的 singleton 底层资源（weaviate_interp_store + neo4j_backend），
-    为每个请求分别构造 adapter，确保 Neo4jGraphAdapter 绑定正确的 project_id，
-    实现多租户数据隔离。
+    结构导航改走 CodeGraph 直读 SQLite（设计 [[CodeGraph-结构引擎集成-设计]]），
+    彻底移除对 Neo4j 的依赖。repo_local_path 从 DB 查出后传给 codegraph_db_path。
 
     :param project_id: URL path 中的工程 ID，非空字符串
     :param request: FastAPI Request，用于访问 app.state singleton 资源
+    :param db: SQLAlchemy AsyncSession，用于查 Project.repo_local_path
     :return: QARetriever 实例（已绑定 project_id）
-    :raises RuntimeError: weaviate_interp_store 或 neo4j_backend 未就绪时抛出
+    :raises RuntimeError: weaviate_interp_store 未就绪时抛出
     """
     # 从 app.state 取 singleton 底层资源（startup 时已连接）
+    # 结构导航已改走 CodeGraph，不再需要 neo4j_backend
     interp_store = getattr(request.app.state, "weaviate_interp_store", None)
-    neo4j_backend = getattr(request.app.state, "neo4j_backend", None)
 
-    if interp_store is None or neo4j_backend is None:
+    # 只需 weaviate_interp_store；neo4j_backend 不再是必要条件
+    if interp_store is None:
         raise RuntimeError(
-            "底层存储资源未就绪（weaviate_interp_store / neo4j_backend）"
+            "底层存储资源未就绪（weaviate_interp_store）"
         )
 
+    # 从 DB 取 repo_local_path（CodeGraph 库定位需要它）
+    # db.get 是 SQLAlchemy async 单行主键查询，等效 SELECT ... WHERE id = project_id LIMIT 1
+    from src.service.db_models_homepage import Project as _ProjectModel
+    project = await db.get(_ProjectModel, project_id)
+    repo_local_path = project.repo_local_path if project else None
+
     # 延迟导入：避免 module-level 循环依赖
-    from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateTopologicalAdapter
+    from src.service.qa_engine.adapters import WeaviateTopologicalAdapter
     from src.service.qa_engine.retriever import QARetriever
+    # 结构导航改走 CodeGraph 直读 SQLite（设计 [[CodeGraph-结构引擎集成-设计]]）
+    from src.integrations.codegraph.db import CodeGraphDB
+    from src.integrations.codegraph.graph_adapter import CodeGraphGraphAdapter
+    from src.integrations.codegraph.paths import codegraph_db_path
 
     # 每个请求构造新的 adapter 实例：
     # WeaviateTopologicalAdapter：包装 singleton store，本身无状态，轻量
     interp_adapter = WeaviateTopologicalAdapter(interp_store)
-    # Neo4jGraphAdapter：绑定 project_id，所有 Cypher 查询带 project_id 过滤
-    graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id=project_id)
+    # 用该工程的 .codegraph.db（只读）构造图适配器；repo_local_path 为空则下游会报错，属预期
+    graph_adapter = CodeGraphGraphAdapter(CodeGraphDB(codegraph_db_path(repo_local_path)))
 
     # ReAct 代码层兜底（设计 [[ReAct-代码层兜底-设计]]）：
     # mall-swarm 类工程无 TopologicalInterpretation 数据时，用 CodeEntity 向量库兜底。
@@ -132,28 +144,33 @@ async def build_tools_for_project(
     :raises RuntimeError: 底层资源未就绪时抛出
     """
     interp_store = getattr(request.app.state, "weaviate_interp_store", None)
-    neo4j_backend = getattr(request.app.state, "neo4j_backend", None)
 
-    if interp_store is None or neo4j_backend is None:
+    # 结构导航已改走 CodeGraph，不再需要 neo4j_backend；仅 weaviate_interp_store 是必要条件
+    if interp_store is None:
         raise RuntimeError(
-            "底层存储资源未就绪（weaviate_interp_store / neo4j_backend）"
+            "底层存储资源未就绪（weaviate_interp_store）"
         )
 
     # 可选 store（未连时为 None → build_default_registry 不注册对应工具）
     code_store = getattr(request.app.state, "weaviate_code_store", None)
     method_interp_store = getattr(request.app.state, "weaviate_interp_store", None)
 
-    # v2.x 新增：从 DB 拿 repo_local_path（4 个文件类工具需要这个路径）
+    # v2.x 新增：从 DB 拿 repo_local_path（4 个文件类工具 + CodeGraph 库定位 都要它）
     # db.get 是 SQLAlchemy async 单行主键查询，等效于 SELECT ... WHERE id = project_id LIMIT 1
     from src.service.db_models_homepage import Project as _ProjectModel
     project = await db.get(_ProjectModel, project_id)
     repo_local_path = project.repo_local_path if project else None
 
-    from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateTopologicalAdapter
+    from src.service.qa_engine.adapters import WeaviateTopologicalAdapter
     from src.service.qa_engine.tools import build_default_registry
+    # 结构导航改走 CodeGraph 直读 SQLite（设计 [[CodeGraph-结构引擎集成-设计]]）
+    from src.integrations.codegraph.db import CodeGraphDB
+    from src.integrations.codegraph.graph_adapter import CodeGraphGraphAdapter
+    from src.integrations.codegraph.paths import codegraph_db_path
 
     interp_adapter = WeaviateTopologicalAdapter(interp_store)
-    graph_adapter = Neo4jGraphAdapter(neo4j_backend, project_id=project_id)
+    # 用该工程的 .codegraph.db（只读）构造图适配器；repo_local_path 为空则下游会报错，属预期
+    graph_adapter = CodeGraphGraphAdapter(CodeGraphDB(codegraph_db_path(repo_local_path)))
 
     # ke_search 工具也用 composite，解读库空时兜底走 CodeEntity（设计 [[ReAct-代码层兜底-设计]] §2）
     from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore
@@ -295,15 +312,16 @@ async def explain(
         retriever = _legacy_retriever
     else:
         # Task 22 新路径（per-request）：按 project_id 构造绑定的 QARetriever
+        # 结构导航已改走 CodeGraph，不再需要 neo4j_backend；只验证 weaviate_interp_store
         _interp_store = getattr(_app.state, "weaviate_interp_store", None)
-        _neo4j = getattr(_app.state, "neo4j_backend", None)
-        if _interp_store is None or _neo4j is None:
+        if _interp_store is None:
             raise HTTPException(
                 status_code=503,
                 detail="QA 引擎未就绪（底层存储资源不可用）",
             )
         try:
-            retriever = build_retriever_for_project(project_id, request)
+            # build_retriever_for_project 已改为 async（需要 await + db 参数）
+            retriever = await build_retriever_for_project(project_id, request, db)
         except Exception as e:
             raise HTTPException(
                 status_code=503,

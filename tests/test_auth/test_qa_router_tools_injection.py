@@ -85,11 +85,10 @@ async def test_build_tools_for_project_passes_optional_stores(monkeypatch):
         from src.service.qa_engine.tools.base import ToolRegistry
         return ToolRegistry()
 
-    # 伪造 request.app.state：含后端（Task 3 后只需 weaviate_interp_store + neo4j + code_store）
+    # 伪造 request.app.state：CG-T1.6 后结构导航走 CodeGraph，不再需要 neo4j_backend
     interp_sentinel_store = object()
 
     class _State:
-        neo4j_backend = object()
         weaviate_code_store = code_sentinel
         weaviate_interp_store = interp_sentinel_store
 
@@ -100,20 +99,23 @@ async def test_build_tools_for_project_passes_optional_stores(monkeypatch):
         app = _App()
 
     # v2.x：build_tools_for_project 是 async，需要 await + 传 db 参数
-    # db.get 返回 None（repo_local_path 路径降级 None，不影响 code_store/method_interp_store 透传测试）
+    # db.get 返回 None（repo_local_path 降级 None，不影响 code_store/method_interp_store 透传测试）
     fake_db = AsyncMock()
     fake_db.get = AsyncMock(return_value=None)
 
     # monkeypatch build_default_registry 捕获透传；adapter 构造换轻量替身（不真连后端）
-    # 注意：build_tools_for_project 内部是局部 import
-    #   `from src.service.qa_engine.tools import build_default_registry`
-    #   `from src.service.qa_engine.adapters import Neo4jGraphAdapter, WeaviateTopologicalAdapter`
-    # 局部 import 在调用时按模块属性取值 → 必须 patch 这两个**源模块**的属性。
+    # 注意：build_tools_for_project 内部是局部 import，局部 import 在调用时按模块属性取值，
+    # 必须 patch 源模块的属性（而不是 qa_router 局部变量）。
+    # CG-T1.6 后：Neo4jGraphAdapter 已移除，改走 CodeGraph 路径。
+    # db.get 返回 None → repo_local_path=None → codegraph_db_path(None) 会 TypeError；
+    # patch codegraph_db_path 源模块属性，让它返回哑路径跳过 os.path.join(None, ...) 崩溃。
     import src.service.qa_engine.tools as _tools_mod
     import src.service.qa_engine.adapters as _adapters
+    import src.integrations.codegraph.paths as _cg_paths_mod
     monkeypatch.setattr(_tools_mod, "build_default_registry", _fake_build_default_registry)
-    monkeypatch.setattr(_adapters, "Neo4jGraphAdapter", lambda backend, project_id: object())
     monkeypatch.setattr(_adapters, "WeaviateTopologicalAdapter", lambda store: object())
+    # codegraph_db_path 替换成返回固定哑路径（CodeGraphDB.__init__ 不立即打开文件，安全）
+    monkeypatch.setattr(_cg_paths_mod, "codegraph_db_path", lambda path: "/dev/null")
 
     await qa_router.build_tools_for_project("proj-a", _Req(), fake_db)
     assert captured["code_store"] is code_sentinel
@@ -142,16 +144,15 @@ async def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch
         _adapters, "WeaviateTopologicalAdapter",
         lambda store: spy_adapter,
     )
-    # Neo4jGraphAdapter 也替换成轻量替身（不真连 Neo4j）
-    monkeypatch.setattr(
-        _adapters, "Neo4jGraphAdapter",
-        lambda backend, project_id: MagicMock(),
-    )
+    # CG-T1.6 后：Neo4jGraphAdapter 已移除，改走 CodeGraph 路径。
+    # db.get 返回 None → repo_local_path=None → codegraph_db_path(None) 会 TypeError；
+    # patch codegraph_db_path 源模块属性，让它返回哑路径跳过 os.path.join(None, ...) 崩溃。
+    import src.integrations.codegraph.paths as _cg_paths_mod
+    monkeypatch.setattr(_cg_paths_mod, "codegraph_db_path", lambda path: "/dev/null")
 
-    # 伪造 request.app.state（值是什么不重要，adapter 已被 patch）
+    # 伪造 request.app.state（值是什么不重要，adapter 已被 patch；neo4j_backend 不再必要）
     class _State:
         weaviate_interp_store = object()
-        neo4j_backend = object()
         weaviate_code_store = None
 
     class _App:
@@ -187,10 +188,9 @@ async def test_build_tools_for_project_loads_repo_local_path_from_db():
     fake_project = MagicMock()
     fake_project.repo_local_path = "/tmp/fake-repo"
 
-    # mock app.state（Task 3 后：weaviate_interp_store 替代 weaviate_interpretation_store）
+    # mock app.state（CG-T1.6 后：结构导航走 CodeGraph，neo4j_backend 不再必要）
     request = MagicMock(spec=Request)
     request.app.state.weaviate_interp_store = MagicMock()
-    request.app.state.neo4j_backend = MagicMock()
     request.app.state.weaviate_code_store = None
 
     # mock db.get(Project, ...)
