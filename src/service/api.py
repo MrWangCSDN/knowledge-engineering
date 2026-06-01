@@ -147,13 +147,25 @@ async def init_qa_engine() -> None:
         "[startup] infra_status: %s",
         {k: v["ok"] for k, v in app.state.infra_status.items()},
     )
-    # 任一不 ok 则 WARNING 级别 log 详细错误，方便运维定位
-    unhealthy_deps = {k: v for k, v in app.state.infra_status.items() if not v["ok"]}
+    # 任一 critical 依赖不 ok 则 WARNING；非致命依赖（如退役中的 neo4j）down 不算"产品不可用"，
+    # 口径与 require_infra_healthy 一致（复用同一份 _NON_CRITICAL_DEPS，单一事实来源）。
+    from src.service.deps_infra import _NON_CRITICAL_DEPS
+    unhealthy_deps = {
+        k: v for k, v in app.state.infra_status.items()
+        if k not in _NON_CRITICAL_DEPS and not v["ok"]
+    }
     if unhealthy_deps:
         _log.warning(
             "[startup] critical 依赖部分不可用（系统将进入「产品不可用」状态）：%s",
             unhealthy_deps,
         )
+    # 非致命依赖单独 INFO 提示（不触发"产品不可用"）
+    noncritical_down = {
+        k: v for k, v in app.state.infra_status.items()
+        if k in _NON_CRITICAL_DEPS and not v["ok"]
+    }
+    if noncritical_down:
+        _log.info("[startup] 非致命依赖未连接（不影响产品可用）：%s", list(noncritical_down))
 
     # 先初始化 LLM —— 这是 chat 的"必备"组件，挂了就别拉后端资源了
     try:
