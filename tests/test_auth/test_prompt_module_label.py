@@ -89,3 +89,14 @@ def test_no_module_key_safe():
     )
     # 既不渲染 (模块: 串，也不加指引
     assert "(模块:" not in p
+
+
+def test_partial_module_candidates():
+    """5 个候选中只有部分带 module：只有对应行渲染标注，但指引仍追加（生产最常见的跨模块召回场景）。"""
+    p = build_user_prompt("q", _ctx([
+        {"entity_id": "A::a#()", "level": "method", "summary_text": "", "module": "mall-portal"},
+        {"entity_id": "B::b#()", "level": "method", "summary_text": "", "module": None},
+    ]))
+    assert "(模块: mall-portal)" in p     # 带 module 的行渲染出标注
+    assert "判断前台/后台" in p           # 有至少一个 module → 指引出现
+    assert p.count("(模块:") == 1         # 只有 1 行渲染模块（另一行 module=None 省略）

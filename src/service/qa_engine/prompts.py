@@ -231,7 +231,9 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
     if candidates:
         parts.append("")
         parts.append("候选入口方法（按相关度倒序）:")
-        for i, c in enumerate(candidates[:5], 1):
+        # 取前 5 个候选：渲染循环与下方模块指引守卫共用同一份，避免两处切片不同步（DRY）
+        top_candidates = candidates[:5]
+        for i, c in enumerate(top_candidates, 1):
             entity_id = c.get("entity_id", "?")
             level = c.get("level", "method")
             # 取 module 字段（可能为 None 或根本不存在）；.get() 缺失键时返回 None
@@ -247,7 +249,7 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
             parts.append(f"     业务说明: {summary}")
         # 模块判断指引：仅当至少一个候选带有 module 时追加，让 LLM 按 module 判前台/后台
         # any() 是内置函数，可迭代对象有任意一个真值即返回 True
-        if any(c.get("module") for c in candidates[:5]):
+        if any(c.get("module") for c in top_candidates):
             parts.append(
                 "  （模块说明：mall-portal=前台门户、mall-admin=后台管理、mall-search=搜索、"
                 "mall-auth=认证、mall-gateway=网关。判断前台/后台等归属请按上面标注的【模块】，"
