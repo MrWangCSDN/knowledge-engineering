@@ -186,7 +186,7 @@ class QARetriever:
         """对图做有限深度 BFS，返回扁平节点 ID 列表（按发现顺序）。
 
         :param direction: 'down' 走 successors（callees），'up' 走 predecessors（callers）
-        :param max_depth: 最大跳数；1 = 现有行为，2 = dependency 拓展
+        :param max_depth: 最大跳数；当前调用方固定传 1（1 跳邻居），方法本身支持多跳
         :param max_nodes: 列表上限（防爆）
 
         depth=1 时退化成原来的"取 1 跳邻居前 N 个"，行为完全兼容。
