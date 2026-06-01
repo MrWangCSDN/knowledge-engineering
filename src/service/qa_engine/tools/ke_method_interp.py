@@ -22,7 +22,7 @@ _KE_METHOD_INTERP_SCHEMA: dict[str, Any] = {
     "properties": {
         "entity_id": {
             "type": "string",
-            "description": "方法实体 ID，形如 method//xxx",
+            "description": "方法实体 ID，形如 OmsPortalOrderServiceImpl::generateOrder#(OrderParam)（qualified_name 形态）",
         },
     },
     "required": ["entity_id"],
@@ -58,7 +58,7 @@ def build_ke_method_interp_tool(interp_store: _MethodInterpStoreProto) -> Tool:
 
     return Tool(
         name="ke_method_interp",
-        description="读取某个方法（method//xxx）的技术解读：它做什么、关键逻辑、上下文。",
+        description="读取某个方法（qualified_name 形如 Cls::method#(params)）的技术解读：它做什么、关键逻辑、上下文。",
         input_schema=_KE_METHOD_INTERP_SCHEMA,
         handler=handler,
     )

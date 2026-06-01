@@ -391,10 +391,10 @@ class ReActSynthesizer:
 工具使用规则（**严格遵守**）：
 
 1. **优先用【可用 context】里已经检索好的 candidates**。我（系统）在你看到的 prompt 里已经做过初步语义检索，
-   candidates 里的 entity_id 是**真实存在**的；别自己编 `method://xxx` / `class://xxx`，那样工具会查不到。
+   candidates 里的 entity_id 是**真实存在**的；别自己编不存在的符号，那样工具会查不到。
 
-2. **entity_id 要照搬**。candidates 里给你的形如 `method//abc123` 或 `class//def456`，
-   `://`/`//` 全部保留原样，**不要**把它改成 `method://xxx_imagined` 之类。
+2. **entity_id 要照搬**。candidates 里给你的形如 `OmsPortalOrderServiceImpl::generateOrder#(OrderParam)`
+   （`类名::方法名#(参数)` 形态，可能含注解/泛型文本），**原样照抄**、一个字符都别改。
 
 3. **不要在 tool_call 输入里指定 project_id**。工具已经由后端绑定到当前会话的工程，
    你提供 project_id 会被忽略（schema 也不再包含该字段）。

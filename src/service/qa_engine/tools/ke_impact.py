@@ -25,7 +25,7 @@ _KE_IMPACT_SCHEMA: dict[str, Any] = {
     "properties": {
         "entity_id": {
             "type": "string",
-            "description": "起始实体 ID，形如 method//xxx 或 class//xxx",
+            "description": "起始实体 ID，形如 OmsPortalOrderServiceImpl::generateOrder#(OrderParam)（qualified_name 形态）",
         },
         "direction": {
             "type": "string",

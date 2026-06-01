@@ -22,7 +22,7 @@ _KE_READ_ENTITY_SCHEMA: dict[str, Any] = {
     "properties": {
         "entity_id": {
             "type": "string",
-            "description": "实体 ID，形如 method//xxx 或 class//xxx",
+            "description": "实体 ID，形如 OmsPortalOrderServiceImpl::generateOrder#(OrderParam)（qualified_name 形态）",
         },
     },
     "required": ["entity_id"],
