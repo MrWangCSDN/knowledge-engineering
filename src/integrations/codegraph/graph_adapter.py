@@ -102,3 +102,23 @@ class CodeGraphGraphAdapter:
             调用方节点的 durable_key 列表
         """
         return self._walk(entity_id, rel_type, "pred")  # 'pred' 方向 = 入边
+
+    def module_of(self, entity_id: str) -> Optional[str]:
+        """返回 entity 所属模块（CodeGraph file_path 顶层目录，如 'mall-portal'/'mall-admin'）。
+
+        查不到节点 / sqlite 异常 → None（best-effort，同 _walk 的降级契约，绝不抛）。
+        设计 [[模块标签-设计]] §3。
+        """
+        try:
+            # 复用 _resolve：split '#' 取 qualified_name → find_nodes_by_qualified_name（重载多命中已处理）
+            nodes = self._resolve(entity_id)
+            if not nodes:                              # 无命中（qn 不在 CodeGraph）
+                return None
+            # 同一 qualified_name 的重载都在同一文件/同一模块，取首个即可
+            fp = nodes[0].file_path or ""
+            # 顶层目录即模块名：'mall-portal/src/...' → 'mall-portal'；无 '/' 时退化为整串或 None
+            return fp.split("/", 1)[0] if "/" in fp else (fp or None)
+        except sqlite3.Error as e:
+            # 库缺失/锁/损坏 → 降级返回 None，不整体崩（对齐图导航降级风格）
+            _LOG.warning("[codegraph] module_of 查询失败，返回 None (entity_id=%s): %s", entity_id, e)
+            return None

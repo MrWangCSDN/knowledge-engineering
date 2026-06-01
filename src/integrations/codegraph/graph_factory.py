@@ -33,6 +33,10 @@ class NullGraphAdapter:
         """入边（callers）：无索引 → 空列表。"""
         return []
 
+    def module_of(self, entity_id: str) -> Optional[str]:
+        """无 CodeGraph 索引 → 无模块信息（降级返 None，不报错）。"""
+        return None
+
 
 def resolve_graph_adapter(repo_local_path: Optional[str]):
     """按 repo_local_path 返回合适的图适配器（GraphProto）。
