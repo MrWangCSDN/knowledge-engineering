@@ -261,7 +261,7 @@ class CompositeKnowledgeStore:
             limit: 最多返回条数
 
         Returns:
-            归一化后的命中列表，每项 {entity_id, summary_text, level}
+            归一化后的命中列表，每项 {entity_id, summary_text, level, score}
         """
         # 1. code_store 未注入 → 跳过，直接返空
         if self._code_store is None:
@@ -288,9 +288,9 @@ class CompositeKnowledgeStore:
         seen: set[str] = set()
         # `list[dict[str, Any]]`：同上，列表内存任意值 dict
         results: list[dict[str, Any]] = []
-        # `for (eid, _score) in hits` 是解包赋值：把 tuple 里的两个值分别绑定到变量
-        # `_score` 以下划线开头表示"刻意忽略该值"（分数不需要透传给 caller）
-        for (eid, _score) in hits:
+        # `for (eid, score) in hits` 是解包赋值：把 tuple 里的两个值分别绑定到变量
+        # score 是相似度(1-cos距离，越大越像)，会写入下面 dict 透传给 caller 供召回门控判定
+        for (eid, score) in hits:
             # `if x in set` 是 O(1) 查询；list 是 O(N)，所以 set 更适合 dedup
             if eid in seen:
                 # 已见过，跳过（保留首次出现顺序）
