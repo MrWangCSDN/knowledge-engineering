@@ -97,15 +97,13 @@ async def build_retriever_for_project(project_id: str, request: Request, db: Asy
     from src.service.qa_engine.adapters import WeaviateTopologicalAdapter
     from src.service.qa_engine.retriever import QARetriever
     # 结构导航改走 CodeGraph 直读 SQLite（设计 [[CodeGraph-结构引擎集成-设计]]）
-    from src.integrations.codegraph.db import CodeGraphDB
-    from src.integrations.codegraph.graph_adapter import CodeGraphGraphAdapter
-    from src.integrations.codegraph.paths import codegraph_db_path
+    from src.integrations.codegraph.graph_factory import resolve_graph_adapter
 
     # 每个请求构造新的 adapter 实例：
     # WeaviateTopologicalAdapter：包装 singleton store，本身无状态，轻量
     interp_adapter = WeaviateTopologicalAdapter(interp_store)
-    # 用该工程的 .codegraph.db（只读）构造图适配器；repo_local_path 为空时 codegraph_db_path 会抛明确的 ValueError（不再是晦涩 TypeError）
-    graph_adapter = CodeGraphGraphAdapter(CodeGraphDB(codegraph_db_path(repo_local_path)))
+    # 解析图适配器：repo_local_path 缺失或 .codegraph.db 不存在 → 降级 NullGraphAdapter（图导航返 []，语义检索照常；设计 §8）
+    graph_adapter = resolve_graph_adapter(repo_local_path)
 
     # ReAct 代码层兜底（设计 [[ReAct-代码层兜底-设计]]）：
     # mall-swarm 类工程无 TopologicalInterpretation 数据时，用 CodeEntity 向量库兜底。
@@ -165,13 +163,11 @@ async def build_tools_for_project(
     from src.service.qa_engine.adapters import WeaviateTopologicalAdapter
     from src.service.qa_engine.tools import build_default_registry
     # 结构导航改走 CodeGraph 直读 SQLite（设计 [[CodeGraph-结构引擎集成-设计]]）
-    from src.integrations.codegraph.db import CodeGraphDB
-    from src.integrations.codegraph.graph_adapter import CodeGraphGraphAdapter
-    from src.integrations.codegraph.paths import codegraph_db_path
+    from src.integrations.codegraph.graph_factory import resolve_graph_adapter
 
     interp_adapter = WeaviateTopologicalAdapter(interp_store)
-    # 用该工程的 .codegraph.db（只读）构造图适配器；repo_local_path 为空时 codegraph_db_path 会抛明确的 ValueError（不再是晦涩 TypeError）
-    graph_adapter = CodeGraphGraphAdapter(CodeGraphDB(codegraph_db_path(repo_local_path)))
+    # 解析图适配器：repo_local_path 缺失或 .codegraph.db 不存在 → 降级 NullGraphAdapter（图导航返 []，语义检索照常；设计 §8）
+    graph_adapter = resolve_graph_adapter(repo_local_path)
 
     # ke_search 工具也用 composite，解读库空时兜底走 CodeEntity（设计 [[ReAct-代码层兜底-设计]] §2）
     from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore

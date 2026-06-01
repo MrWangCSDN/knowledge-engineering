@@ -178,15 +178,19 @@ async def test_build_tools_for_project_passes_project_id_to_registry(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_build_retriever_uses_codegraph_graph_adapter(monkeypatch):
-    """build_retriever_for_project 实际构造 CodeGraphGraphAdapter（headline 换 adapter 的断言）。"""
+async def test_build_retriever_uses_codegraph_graph_adapter(monkeypatch, tmp_path):
+    """有 .codegraph.db 时 build_retriever_for_project 构造 CodeGraphGraphAdapter。
+
+    （缺索引时降级为 NullGraphAdapter 的行为见 test_graph_factory_degrade.py。）
+    """
     from unittest.mock import AsyncMock, MagicMock
     from src.service.qa_router import build_retriever_for_project
     from src.integrations.codegraph.graph_adapter import CodeGraphGraphAdapter
-    import src.integrations.codegraph.paths as _cg_paths_mod
 
-    # patch codegraph_db_path 返回哑路径（CodeGraphDB 惰性打开文件，不会立即失败）
-    monkeypatch.setattr(_cg_paths_mod, "codegraph_db_path", lambda path: "/dev/null")
+    # 造一个真实存在的 .codegraph/codegraph.db（resolve_graph_adapter 只看存在性；CodeGraphDB 惰性打开，空文件安全）
+    cg = tmp_path / ".codegraph"
+    cg.mkdir()
+    (cg / "codegraph.db").write_bytes(b"")
 
     # 伪造 request.app.state：weaviate_interp_store 非 None，不需要 neo4j_backend
     class _State:
@@ -199,9 +203,9 @@ async def test_build_retriever_uses_codegraph_graph_adapter(monkeypatch):
     class _Req:
         app = _App()
 
-    # 伪造 db：db.get(Project, project_id) 返回带 repo_local_path 的假 Project
+    # 伪造 db：db.get(Project, project_id) 返回 repo_local_path 指向上面那个临时目录
     fake_project = MagicMock()
-    fake_project.repo_local_path = "/repos/x"   # 非空，让 codegraph_db_path 正常走（已 patch）
+    fake_project.repo_local_path = str(tmp_path)   # 该目录下有 .codegraph/codegraph.db
     fake_db = AsyncMock()
     fake_db.get = AsyncMock(return_value=fake_project)
 
@@ -210,7 +214,7 @@ async def test_build_retriever_uses_codegraph_graph_adapter(monkeypatch):
     monkeypatch.setattr(_adapters, "WeaviateTopologicalAdapter", lambda store: MagicMock())
 
     retriever = await build_retriever_for_project("p1", _Req(), fake_db)
-    # 核心断言：graph 字段是 CodeGraphGraphAdapter 实例（而非旧的 Neo4jGraphAdapter）
+    # 核心断言：graph 字段是 CodeGraphGraphAdapter 实例（索引存在 → 非降级、非旧 Neo4jGraphAdapter）
     assert isinstance(retriever.graph, CodeGraphGraphAdapter)
 
 
