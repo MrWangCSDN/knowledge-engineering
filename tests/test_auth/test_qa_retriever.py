@@ -101,81 +101,6 @@ async def test_retrieve_no_candidates_returns_empty_context():
 
 
 @pytest.mark.asyncio
-async def test_dependency_skill_expands_call_chain_to_depth_2():
-    """skill_id='dependency' 时，对每个 top 候选做 depth-2 BFS 拓展（覆盖 callers + callees）。
-
-    用例图：
-                Y → Z → A → B → C
-              （←upstream）（→downstream）
-
-    Architecture（默认）：只取 A 的 1 跳 → callees=[B], callers=[Z]
-    Dependency：拓展到 2 跳 → callees 包含 B 和 C，callers 包含 Z 和 Y
-    """
-    # 构造一个简单的调用链 mock
-    bs = MagicMock()
-    # 唯一候选：A
-    bs.search_method_hits_by_text.return_value = [
-        {"entity_id": "A", "summary_text": "入口", "level": "api"}
-    ]
-
-    g = MagicMock()
-    # successors：A→B→C；其它节点 → 空（不再拓展）
-    # `side_effect` 当 mock 被调用时根据参数动态返回值（比 return_value 灵活）
-    def succ(nid: str, rel_type=None) -> list[str]:
-        return {"A": ["B"], "B": ["C"]}.get(nid, [])
-    g.successors.side_effect = succ
-    # predecessors：A←Z←Y
-    def pred(nid: str, rel_type=None) -> list[str]:
-        return {"A": ["Z"], "Z": ["Y"]}.get(nid, [])
-    g.predecessors.side_effect = pred
-
-    r = QARetriever(interpretation_store=bs, graph=g)
-
-    # 1) Architecture（默认 skill_id）只取 1 跳
-    ctx_arch = await r.retrieve(question="A 怎么实现", project_id="p", top_k=5)
-    assert ctx_arch.callees_by_entry["A"] == ["B"]
-    assert ctx_arch.callers_by_entry["A"] == ["Z"]
-
-    # 2) Dependency 拓展到 2 跳
-    ctx_dep = await r.retrieve(
-        question="A 调用了什么", project_id="p", top_k=5, skill_id="dependency"
-    )
-    # 顺序：先 1 跳，再 2 跳；C 必须在 B 之后；Y 必须在 Z 之后
-    assert ctx_dep.callees_by_entry["A"] == ["B", "C"]
-    assert ctx_dep.callers_by_entry["A"] == ["Z", "Y"]
-
-
-@pytest.mark.asyncio
-async def test_business_skill_promotes_class_and_module_level_candidates() -> None:
-    """skill_id='business' 时，class/module 级候选要排在 method 级前面。
-
-    原因：业务规则 / 约束类问题，class/module 的 summary_text 更聚焦"是什么、有什么规则"，
-    method 级聚焦"怎么实现"，两者放反序会让 LLM 答案偏技术化。
-    """
-    # 模拟一个混合层级的检索结果（按 score 排序）
-    bs = MagicMock()
-    bs.search_method_hits_by_text.return_value = [
-        # method 分高，但业务问题里不该优先
-        {"entity_id": "M1", "level": "api", "summary_text": "技术细节", "score": 0.9},
-        {"entity_id": "C1", "level": "class", "summary_text": "业务能力 X 的入口", "score": 0.7},
-        {"entity_id": "MOD1", "level": "module", "summary_text": "模块综述", "score": 0.6},
-        {"entity_id": "M2", "level": "method", "summary_text": "另一个 method 细节", "score": 0.5},
-    ]
-    g = MagicMock()
-    g.successors.return_value = []
-    g.predecessors.return_value = []
-
-    r = QARetriever(interpretation_store=bs, graph=g)
-    ctx = await r.retrieve(
-        question="有什么业务规则", project_id="p", top_k=5, skill_id="business"
-    )
-
-    # 重排后顺序：class+module 排前，method+api 排后；同组内保持原相对顺序
-    entity_ids = [c["entity_id"] for c in ctx.entry_candidates]
-    assert entity_ids == ["C1", "MOD1", "M1", "M2"], f"实际顺序：{entity_ids}"
-
-
-@pytest.mark.asyncio
 async def test_business_skill_does_not_affect_default_ordering() -> None:
     """非 business skill 时（即 default 或其它），不应触发重排。"""
     bs = MagicMock()
@@ -190,38 +115,6 @@ async def test_business_skill_does_not_affect_default_ordering() -> None:
     ctx = await r.retrieve(question="x", project_id="p", top_k=5)  # 默认 architecture
     # 顺序应该跟 store 返回值一致
     assert [c["entity_id"] for c in ctx.entry_candidates] == ["M1", "C1"]
-
-
-@pytest.mark.asyncio
-async def test_data_flow_skill_extracts_tables_from_summary_text() -> None:
-    """skill_id='data-flow' 时，summary_text 里的"<word> 表"模式要被提取到 table_access。
-
-    背景：PetClinic 等真实项目的图谱里没有 `accesses_table` 关系，
-    但 LLM 写的 summary_text 经常提到"查询 vets 表 / 写入 visits 表"。
-    data-flow 问题里把这些信息做出来比当成普通文本扔给 LLM 强。
-    """
-    bs = MagicMock()
-    bs.search_method_hits_by_text.return_value = [
-        {
-            "entity_id": "M1",
-            "level": "api",
-            "summary_text": "该接口 查询 vets 表 并 写入 visits 表，最后更新 owners 表",
-        }
-    ]
-    g = MagicMock()
-    # 图谱里没有 accesses_table 边
-    g.successors.return_value = []
-    g.predecessors.return_value = []
-
-    r = QARetriever(interpretation_store=bs, graph=g)
-    ctx = await r.retrieve(
-        question="数据怎么流的", project_id="p", top_k=5, skill_id="data-flow"
-    )
-
-    # table_access 应该包含从 summary_text 抽出的 3 张表
-    table_ids = {t["table_id"] for t in ctx.table_access_by_entry["M1"]}
-    # 集合断言：包含 vets / visits / owners（顺序不重要）
-    assert table_ids >= {"vets", "visits", "owners"}, f"实际：{table_ids}"
 
 
 @pytest.mark.asyncio
@@ -254,32 +147,3 @@ async def test_retrieve_graph_failure_does_not_crash(mock_interpretation_store):
     # （实现里要 try/except）
 
 
-@pytest.mark.asyncio
-async def test_retrieve_chit_chat_short_circuits():
-    """skill_id='chit-chat' → 不查 KG，直接返回空 ctx。"""
-    # 准备 mock 的 interpretation_store 和 graph_backend
-    # chit-chat 短路意味着这两个 mock 都不应被调用
-    interpretation_store = MagicMock()
-    interpretation_store.search_method_hits_by_text = MagicMock()  # 不应被 await
-    graph = MagicMock()
-
-    retriever = QARetriever(
-        interpretation_store=interpretation_store,
-        graph=graph,
-    )
-
-    ctx = await retriever.retrieve(
-        question="你好",
-        project_id="p1",
-        skill_id="chit-chat",
-    )
-
-    # 验证：返回空 ctx
-    assert isinstance(ctx, RetrievedContext)
-    assert ctx.question == "你好"
-    assert ctx.project_id == "p1"
-    assert ctx.skill_id == "chit-chat"
-    assert ctx.entry_candidates == []
-
-    # 验证：interpretation_store 没被调用（短路了）
-    interpretation_store.search_method_hits_by_text.assert_not_called()

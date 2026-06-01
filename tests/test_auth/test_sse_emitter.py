@@ -180,34 +180,6 @@ async def test_stream_propagates_question_to_retriever():
 
 
 @pytest.mark.asyncio
-async def test_stream_passes_router_skill_id_to_retriever() -> None:
-    """如果传入了 router，emitter 必须把 router 决策出的 skill_id 透传给 retriever.retrieve。
-
-    这是把"路由"和"检索"串起来的关键一步：让 dependency 类问题真的拿 depth-2 调用链。
-    """
-    from src.service.qa_engine.router import SkillRouter
-
-    retriever = _build_mock_retriever()
-    synth = _build_mock_synthesizer()
-    router = SkillRouter()
-
-    async for _ in stream_qa_answer(
-        question="OwnerController 调用了什么？",  # 命中 dependency 关键词
-        project_id="proj-x",
-        session_id="s1",
-        retriever=retriever,
-        synthesizer=synth,
-        router=router,
-    ):
-        pass
-
-    # 取 retriever 实际被调用时的 kwargs
-    call_kwargs = retriever.retrieve.call_args.kwargs
-    # 关键断言：skill_id 来自 router.route(question).skill_id
-    assert call_kwargs.get("skill_id") == "dependency"
-
-
-@pytest.mark.asyncio
 async def test_stream_omits_skill_id_when_no_router() -> None:
     """没传 router 时，skill_id 不应出现在 retriever.retrieve 调用里（向后兼容）。"""
     retriever = _build_mock_retriever()

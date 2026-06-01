@@ -89,8 +89,7 @@ async def stream_qa_answer(
     """流式产出 SSE 事件文本。
 
     Args:
-        router: 可选 SkillRouter；传入时会在 meta 事件里附 skill_id + route_source。
-                不传时 meta 不带 skill 字段（向后兼容旧调用方）。
+        router: （已弃用）召回门控后 router 不再参与决策；保留形参仅为向后兼容，函数体不使用它。
         on_complete: 答案合成成功后的回调（router 用它来持久化消息到 DB）。
                      失败时不调用。
         on_title: done 之后调用；返回非空 str 时额外 emit 一个 session_title 事件。

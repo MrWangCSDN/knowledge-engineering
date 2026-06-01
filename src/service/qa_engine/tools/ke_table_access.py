@@ -1,7 +1,7 @@
 """ke_table_access 工具：合并图谱 accesses_table 边 + summary_text 里的『<table> 表』模式。
 
-跟 QARetriever 里 data-flow skill 的逻辑同源（复用 _extract_tables_from_text），
-但作为独立 tool 暴露，方便 LLM / 外部 client 单独调用。
+复用 QARetriever._extract_tables_from_text（从 summary_text 抽『<table> 表』），
+data-flow 子技能已退役但该解析函数仍由本工具复用；作为独立 tool 暴露，方便 LLM / 外部 client 单独调用。
 
 设计动机：
   - 图边在某些项目里不完整（如 PetClinic 完全没 accesses_table 边）

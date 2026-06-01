@@ -203,40 +203,6 @@ def test_explain_sse_events_in_order(client, seed_ready_project):
     assert "event: section_done" in body
 
 
-# ───────── 路由：meta 事件带 skill 决策 ─────────
-
-
-def test_explain_meta_event_includes_skill_decision(client, seed_ready_project):
-    """meta 事件的 data 应该带 skill_id + route_source，便于前端展示『识别为 xxx 类问题』。
-
-    用 dependency 关键词的问题，验证 skill_id == 'dependency'。
-    """
-    import json as _json  # 避免和模块顶部某些 json 字符串冲突
-
-    token = _login(client)
-    with client.stream(
-        "POST",
-        f"/projects/{seed_ready_project}/qa/explain",
-        headers=_auth(token),
-        # "调用" 命中 dependency 关键词
-        json={"question": "OwnerController 调用了哪些方法？"},
-    ) as r:
-        body = "".join(r.iter_text())
-
-    # SSE 帧格式：`event: <type>\ndata: <json>\n\n`
-    # 找到 meta 行后面紧跟的 data: 行
-    lines = body.split("\n")
-    meta_line_idx = next(i for i, l in enumerate(lines) if l == "event: meta")
-    # data: 行紧跟在 event: 行之后
-    data_line = lines[meta_line_idx + 1]
-    assert data_line.startswith("data: ")
-    meta_payload = _json.loads(data_line[len("data: "):])
-
-    assert meta_payload.get("skill_id") == "dependency"
-    # source 应该是 'keyword'（关键词命中而不是 LLM）
-    assert meta_payload.get("route_source") == "keyword"
-
-
 # ───────── 持久化 ─────────
 
 @pytest.mark.asyncio
