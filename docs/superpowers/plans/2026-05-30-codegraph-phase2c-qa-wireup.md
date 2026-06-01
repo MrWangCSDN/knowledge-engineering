@@ -136,7 +136,7 @@ git commit -m "fix(qa): ReAct prompt entity_id examples canonical_v1 -> qualifie
 
 > 前置：用户起 **MySQL :3307 隧道**（app 查 Project.repo_local_path 用）；Weaviate(43.228.76.163)/DashScope/codegraph.db 已就绪；KE app 在跑（--reload）。
 
-- [ ] **Step 1: 确认 app 连的是对的 Weaviate**
+- [x] **Step 1: 确认 app 连的是对的 Weaviate**
 
 `project.yaml` 的 `weaviate_url` 是 `localhost:8080`，但实际 Weaviate 在 `43.228.76.163:8080`。确认 app 启动时用的是 **`.env.local` 的 `WEAVIATE_URL`(43.228.76.163)** 还是 project.yaml：
 ```bash
@@ -146,7 +146,7 @@ grep -rnE "WEAVIATE_URL|weaviate_url|weaviate_interp_store|connect" src/service/
 - 若 app 用 .env.local 的 WEAVIATE_URL → 已对，跳过。
 - 若 app 读 project.yaml 的 localhost → 把 project.yaml `vectordb-code`/`vectordb-interpret` 的 `weaviate_url` 改成 `http://43.228.76.163:8080`（与 .env.local 一致），重启 app。
 
-- [ ] **Step 2: 起栈后，问一个走 callees 的中文问题**
+- [x] **Step 2: 起栈后，问一个走 callees 的中文问题**
 
 ```bash
 # MySQL 隧道起好后；通过 KE API 发问（替换为真实 endpoint/鉴权方式）
@@ -156,7 +156,7 @@ curl -s -X POST http://localhost:8000/api/qa/<project>/ask \
 ```
 （确切 endpoint/鉴权见 `src/service/qa_router.py` 路由定义；也可用前端 chat 页面发问。）
 
-- [ ] **Step 3: 验证整条链**
+- [x] **Step 3: 验证整条链**
 
 确认：
 - 答案里的 callees/callers 是 **mall-swarm 真实方法**（来自 CodeGraph）；
@@ -164,7 +164,7 @@ curl -s -X POST http://localhost:8000/api/qa/<project>/ask \
 - 日志**无 Neo4j 图查询、无 "对不上/空 callees"**；
 - 答案中文、合理。
 
-- [ ] **Step 4: 记录** —— E2E 结果（问题、callees 是否真实、是否纯 qualified_name）记到设计文档 §12 实施完成标记；至此 Phase 2「中文 QA 接通 CodeGraph」打通（解读质量待 2b）。
+- [x] **Step 4: 记录** —— E2E 结果（问题、callees 是否真实、是否纯 qualified_name）记到设计文档 §12 实施完成标记；至此 Phase 2「中文 QA 接通 CodeGraph」打通（解读质量待 2b）。
 
 ---
 
