@@ -37,7 +37,7 @@
 
 > 这 10 条是早先 canonical_v1 解读，已被 CodeEntity(qualified_name) 取代；留着会 shadow 检索、喂错 key 给图。2b（解读重生）以后再灌。属数据清理，非 TDD 代码。
 
-- [ ] **Step 1: 清空 mall-swarm 的 TopologicalInterpretation 租户**
+- [x] **Step 1: 清空 mall-swarm 的 TopologicalInterpretation 租户**
 
 ```bash
 cd /Users/java/knowledge-engineering-auth && source venv/bin/activate
@@ -61,7 +61,7 @@ PY
 ```
 Expected: `清空前 10 → 清空后 0`。
 
-- [ ] **Step 2: 记录** —— 在设计文档 §12 标注「mall-swarm TopologicalInterpretation 已清空，待 2b 重生」。无 commit（纯数据操作）。
+- [x] **Step 2: 记录** —— 在设计文档 §12 标注「mall-swarm TopologicalInterpretation 已清空，待 2b 重生」。无 commit（纯数据操作）。
 
 ---
 
@@ -69,7 +69,7 @@ Expected: `清空前 10 → 清空后 0`。
 
 **Files:** Modify `src/service/qa_engine/react_synthesizer.py`（约 L393-397）；Test `tests/test_auth/test_react_prompt_entity_id.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_auth/test_react_prompt_entity_id.py
@@ -88,12 +88,12 @@ def test_prompt_uses_qualified_name_not_canonical_v1():
     assert "::" in src and "#(" in src, "prompt 应给出 qualified_name 形态示例(Class::method#(params))"
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /Users/java/knowledge-engineering-auth && python -m pytest tests/test_auth/test_react_prompt_entity_id.py -v`
 Expected: FAIL（源码里还有 `method//abc123`）
 
-- [ ] **Step 3: 改 prompt（精确 before/after）**
+- [x] **Step 3: 改 prompt（精确 before/after）**
 
 在 `src/service/qa_engine/react_synthesizer.py` 把这两段（约 L393-397）：
 ```
@@ -112,17 +112,17 @@ Expected: FAIL（源码里还有 `method//abc123`）
    （`类名::方法名#(参数)` 形态，可能含注解/泛型文本），**原样照抄**、一个字符都别改。
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_auth/test_react_prompt_entity_id.py -v`
 Expected: PASS
 
-- [ ] **Step 5: 排查其它残留的 canonical_v1 示例并一并改**
+- [x] **Step 5: 排查其它残留的 canonical_v1 示例并一并改**
 
 Run: `grep -rnE "method//|class//|field//|method://|class://" src/service/qa_engine/ src/service/ | grep -iv test`
 - 对每处「教 LLM / 给用户看」的 canonical_v1 格式示例，改成 qualified_name 形态（与 Step 3 同风格）。纯内部代码里用到的不用动。改完重跑上面的测试 + `grep` 确认 prompt 类文本已无 canonical_v1 示例。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 cd /Users/java/knowledge-engineering-auth
