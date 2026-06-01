@@ -103,25 +103,15 @@ async def stream_qa_answer(
     message_id = "msg_" + uuid.uuid4().hex[:12]
     start = time.monotonic()
 
-    # 0. 路由（同步快路径；纯关键词，零延迟）
-    # 如果调用方没传 router，meta 就不带 skill 字段（旧测试/旧调用照常工作）
+    # 0. meta 构造（召回门控路由设计 [[召回门控路由-设计]]）
+    # router 形参保留在签名里（向后兼容旧调用方），但函数体不再调用它。
+    # skill_id/route_source/matched_keywords 改由 retrieve 内部按 top1 相似度决定，
+    # 结果通过 "route" SSE 事件告知前端（见下方 yield format_sse("route", ...)）。
     meta_payload: dict[str, object] = {
         "session_id": session_id,
         "message_id": message_id,
         "plan_steps": ["searching", "chain_extraction", "synthesizing"],
     }
-    # 决策出来后存起来，下面 retriever.retrieve 还要用 skill_id
-    skill_id_for_retriever: str | None = None
-    if router is not None:
-        # `route` 永远不抛错 —— 兜底到 architecture
-        decision = router.route(question)
-        meta_payload["skill_id"] = decision.skill_id
-        meta_payload["route_source"] = decision.source
-        # matched_keywords 在 UI 上能展示『识别到关键词：调用 / 依赖』方便调优
-        if decision.matched_keywords:
-            meta_payload["matched_keywords"] = decision.matched_keywords
-        # 后面 retriever.retrieve 调用要用
-        skill_id_for_retriever = decision.skill_id
 
     if context_usage is not None:
         meta_payload["context_usage"] = context_usage
@@ -132,19 +122,10 @@ async def stream_qa_answer(
     # 2. step: searching
     yield format_sse("step", {"phase": "searching", "desc": "检索相关代码实体"})
 
-    # 把 skill_id 透传给 retriever（router 决定了走哪条 retrieval 策略）
-    # `**` 字典解包：根据 skill_id_for_retriever 是否为 None 动态加字段，
-    # 避免 retrieve 收到 skill_id=None 后被当成"显式传 None"覆盖默认值。
-    retrieve_kwargs: dict[str, object] = {
-        "question": question,
-        "project_id": project_id,
-        "top_k": 5,
-    }
-    if skill_id_for_retriever is not None:
-        retrieve_kwargs["skill_id"] = skill_id_for_retriever
-
     try:
-        ctx = await retriever.retrieve(**retrieve_kwargs)
+        # 召回门控：不传 skill_id，retrieve 内部按 top1 相似度决定 KE/闲聊
+        # 设计参见 [[召回门控路由-设计]]；旧的 router.route → skill_id 路径已移除
+        ctx = await retriever.retrieve(question=question, project_id=project_id, top_k=5)
     except Exception as e:
         yield format_sse("error", {
             "code": "RETRIEVE_FAILED",
@@ -152,6 +133,15 @@ async def stream_qa_answer(
             "recoverable": True,
         })
         return
+
+    # 召回决策事件：skill_id(architecture/chit-chat) + recall_score(top1 相似度)，
+    # 供前端显示"匹配度"进度条等 UI 元素（设计 [[召回门控路由-设计]] §5.2）。
+    # 旧前端（不认识 route 事件）会忽略未知事件类型，不受影响。
+    # getattr 兜底：万一某个 mock/测试没有 recall_score 字段也不崩
+    yield format_sse("route", {
+        "skill_id": ctx.skill_id,
+        "recall_score": round(getattr(ctx, "recall_score", 0.0), 4),
+    })
 
     # 3. step: chain_extraction（retriever 已经做完，事件只是 UI 反馈）
     yield format_sse("step", {"phase": "chain_extraction", "desc": "提取调用链路"})
