@@ -329,8 +329,8 @@ def _m(qn, sig, kind="method"):
 
 
 def test_method_key_includes_normalized_signature():
-    # 方法：qualified_name + 归一化签名（去空白/去泛型）
-    assert durable_key(_m("A::m", "List<X> (Long id)")) == "A::m(Longid)"
+    # 方法：qualified_name + '#' + 归一化参数（去空白/去泛型）
+    assert durable_key(_m("A::m", "List<X> (Long id)")) == "A::m#(Longid)"
 
 
 def test_signature_formatting_does_not_change_key():
@@ -369,22 +369,27 @@ import re                                   # 正则，用于归一化签名
 from src.integrations.codegraph.db import CgNode
 
 
-def _norm_sig(sig: str | None) -> str:
-    """归一化签名：去掉所有空白和泛型 <...>，使格式差异不影响 key。
+def _param_sig(sig: str | None) -> str:
+    """从签名里抽「参数部分」并归一化(去泛型/去空白)，作为重载区分。
 
-    例：'List<X> (Long id)' → '(Longid)'；够用来区分重载，又不因排版抖动。
+    取最外层括号内容（首个 '(' 到末个 ')'），避免注解里的括号干扰。
+    例：'Map (OrderParam)' → '(OrderParam)'；'List<X> (Long id)' → '(Longid)'；None → ''。
     """
     if not sig:                             # 没签名（None/空）→ 空串
         return ""
-    s = re.sub(r"<[^>]*>", "", sig)         # 去掉泛型尖括号内容
-    s = re.sub(r"\s+", "", s)               # 去掉所有空白字符
-    return s
+    s = re.sub(r"<[^>]*>", "", sig)         # 先去掉泛型 <...>，免得尖括号里有逗号/括号
+    i, j = s.find("("), s.rfind(")")        # 最外层参数括号：首个 '(' 与末个 ')'
+    params = s[i + 1:j] if 0 <= i < j else ""   # 截出括号内的参数文本
+    return "(" + re.sub(r"\s+", "", params) + ")"   # 去空白后用括号包起来
 
 
 def durable_key(node: CgNode) -> str:
-    """方法：qualified_name + 归一化签名；其它类型：只用 qualified_name。"""
+    """方法：qualified_name + '#' + 归一化参数签名；其它类型：只用 qualified_name。
+
+    用 '#' 作分隔符，下游 adapter 可用 split('#',1)[0] 稳稳取回 qualified_name。
+    """
     if node.kind == "method":               # 只有方法才可能重载，需要签名区分
-        return f"{node.qualified_name}{_norm_sig(node.signature)}"
+        return f"{node.qualified_name}#{_param_sig(node.signature)}"
     return node.qualified_name
 ```
 
@@ -417,19 +422,18 @@ def _adapter(tmp_path):
 
 def test_successors_returns_durable_keys(tmp_path):
     a = _adapter(tmp_path)
-    # 传入 durable_key（方法带归一化签名）；夹具里 Service.generateOrder 签名 'Map (OrderParam)'
-    out = a.successors("OmsService::generateOrder(Map(OrderParam)")  # 见下注：key 由调用方给
-    # 实际调用方会用 durable_key 算好；这里直接验最终行为：能解析并返回 callees 的 key
-    assert "OmsOrderDao::save(int(OmsOrder)" in out
+    # 传入 durable_key（方法 = qualified_name + '#' + 参数签名）；Service.generateOrder 签名 'Map (OrderParam)'
+    out = a.successors("OmsService::generateOrder#(OrderParam)")
+    assert "OmsOrderDao::save#(OmsOrder)" in out
 
 
 def test_predecessors_returns_durable_keys(tmp_path):
     a = _adapter(tmp_path)
-    out = a.predecessors("OmsService::generateOrder(Map(OrderParam)")
-    assert "OmsCtrl::generateOrder(CommonResult(OrderParam)" in out
+    out = a.predecessors("OmsService::generateOrder#(OrderParam)")
+    assert "OmsCtrl::generateOrder#(OrderParam)" in out
 ```
 
-> 注：上面 key 字符串等于 `qualified_name + _norm_sig(signature)`。实现里 `_resolve` 用 `qualified_name`（'(' 前部分）兜底匹配，所以即便调用方只传 `OmsService::generateOrder` 也能命中（夹具中该名唯一）。测试用完整 key 验证端到端。
+> 注：上面 key 字符串等于 `qualified_name + '#' + _param_sig(signature)`。实现里 `_resolve` 用 `qualified_name`（'#' 前部分）兜底匹配，所以即便调用方只传 `OmsService::generateOrder` 也能命中（夹具中该名唯一）。测试用完整 key 验证端到端。
 
 - [ ] **Step 2：运行确认失败** → FAIL（模块不存在）
 
@@ -460,7 +464,7 @@ class CodeGraphGraphAdapter:
 
     def _resolve(self, entity_id: str) -> list[CgNode]:
         """durable_key → CodeGraph 节点。先按 qualified_name 找，重载再用完整 key 精筛。"""
-        qn = entity_id.split("(", 1)[0]     # '(' 前是 qualified_name 部分
+        qn = entity_id.split("#", 1)[0]     # '#' 前是 qualified_name 部分
         cands = self._db.find_nodes_by_qualified_name(qn)
         if len(cands) <= 1:                 # 唯一 → 直接返回
             return cands
