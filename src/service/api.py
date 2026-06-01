@@ -172,13 +172,18 @@ async def init_qa_engine() -> None:
     # ── 试图连接底层存储（获取 singleton 资源） ─────────────────────────────
     neo4j_backend, code_store, interp_store = _try_connect_backends()
 
-    if neo4j_backend is not None and interp_store is not None:
+    # QA 图导航走 CodeGraph，不再要求 neo4j_backend；只要 interp_store 在就用真实 per-request retriever
+    # （neo4j_backend 可能为 None——Neo4j 退役中；下游 build_retriever/tools 已不依赖它）
+    if interp_store is not None:
         # Task 22：只存底层 singleton 资源；qa_retriever / qa_tools 改为 per-request 构造
         app.state.weaviate_interp_store = interp_store
-        app.state.neo4j_backend = neo4j_backend
+        app.state.neo4j_backend = neo4j_backend  # 可能为 None，向后兼容保留
         app.state.weaviate_code_store = code_store
         app.state.llm = llm
-        _log.info("[startup] 底层资源就绪：Weaviate + Neo4j（per-request retriever 模式）")
+        _log.info(
+            "[startup] 底层资源就绪：Weaviate（per-request retriever 模式）；Neo4j=%s",
+            "已连接" if neo4j_backend is not None else "未连接（图导航走 CodeGraph）",
+        )
     else:
         # 后端不可用 → 挂占位 StubRetriever（向后兼容：qa_router.py 检测 qa_retriever 走旧路径）
         from src.service.qa_engine.stub_retriever import StubRetriever
@@ -255,7 +260,10 @@ def _try_connect_backends() -> tuple[Any, Any, Any]:
     # 维度固定 1024（bge-m3 输出维度）；如果将来换 embedding 模型再环境变量化
     weaviate_dimension = int(os.environ.get("WEAVIATE_DIMENSION", "1024"))
 
-    # ─── 1) Neo4j ───
+    # ─── 1) Neo4j（可选；CodeGraph 迁移后图导航不依赖它，连不上不影响 QA）───
+    # 设计 [[CodeGraph-结构引擎集成-设计]] §7：Neo4j 退役中。这里仅向后兼容保留连接尝试，
+    # 失败只把 neo4j_backend 置 None，不再短路整个后端连接（否则会连累 Weaviate）。
+    neo4j_backend = None  # 先置 None，连成功再覆盖
     try:
         from src.knowledge.graph_neo4j import Neo4jGraphBackend
 
@@ -264,20 +272,20 @@ def _try_connect_backends() -> tuple[Any, Any, Any]:
         neo4j_password = os.environ.get("NEO4J_PASSWORD")
         neo4j_database = os.environ.get("NEO4J_DATABASE", "neo4j")
 
-        # 密码必填，没设就直接放弃（避免 driver 抛一个让人困惑的认证错）
+        # 密码没设就跳过（不再 return）——图导航走 CodeGraph，不影响 QA
         if not neo4j_password:
-            _log.warning("[startup] NEO4J_PASSWORD 未设 → 跳过 Neo4j → 不构造真实 retriever")
-            return None, None, None
-
-        neo4j_backend = Neo4jGraphBackend(
-            uri=neo4j_uri, user=neo4j_user, password=neo4j_password, database=neo4j_database
-        )
-        # 试探一下连接（调一个轻量查询）
-        _ = neo4j_backend.node_count()
-        _log.info("[startup] Neo4j 连接成功: %s", neo4j_uri)
+            _log.info("[startup] NEO4J_PASSWORD 未设 → 跳过 Neo4j（图导航走 CodeGraph，不影响 QA）")
+        else:
+            neo4j_backend = Neo4jGraphBackend(
+                uri=neo4j_uri, user=neo4j_user, password=neo4j_password, database=neo4j_database
+            )
+            # 试探一下连接（调一个轻量查询）
+            _ = neo4j_backend.node_count()
+            _log.info("[startup] Neo4j 连接成功: %s", neo4j_uri)
     except Exception as e:
-        _log.warning("[startup] Neo4j 连接失败: %s", e)
-        return None, None, None
+        # 连不上只告警 + 置 None，继续往下连 Weaviate（这才是 QA 的关键依赖）
+        _log.warning("[startup] Neo4j 连接失败（图导航走 CodeGraph，不影响 QA）: %s", e)
+        neo4j_backend = None
 
     # ─── 2) Weaviate CodeEntity + TopologicalInterpretation store ───
     # 连接失败不致命：返回 None，对应工具优雅不注册（build_default_registry 条件注册）
