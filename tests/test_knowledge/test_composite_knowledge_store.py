@@ -395,3 +395,28 @@ def test_code_fallback_filters_boilerplate_and_boosts_business():
     # score 保持原始：返回的 score 仍是 cosine 相似度，不是调整分
     top = next(h for h in hits if h["entity_id"].endswith("generateOrder#(OrderParamp)"))
     assert top["score"] == 0.62
+
+
+def test_code_fallback_overfetch_clamped_to_min_1(monkeypatch):
+    """KE_QA_RECALL_OVERFETCH=0（运维误设）→ overfetch 被 max(1,..) 下限保护，top_k 不会变 0（防静默零召回）。"""
+    # monkeypatch.setenv：临时设环境变量，测试结束自动还原
+    monkeypatch.setenv("KE_QA_RECALL_OVERFETCH", "0")  # 故意误设为 0
+
+    class _FakeCodeStore:
+        def __init__(self):
+            self.last_top_k = None
+        def search_by_text(self, text, top_k, tenant=None):
+            self.last_top_k = top_k  # 记录被调用时的 top_k
+            return [("OmsPortalOrderServiceImpl::generateOrder#(OrderParamp)", 0.62)]
+
+    class _EmptyInterp:
+        def search_method_hits_by_text(self, *, text, project_id, limit=5):
+            return []
+
+    from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore
+    fake = _FakeCodeStore()
+    store = CompositeKnowledgeStore(
+        interpretation_store=_EmptyInterp(), code_store=fake, project_id="mall-swarm")
+    store.search_method_hits_by_text(text="下单", project_id="mall-swarm", limit=5)
+    # overfetch 被 clamp 到 1 → top_k = limit*1 = 5（绝不是 0，避免零召回）
+    assert fake.last_top_k == 5

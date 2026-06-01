@@ -290,7 +290,8 @@ class CompositeKnowledgeStore:
                 return default
 
         # overfetch 倍数：从环境变量读取，默认 4（取 limit*4 条给降噪重排留出空间）
-        overfetch = int(_num_env("KE_QA_RECALL_OVERFETCH", 4))
+        # max(1, ...) 下限保护：防运维误设 0/负值导致 top_k<=0 → 静默零召回（坏值已由 _num_env 兜底为默认）
+        overfetch = max(1, int(_num_env("KE_QA_RECALL_OVERFETCH", 4)))
         # boost：业务实体加权幅度（加到排序分，不改变原始 cosine score）
         boost = _num_env("KE_QA_RECALL_BOOST", 0.05)
         # demote：低价值实体降权幅度（从排序分扣除，不改变原始 cosine score）
