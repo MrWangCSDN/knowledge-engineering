@@ -59,8 +59,11 @@ class CodeGraphGraphAdapter:
 
     def _walk(self, entity_id: str, rel_type: Optional[str], direction: str) -> list[str]:
         """successors/predecessors 公共逻辑，direction ∈ {'succ','pred'}。"""
-        # dict.get(key, default)：取 _REL_TO_KIND[rel_type]，未知类型 fallback 到 'calls'
-        kind = _REL_TO_KIND.get(rel_type, "calls")
+        # 未知 rel_type（如 accesses_table，CodeGraph 无此边）→ get 返回 None → 直接返 []，不查图。
+        # 不能 fallback 到 'calls'，否则会把 callees 误当成该类型边返回（修 Phase 1 引入的 bug）。
+        kind = _REL_TO_KIND.get(rel_type, None)
+        if kind is None:
+            return []
         out: list[str] = []
         seen: set[str] = set()              # 去重（不同 source 节点可能指向同一目标）
         try:
