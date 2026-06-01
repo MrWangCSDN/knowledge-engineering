@@ -18,6 +18,10 @@ from src.service.auth_dependencies import get_current_user
 # User：Pydantic / SQLAlchemy 用户模型，包含 is_admin 字段
 from src.service.auth_models import User
 
+# 非致命依赖集合：这些 dep 即使 down 也不让产品 503（仅 check_all_deps 上报供观测）。
+# neo4j：CodeGraph 迁移后图导航不依赖它（设计 [[CodeGraph-结构引擎集成-设计]] §7 退役清单），退役中。
+_NON_CRITICAL_DEPS = {"neo4j"}
+
 
 async def require_infra_healthy(
     request: Request,
@@ -47,9 +51,12 @@ async def require_infra_healthy(
             },
         )
 
-    # 列表推导式：筛出所有 ok=False 的依赖名
+    # 列表推导式：筛出所有 ok=False 的依赖名（排除非致命依赖，如退役中的 neo4j）
     # state.items() 返回 (key, value) 对；v.get("ok") 取字典里的 ok 字段
-    unhealthy = [k for k, v in state.items() if not v.get("ok")]
+    unhealthy = [
+        k for k, v in state.items()
+        if k not in _NON_CRITICAL_DEPS and not v.get("ok")
+    ]
 
     # 全部 ok → 直接返回，不拦截
     if not unhealthy:

@@ -39,8 +39,9 @@ async def test_require_infra_healthy_partial_unhealthy_503_normal_user():
     request = MagicMock()
     request.app.state.infra_status = {
         "mysql": {"ok": True},
-        "neo4j": {"ok": False, "error": "Connection refused"},
-        "weaviate": {"ok": True},
+        # neo4j 退役后为非致命依赖（down 也不 503）→ 这里改用关键依赖 weaviate 触发 503
+        "neo4j": {"ok": True},
+        "weaviate": {"ok": False, "error": "Connection refused"},
         "dashscope": {"ok": True},
     }
     user = MagicMock(is_admin=False)
@@ -63,8 +64,9 @@ async def test_require_infra_healthy_admin_sees_deps():
     request = MagicMock()
     request.app.state.infra_status = {
         "mysql": {"ok": True},
-        "neo4j": {"ok": False, "error": "Connection refused"},
-        "weaviate": {"ok": True},
+        # neo4j 退役后为非致命依赖（down 也不 503）→ 这里改用关键依赖 weaviate 触发 503
+        "neo4j": {"ok": True},
+        "weaviate": {"ok": False, "error": "Connection refused"},
         "dashscope": {"ok": True},
     }
     user = MagicMock(is_admin=True)
@@ -74,7 +76,7 @@ async def test_require_infra_healthy_admin_sees_deps():
 
     assert exc.value.status_code == 503
     assert exc.value.detail["code"] == "INFRA_UNHEALTHY"
-    assert exc.value.detail["deps"]["neo4j"]["error"] == "Connection refused"
+    assert exc.value.detail["deps"]["weaviate"]["error"] == "Connection refused"
 
 
 @pytest.mark.asyncio
