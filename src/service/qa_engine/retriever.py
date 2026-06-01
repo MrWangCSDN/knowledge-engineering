@@ -134,6 +134,20 @@ class QARetriever:
         )
         # entry_candidates 存全量召回结果，synthesizer 可按需截断
         ctx.entry_candidates = candidates
+
+        # 给候选标注所属模块（best-effort）：让 LLM 按 module 判前台/后台，不凭名字臆断（设计 [[模块标签-设计]]）
+        # 遍历 entry_candidates 列表，c 是单个候选字典（dict），就地写入 "module" 键
+        for c in ctx.entry_candidates:
+            # c.get("entity_id")：安全取 entity_id，字典里无此键时返 None（比 c["entity_id"] 不抛异常）
+            eid = c.get("entity_id")
+            try:
+                # graph.module_of：CodeGraph file_path 顶层目录（mall-portal/mall-admin/...）；查不到→None
+                # 三元表达式 `A if B else C`：B 为真时取 A，否则取 C；此处 eid 为 None/空串→跳过 module_of 调用
+                c["module"] = self.graph.module_of(eid) if eid else None
+            except Exception:
+                # 单个候选查模块失败不影响其余候选与主检索；写 None 占位，保持字段存在
+                c["module"] = None
+
         # 只对 top-N 候选取调用链（控成本）
         for c in candidates[: self.TOP_N_FOR_CHAIN_EXPANSION]:
             entity_id = c.get("entity_id")
