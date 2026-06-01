@@ -117,8 +117,24 @@ async def build_retriever_for_project(project_id: str, request: Request, db: Asy
         project_id=project_id,
     )
 
+    # 召回门控阈值：env 可配，缺省 0.45（设计 [[召回门控路由-设计]] §6）
+    # import os 局部引入，与文件内其他地方的惯例保持一致（避免顶部循环依赖风险）
+    import os
+    # os.getenv(key, default)：读环境变量；key 不存在时返回 default 字符串 "0.45"
+    # float(...)：把字符串转浮点数；try/except 兜底防坏值（如用户写了非数字）
+    try:
+        recall_threshold = float(os.getenv("KE_QA_RECALL_THRESHOLD", "0.45"))
+    except ValueError:
+        # 环境变量值无法转为浮点（如 "abc"）→ 安全回退默认值
+        recall_threshold = 0.45
+
     # QARetriever：注入 composite_store（透传 interp_adapter，解读库空时兜底 CodeEntity）
-    return QARetriever(interpretation_store=composite_store, graph=graph_adapter)
+    # recall_threshold：top1 相似度低于此值时门控路由走 chit-chat / fallback skill
+    return QARetriever(
+        interpretation_store=composite_store,
+        graph=graph_adapter,
+        recall_threshold=recall_threshold,
+    )
 
 
 async def build_tools_for_project(

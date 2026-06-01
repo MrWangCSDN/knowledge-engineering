@@ -242,3 +242,40 @@ async def test_build_tools_for_project_loads_repo_local_path_from_db():
     # 4 工具都注册了
     for name in ("ke_grep", "ke_glob", "ke_read_file", "ke_ls"):
         assert registry.get(name) is not None
+
+
+@pytest.mark.asyncio
+async def test_build_retriever_injects_recall_threshold(monkeypatch, tmp_path):
+    """build_retriever_for_project 把 env KE_QA_RECALL_THRESHOLD 注入 QARetriever.recall_threshold；缺省 0.45。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.service.qa_router import build_retriever_for_project
+    import src.service.qa_engine.adapters as _adapters
+
+    # 造真实存在的 .codegraph.db → resolve_graph_adapter 给真 adapter（懒打开）
+    cg = tmp_path / ".codegraph"; cg.mkdir(); (cg / "codegraph.db").write_bytes(b"")
+
+    # 伪造 request.app.state：weaviate_interp_store 非 None，通过就绪检查
+    class _State:
+        weaviate_interp_store = object()  # 非 None，通过就绪检查
+        weaviate_code_store = None        # 可选；None 时 composite 跳过 fallback
+
+    class _Req:
+        # type(name, bases, dict) 动态建类：A 继承 object，含 state 属性
+        app = type("A", (), {"state": _State()})()
+
+    # 伪造 db：db.get(Project, project_id) 返回带 repo_local_path 的假对象
+    fake_project = MagicMock(); fake_project.repo_local_path = str(tmp_path)
+    fake_db = AsyncMock(); fake_db.get = AsyncMock(return_value=fake_project)
+
+    # patch WeaviateTopologicalAdapter 避免真连 Weaviate
+    monkeypatch.setattr(_adapters, "WeaviateTopologicalAdapter", lambda store: MagicMock())
+
+    # 场景1：env 设为 0.6 → recall_threshold 应为 0.6
+    monkeypatch.setenv("KE_QA_RECALL_THRESHOLD", "0.6")
+    r = await build_retriever_for_project("mall-swarm", _Req(), fake_db)
+    assert r.recall_threshold == 0.6
+
+    # 场景2：env 不存在 → recall_threshold 应为缺省值 0.45
+    monkeypatch.delenv("KE_QA_RECALL_THRESHOLD", raising=False)
+    r2 = await build_retriever_for_project("mall-swarm", _Req(), fake_db)
+    assert r2.recall_threshold == 0.45
