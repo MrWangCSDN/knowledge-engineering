@@ -22,11 +22,18 @@ from __future__ import annotations
 # logging：标准库，提供模块级 logger；比 print 更规范，支持级别过滤
 import logging
 
+# os：标准库，提供操作系统接口；这里用 os.getenv 读取环境变量配置 over-fetch / boost / demote
+import os
+
 # typing 模块：提供 Optional、Any、Protocol 等类型注解辅助
 # - Optional[X] 等价于 X | None，表示"可以是 X 也可以是 None"
 # - Any 表示"任意类型"（宽松，不做类型检查）
 # - Protocol 是"结构子类型"接口定义，只要对象有对应方法就算实现（不需要继承）
 from typing import Any, Optional, Protocol
+
+# rerank_and_filter：query-time 降噪+加权纯函数（Task 1 实现）
+# 设计 [[召回降噪加权-设计]]：过滤 MyBatis 样板、降权 getter/ByExample、加权 ServiceImpl/Controller
+from src.knowledge.recall_rerank import rerank_and_filter
 
 
 # ─── 模块级 logger + 常量 ──────────────────────────────────────────────────
@@ -268,11 +275,31 @@ class CompositeKnowledgeStore:
             _LOG.debug("code_store 未注入，跳过 CodeEntity 兜底")
             return []
 
-        # 2. 调 code_store，catch 所有异常实现 fail-soft
+        # 2. 调 code_store（over-fetch）+ 降噪重排，catch 所有异常实现 fail-soft
+        # 召回降噪+加权（设计 [[召回降噪加权-设计]]）：mall-swarm CodeEntity ~96% 是 MyBatis 样板/
+        # getter/Mapper-CRUD，business 仅 ~4%。over-fetch limit*OVERFETCH 后，过滤纯样板、
+        # 降权低价值、加权 Controller/ServiceImpl，再截到 limit。配置走 env，缺省 4/0.05/0.05，坏值兜底。
+        def _num_env(key: str, default):
+            # type(default)(...)：按 default 类型转换（int 或 float）；坏值/缺失回退 default
+            # os.getenv(key, str(default))：读环境变量，缺失时用 default 的字符串表示作为回退值
+            try:
+                return type(default)(os.getenv(key, str(default)))
+            except (ValueError, TypeError):
+                # ValueError：字符串无法转换为目标类型（如 "abc" → int）
+                # TypeError：type(default) 不可调用（理论上不会发生，保险起见）
+                return default
+
+        # overfetch 倍数：从环境变量读取，默认 4（取 limit*4 条给降噪重排留出空间）
+        overfetch = int(_num_env("KE_QA_RECALL_OVERFETCH", 4))
+        # boost：业务实体加权幅度（加到排序分，不改变原始 cosine score）
+        boost = _num_env("KE_QA_RECALL_BOOST", 0.05)
+        # demote：低价值实体降权幅度（从排序分扣除，不改变原始 cosine score）
+        demote = _num_env("KE_QA_RECALL_DEMOTE", 0.05)
         try:
-            # WeaviateVectorStore.search_by_text(query_text, top_k, tenant) -> [(eid, score), ...]
-            # v2.x: tenant 参数透传 project_id，确保查到当前工程的 multi-tenant 分区
-            hits = self._code_store.search_by_text(text, top_k=limit, tenant=self._project_id)
+            # over-fetch：多取 limit*overfetch 条，给降噪重排留出空间
+            hits = self._code_store.search_by_text(
+                text, top_k=limit * overfetch, tenant=self._project_id
+            )
         except Exception as exc:
             # code_store 异常不应该阻断整个查询，记录警告后返空
             _LOG.warning(
@@ -280,6 +307,9 @@ class CompositeKnowledgeStore:
                 self._project_id, type(exc).__name__, exc,
             )
             return []
+        # 过滤纯样板 + 加权业务 + 截到 limit（返回的 score 仍是原始 cosine，门控 top1 诚实）
+        # rerank_and_filter 返回 [(entity_id, 原始score), ...]，供下方归一化 dedup 处理
+        hits = rerank_and_filter(hits, limit, boost=boost, demote=demote)
 
         # 3. 归一化 + dedup
         # code_store 理论上可能返重复 entity_id（shard 重叠 / query rewrite 等情况），

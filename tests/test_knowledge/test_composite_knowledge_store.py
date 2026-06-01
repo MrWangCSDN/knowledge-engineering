@@ -104,8 +104,9 @@ def test_bi_returns_empty_falls_to_code_entity():
     )
 
     assert len(result) == 2
-    # code_store.search_by_text 被调一次，参数是 text + limit + tenant
-    code.search_by_text.assert_called_once_with("getMenuList 怎么用", top_k=5, tenant="mall-swarm")
+    # code_store.search_by_text 被调一次，over-fetch=limit*4=20，带 tenant
+    # over-fetch 策略：召回降噪+加权接线后 top_k=limit*4，给 rerank_and_filter 留出过滤空间
+    code.search_by_text.assert_called_once_with("getMenuList 怎么用", top_k=20, tenant="mall-swarm")
     # entity_id 透传
     assert result[0]["entity_id"] == "method//11cd3f041163"
     assert result[1]["entity_id"] == "method//a8e3f1f41a55d734"
@@ -324,9 +325,10 @@ def test_code_fallback_passes_tenant_to_code_store():
         text="UmsRoleDao", project_id="mall-swarm", limit=5
     )
 
-    # 验证 search_by_text 被调时带 tenant kwarg
+    # 验证 search_by_text 被调时带 tenant kwarg，且 top_k 是 over-fetch 后的值（limit*4=20）
+    # over-fetch 策略：DN-T2 接线后 top_k 变为 limit*4，rerank_and_filter 过滤后截回 limit
     code.search_by_text.assert_called_once_with(
-        "UmsRoleDao", top_k=5, tenant="mall-swarm"
+        "UmsRoleDao", top_k=20, tenant="mall-swarm"
     )
 
 
@@ -350,3 +352,46 @@ def test_code_fallback_surfaces_score():
     assert hits[0]["entity_id"] == "OmsOrderService::generateOrder#()"
     assert hits[0]["score"] == 0.66           # 透出真实分数
     assert hits[1]["score"] == 0.51
+
+
+def test_code_fallback_filters_boilerplate_and_boosts_business():
+    """_code_fallback over-fetch 后过滤样板、business 在前；score 保持原始。"""
+    # 假 code_store：记录 last_top_k 供断言，返回混合了样板与业务的候选集
+    class _FakeCodeStore:
+        def __init__(self):
+            self.last_top_k = None  # 记录最后一次调用的 top_k 参数
+
+        def search_by_text(self, text, top_k, tenant=None):
+            # 记录 top_k，测试用来验证 over-fetch 倍数是否正确
+            self.last_top_k = top_k
+            return [
+                ("com.macro.mall.mapper.OmsOrderMapper::Base_Column_List#()", 0.70),  # drop：MyBatis 样板列名片段
+                ("OmsOrderExample::andIdEqualTo#(Longv)", 0.69),                        # drop：XxxExample 条件构造器
+                ("OmsOrder::getStatus#()", 0.66),                                       # demote：getter 访问器，降权
+                ("OmsPortalOrderServiceImpl::generateOrder#(OrderParamp)", 0.62),       # boost：ServiceImpl 业务方法
+                ("OmsOrderMapper::insert#(OmsOrderrow)", 0.55),                         # neutral：真实 Mapper 操作
+            ]
+
+    # 假解读库：返回空，触发 CodeEntity 兜底
+    class _EmptyInterp:
+        def search_method_hits_by_text(self, *, text, project_id, limit=5):
+            return []  # 空列表 → 触发 _code_fallback
+
+    from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore
+    fake = _FakeCodeStore()
+    # 构造 CompositeKnowledgeStore，注入假 code_store
+    store = CompositeKnowledgeStore(
+        interpretation_store=_EmptyInterp(), code_store=fake, project_id="mall-swarm")
+    # 调用时 limit=5，over-fetch 应取 limit*4=20
+    hits = store.search_method_hits_by_text(text="下单", project_id="mall-swarm", limit=5)
+
+    ids = [h["entity_id"] for h in hits]
+    # 样板被过滤：Base_Column_List 和 XxxExample 系列不应出现在结果中
+    assert all("Base_Column_List" not in e and "Example::" not in e for e in ids)
+    # business 排第一：ServiceImpl::generateOrder 加权后应排到最前
+    assert ids[0] == "OmsPortalOrderServiceImpl::generateOrder#(OrderParamp)"
+    # over-fetch 验证：code_store 被调时 top_k 应为 limit*4=20
+    assert fake.last_top_k == 20
+    # score 保持原始：返回的 score 仍是 cosine 相似度，不是调整分
+    top = next(h for h in hits if h["entity_id"].endswith("generateOrder#(OrderParamp)"))
+    assert top["score"] == 0.62
