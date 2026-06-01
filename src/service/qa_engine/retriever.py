@@ -66,29 +66,35 @@ class RetrievedContext:
     skill_id: str = "architecture"
     """v1.1 router 决策出来的 skill 名；synthesizer 据此往 user prompt 加视角偏置提示。"""
 
+    recall_score: float = 0.0
+    """召回门控：top1 相似度（meta/route 事件透传，便于前端显示匹配度 + 调阈值）。"""
+
 
 # ─── 检索器 ─────────────────────────────────────────────────────────────────
 
 class QARetriever:
     """从 Weaviate（语义）+ 图谱（拓扑）取候选实体和调用链。
 
-    skill 分支（v1.1）：
-      - architecture（默认）：1 跳 callees + callers，性价比最高
-      - dependency：2 跳 BFS 拓展，给 LLM 更完整的依赖图
-      - data-flow / business 等：v1.1 后续 RED 测试再上
+    召回门控路由（v1.3）：
+      - top1 相似度 ≥ recall_threshold → architecture（1 跳 callees + callers）
+      - top1 < recall_threshold          → chit-chat（空 ctx，不查图）
+    设计文档：[[召回门控路由-设计]]
     """
 
     # 控制成本：只对 top-N 候选取调用链
     TOP_N_FOR_CHAIN_EXPANSION = 3
-    # 控制 context 长度：每个方向只取前 5 跳
+    # 控制 context 长度：每个方向只取前 5 个节点
     MAX_CALLEES = 5
     MAX_CALLERS = 5
-    # dependency skill 拓展深度
-    DEPENDENCY_BFS_DEPTH = 2
 
-    def __init__(self, *, interpretation_store: InterpretationStoreProto, graph: GraphProto):
+    def __init__(self, *, interpretation_store: InterpretationStoreProto, graph: GraphProto,
+                 recall_threshold: float = 0.45):
+        # interpretation_store：复合检索源（解读库优先、空/异常兜底 CodeEntity）
         self.interpretation_store = interpretation_store
+        # graph：CodeGraph 图导航适配器（GraphProto）
         self.graph = graph
+        # 召回门控阈值：top1 相似度 ≥ 它才走 KE，否则闲聊（设计 [[召回门控路由-设计]] §3）
+        self.recall_threshold = recall_threshold
 
     async def retrieve(
         self,
@@ -96,85 +102,51 @@ class QARetriever:
         question: str,
         project_id: str,
         top_k: int = 5,
-        skill_id: str = "architecture",
     ) -> RetrievedContext:
-        """主入口。
+        """召回门控主入口（设计 [[召回门控路由-设计]] §4）。
 
-        Args:
-            skill_id: 决定拓展策略；默认 architecture（1 跳）。
-                'dependency' → callers/callees 2 跳 BFS
-                其它 → 当前默认行为
-
-        Steps:
-          1. 用问题去 BusinessInterpretation 向量库做语义检索（带 project_id 过滤）
-          2. 对 top-N 候选，按 skill_id 决定深度取上下游调用关系
-          3. 提取数据表访问（best-effort，失败不抛错）
+        1. 语义召回（带相似度分数）
+        2. top1 < recall_threshold → 判闲聊：返回空 ctx，不查图
+        3. top1 ≥ recall_threshold → architecture：1 跳上下游 + 表访问(best-effort)
         """
-        # v1.2: chit-chat 不需要 KG context，直接返回空 ctx（节省 latency + token）
-        # 设计：[[chit-chat-闲聊路径-设计]] §4.2
-        if skill_id == "chit-chat":
-            return RetrievedContext(
-                question=question,
-                project_id=project_id,
-                skill_id="chit-chat",
-            )
-
-        # 把 skill_id 一并存入 ctx，下游 synthesizer 据此调整 user prompt
-        ctx = RetrievedContext(question=question, project_id=project_id, skill_id=skill_id)
-
-        # 1. 语义检索候选实体
+        # 1. 语义召回候选实体（composite：解读库优先，空/异常兜底 CodeEntity；命中带 score）
         candidates = self.interpretation_store.search_method_hits_by_text(
             text=question, project_id=project_id, limit=top_k
         )
 
-        # 1.5. business skill：重排，把 class/module 层级提到 method/api 前面
-        # 直觉：业务规则类问题，class/module 级解读更贴题；method 级容易陷入技术细节
-        if skill_id == "business":
-            candidates = self._rerank_for_business(candidates)
+        # 2. 召回门控：取 top1 相似度
+        # c.get("score", 1.0)：CodeEntity 兜底命中带真实分数；解读库命中若无 score 视为 1.0（强信号→通过，设计 §7）
+        # max(..., default=0.0)：候选为空时 top1=0.0（必然 < τ → 闲聊）
+        top1 = max((c.get("score", 1.0) for c in candidates), default=0.0)
 
+        # top1 没过线 → 判为闲聊：返回空 ctx（不查图、不喂代码），synthesizer 走友好引导
+        if top1 < self.recall_threshold:
+            return RetrievedContext(
+                question=question, project_id=project_id,
+                skill_id="chit-chat", recall_score=top1,
+            )
+
+        # 3. 过线 → KE(architecture)：装好 ctx，对 top-N 候选取 1 跳上下游 + 表访问
+        ctx = RetrievedContext(
+            question=question, project_id=project_id,
+            skill_id="architecture", recall_score=top1,
+        )
+        # entry_candidates 存全量召回结果，synthesizer 可按需截断
         ctx.entry_candidates = candidates
-
-        # 2. skill 切策略：dependency 用 2 跳 BFS，其它用 1 跳
-        # 这种 if/else 分支在 skill 增加到 4-5 个时还可控；超过就 REFACTOR 抽 Strategy
-        if skill_id == "dependency":
-            # 调用链拓展深度从默认 1 跳升到 2 跳
-            callee_depth = self.DEPENDENCY_BFS_DEPTH
-            caller_depth = self.DEPENDENCY_BFS_DEPTH
-        else:
-            callee_depth = 1
-            caller_depth = 1
-
-        # 3. 对 top-N 候选取调用链
+        # 只对 top-N 候选取调用链（控成本）
         for c in candidates[: self.TOP_N_FOR_CHAIN_EXPANSION]:
             entity_id = c.get("entity_id")
             if not entity_id:
                 continue
-
-            # 调用链向下（callees）
+            # 向下（callees）/ 向上（callers）各 1 跳
             ctx.callees_by_entry[entity_id] = self._bfs_chain(
-                entity_id, direction="down", max_depth=callee_depth, max_nodes=self.MAX_CALLEES
+                entity_id, direction="down", max_depth=1, max_nodes=self.MAX_CALLEES
             )
-            # 调用链向上（callers）
             ctx.callers_by_entry[entity_id] = self._bfs_chain(
-                entity_id, direction="up", max_depth=caller_depth, max_nodes=self.MAX_CALLERS
+                entity_id, direction="up", max_depth=1, max_nodes=self.MAX_CALLERS
             )
-
-            # 数据库访问（best-effort）
-            base_tables = self._extract_table_access(entity_id)
-            # data-flow skill 增强：从候选的 summary_text 里再抽一波"<table> 表"
-            # 图谱可能根本没有 accesses_table 边（PetClinic 就这样），
-            # 但 LLM 生成的业务解读里通常会写"查询 vets 表"
-            if skill_id == "data-flow":
-                summary = (c.get("summary_text") or "") if isinstance(c, dict) else ""
-                parsed_tables = self._extract_tables_from_text(summary)
-                # 合并去重：图边优先，再补 summary_text 里发现的
-                existing_ids = {t["table_id"] for t in base_tables}
-                for tid in parsed_tables:
-                    if tid not in existing_ids:
-                        base_tables.append({"table_id": tid, "operation": "mentioned"})
-                        existing_ids.add(tid)
-            ctx.table_access_by_entry[entity_id] = base_tables
-
+            # 数据表访问（best-effort；CodeGraph 无 accesses_table 边时返 []）
+            ctx.table_access_by_entry[entity_id] = self._extract_table_access(entity_id)
         return ctx
 
     # 模块级编译过的正则（编译一次，多次使用）
@@ -202,31 +174,6 @@ class QARetriever:
         # 一个表名可能出现多次，要去重；用 dict.fromkeys 保留首次出现顺序（Python 3.7+ 有序）
         raw = cls._TABLE_MENTION_RE.findall(text)
         return list(dict.fromkeys(raw))
-
-    @staticmethod
-    def _rerank_for_business(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """business skill 专用：把 class/module 层级排到 api/method 前。
-
-        实现：稳定 sort —— 给每条记录算一个"业务优先级"，越小越靠前；
-        相同优先级保持原顺序（这正是 Python sorted 默认的稳定特性）。
-
-        priority 表：
-          class  / module → 0  （业务/能力层，高优先级）
-          api    / method → 1  （技术细节层）
-          其它             → 2  （未知层级）
-        """
-        # 用 dict 表达 level → priority 的映射；找不到时默认 2
-        _level_priority: dict[str, int] = {
-            "class": 0,
-            "module": 0,
-            "api": 1,
-            "method": 1,
-        }
-        # `key=` 用 lambda 抽提排序键；Python 内置 sorted 是 stable sort（同 key 保持原序）
-        return sorted(
-            candidates,
-            key=lambda c: _level_priority.get((c.get("level") or "").lower(), 2),
-        )
 
     def _bfs_chain(
         self,
