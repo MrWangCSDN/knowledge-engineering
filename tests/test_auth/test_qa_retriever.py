@@ -101,8 +101,8 @@ async def test_retrieve_no_candidates_returns_empty_context():
 
 
 @pytest.mark.asyncio
-async def test_business_skill_does_not_affect_default_ordering() -> None:
-    """非 business skill 时（即 default 或其它），不应触发重排。"""
+async def test_architecture_path_does_not_rerank_candidates() -> None:
+    """architecture 默认路径不重排：entry_candidates 顺序与 store 返回一致。"""
     bs = MagicMock()
     bs.search_method_hits_by_text.return_value = [
         {"entity_id": "M1", "level": "api", "summary_text": "x", "score": 0.9},
@@ -118,8 +118,8 @@ async def test_business_skill_does_not_affect_default_ordering() -> None:
 
 
 @pytest.mark.asyncio
-async def test_data_flow_skill_does_not_extract_for_other_skills() -> None:
-    """非 data-flow skill 时不做 summary_text 提取（避免给所有问题加噪音）。"""
+async def test_architecture_path_does_not_extract_summary_tables() -> None:
+    """architecture 默认路径不抽表：table_access_by_entry 来自图谱边，不解析 summary_text。"""
     bs = MagicMock()
     bs.search_method_hits_by_text.return_value = [
         {"entity_id": "M1", "level": "api", "summary_text": "查询 vets 表 写入 visits 表"}

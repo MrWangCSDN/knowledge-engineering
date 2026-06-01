@@ -279,3 +279,11 @@ async def test_build_retriever_injects_recall_threshold(monkeypatch, tmp_path):
     monkeypatch.delenv("KE_QA_RECALL_THRESHOLD", raising=False)
     r2 = await build_retriever_for_project("mall-swarm", _Req(), fake_db)
     assert r2.recall_threshold == 0.45
+
+    # 场景3：env 设为非法浮点字符串 → try/except ValueError 兜底，回退到缺省值 0.45
+    # 验证 build_retriever_for_project 内部对 float(env) 做了 try/except，不抛异常
+    monkeypatch.setenv("KE_QA_RECALL_THRESHOLD", "abc")
+    r3 = await build_retriever_for_project("mall-swarm", _Req(), fake_db)
+    assert r3.recall_threshold == 0.45, (
+        f"非法 env 值应兜底 0.45，实际 {r3.recall_threshold}"
+    )

@@ -52,7 +52,7 @@ class RetrievedContext:
     question: str
     project_id: str
     entry_candidates: list[dict[str, Any]] = field(default_factory=list)
-    """BusinessInterpretation 命中（含 entity_id / summary_text / level）。"""
+    """语义召回命中（BusinessInterpretation 或 CodeEntity 兜底；含 entity_id / summary_text / level / score）。"""
 
     callees_by_entry: dict[str, list[str]] = field(default_factory=dict)
     """{ entity_id: [下游 method id, ...] }。仅 top-3 候选取调用链以控制成本。"""
@@ -64,7 +64,7 @@ class RetrievedContext:
     """{ entity_id: [{table_id, operation}, ...] }。Mode B 需要的数据访问信息。"""
 
     skill_id: str = "architecture"
-    """v1.1 router 决策出来的 skill 名；synthesizer 据此往 user prompt 加视角偏置提示。"""
+    """技能名：召回门控决定——architecture(过线走 KE) 或 chit-chat(低召回)。synthesizer 据此选作答路径。"""
 
     recall_score: float = 0.0
     """召回门控：top1 相似度（meta/route 事件透传，便于前端显示匹配度 + 调阈值）。"""
