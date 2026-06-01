@@ -234,12 +234,26 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
         for i, c in enumerate(candidates[:5], 1):
             entity_id = c.get("entity_id", "?")
             level = c.get("level", "method")
+            # 取 module 字段（可能为 None 或根本不存在）；.get() 缺失键时返回 None
+            module = c.get("module")
             summary = c.get("summary_text") or "(无业务说明)"
             # 截断过长的 summary 控制 token 数
             if len(summary) > 300:
                 summary = summary[:300] + "…"
-            parts.append(f"  {i}. {entity_id}  [level={level}]")
+            # 仅当 module 有值（非 None / 非空串）才拼 (模块: x)，避免 None 渲染成噪声
+            # f-string 三元表达式：`a if 条件 else b` 是 Python 内联条件表达式
+            mod_str = f"  (模块: {module})" if module else ""
+            parts.append(f"  {i}. {entity_id}  [level={level}]{mod_str}")
             parts.append(f"     业务说明: {summary}")
+        # 模块判断指引：仅当至少一个候选带有 module 时追加，让 LLM 按 module 判前台/后台
+        # any() 是内置函数，可迭代对象有任意一个真值即返回 True
+        if any(c.get("module") for c in candidates[:5]):
+            parts.append(
+                "  （模块说明：mall-portal=前台门户、mall-admin=后台管理、mall-search=搜索、"
+                "mall-auth=认证、mall-gateway=网关。判断前台/后台等归属请按上面标注的【模块】，"
+                "不要仅凭类名/方法名臆断；若要对比的另一侧模块不在候选里，"
+                "如实说\"未检索到 X 模块的相关实体\"。）"
+            )
     else:
         parts.append("（向量库未命中任何候选实体）")
 
