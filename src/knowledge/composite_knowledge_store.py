@@ -299,8 +299,9 @@ class CompositeKnowledgeStore:
             seen.add(eid)
             results.append({
                 "entity_id": eid,
-                "summary_text": "",       # 实事求是：CodeEntity 没业务解读
-                "level": "code_entity",   # 标记兜底来源
+                "summary_text": "",        # 实事求是：CodeEntity 没业务解读
+                "level": "code_entity",    # 标记兜底来源
+                "score": _score,           # 相似度(1-cos距离)，供召回门控判 top1（设计 [[召回门控路由-设计]] §4）
                 # 不带 name / location —— 节省 token，QARetriever 后续扩展时补
                 # 不带 neighbors —— 与 BI 路径同型
             })

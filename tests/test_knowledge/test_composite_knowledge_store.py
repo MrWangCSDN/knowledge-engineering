@@ -328,3 +328,25 @@ def test_code_fallback_passes_tenant_to_code_store():
     code.search_by_text.assert_called_once_with(
         "UmsRoleDao", top_k=5, tenant="mall-swarm"
     )
+
+
+def test_code_fallback_surfaces_score():
+    """_code_fallback 归一化的 dict 必须带 score（= code_store 返回的相似度），供召回门控用。"""
+    # 假 code_store：search_by_text 返回 [(entity_id, score)]
+    class _FakeCodeStore:
+        def search_by_text(self, text, top_k, tenant=None):
+            return [("OmsOrderService::generateOrder#()", 0.66), ("X::y#()", 0.51)]
+
+    # 假解读库：返回空 → 触发 CodeEntity 兜底
+    class _EmptyInterp:
+        def search_method_hits_by_text(self, *, text, project_id, limit=5):
+            return []
+
+    from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore
+    store = CompositeKnowledgeStore(
+        interpretation_store=_EmptyInterp(), code_store=_FakeCodeStore(), project_id="mall-swarm",
+    )
+    hits = store.search_method_hits_by_text(text="下单", project_id="mall-swarm", limit=5)
+    assert hits[0]["entity_id"] == "OmsOrderService::generateOrder#()"
+    assert hits[0]["score"] == 0.66           # 透出真实分数
+    assert hits[1]["score"] == 0.51
