@@ -8,7 +8,9 @@ class _Store:
     def __init__(self, hits):
         self._hits = hits
     def search_method_hits_by_text(self, *, text, project_id, limit=5):
-        return self._hits
+        # 防御性浅拷贝每个候选 dict：生产里 composite 每次返回新 dict，
+        # 此处镜像该契约，避免 retrieve 就地写 c["module"] 跨调用泄漏，保证测试隔离
+        return [dict(h) for h in self._hits]
 
 
 class _Graph:

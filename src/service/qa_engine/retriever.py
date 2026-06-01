@@ -136,6 +136,7 @@ class QARetriever:
         ctx.entry_candidates = candidates
 
         # 给候选标注所属模块（best-effort）：让 LLM 按 module 判前台/后台，不凭名字臆断（设计 [[模块标签-设计]]）
+        # 就地写入 c["module"] 安全：candidates 由 search_method_hits_by_text 每次新建，调用方不持有别名
         # 遍历 entry_candidates 列表，c 是单个候选字典（dict），就地写入 "module" 键
         for c in ctx.entry_candidates:
             # c.get("entity_id")：安全取 entity_id，字典里无此键时返 None（比 c["entity_id"] 不抛异常）
