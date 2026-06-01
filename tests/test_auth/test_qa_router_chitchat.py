@@ -45,15 +45,16 @@ def test_business_keyword_overrides_chit_chat():
     assert d.skill_id == "dependency", f"业务词应优先，实际 skill_id = {d.skill_id}"
 
 
-def test_route_unknown_question_falls_back_to_chit_chat():
-    """v1.2.1：未命中任何关键词 → 兜底 chit-chat（之前是 architecture）。
+def test_route_unknown_question_falls_back_to_architecture():
+    """未命中任何关键词 → 兜底 architecture（做检索），不是 chit-chat（空检索）。
 
-    "都走 chit-chat" 设计转变：业务问题应含明显关键词；不命中说明可能是
-    社交语 / 模糊问询，走 chit-chat 让 LLM 引导回业务能力。
+    回归修复：代码 QA 产品里"X怎么实现 / X流程"等不含魔法词的真实问题占多数，
+    兜底 chit-chat 会让它们拿不到检索上下文 → LLM 答"未接入代码库"。
+    显式问候由 chit-chat 关键词命中（见上面几条测试），不受此兜底影响。
     """
     r = SkillRouter()
-    d = r.route("abcdefgh")  # 不像问候也不像业务
-    assert d.skill_id == "chit-chat"
+    d = r.route("abcdefgh")  # 不像问候也不像业务关键词
+    assert d.skill_id == "architecture"
 
 
 @pytest.mark.asyncio
