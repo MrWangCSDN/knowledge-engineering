@@ -10,6 +10,30 @@ from __future__ import annotations  # PEP 563：类型注解可前向引用（�
 
 import os  # 标准库 os：取文件后缀判语言（os.path.splitext）
 
+# FastAPI 路由所需组件
+# APIRouter：子路由器，通过 app.include_router 挂到主 app（解耦路由定义与 app 实例）
+# Depends：依赖注入工厂，FastAPI 自动解析并调用（常用于 DB session / 鉴权）
+# HTTPException：向客户端返回带状态码的 JSON 错误响应
+# Query：声明 URL 查询参数（?entity_id=...），支持校验规则（min_length 等）
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+# AsyncSession：SQLAlchemy 异步数据库会话（仅用于类型注解）
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# 数据库 session 注入 dependency（测试可 override）
+from src.service.db import get_db
+
+# Project ORM 模型（projects 表），按主键取工程 + 读 repo_local_path
+from src.service.db_models_homepage import Project as ProjectModel
+
+# require_project_role：权限 dependency 工厂，校验 user 在 project 的 role ≥ min_role
+# 传入 "reporter" 表示最低只读权限（与 /qa 端点同级门槛）
+from src.service.permission_deps import require_project_role
+
+# resolve_graph_adapter：按 repo_local_path 返回 CodeGraphGraphAdapter 或 NullGraphAdapter
+# NullGraphAdapter：repo 未配 / 索引未建时的降级适配器（resolve_first 返 None）
+from src.integrations.codegraph.graph_factory import resolve_graph_adapter
+
 # read_snippet：按行号从源码文件读片段（1-indexed 闭区间，读不到返 ""）
 from src.integrations.codegraph.source_reader import read_snippet
 
@@ -118,3 +142,76 @@ def build_snippet_response(
         # callers：调用当前实体的上游实体列表（反向导航，用于"谁调用了我"）
         "callers": graph_adapter.callers(entity_id),
     }
+
+
+# ── FastAPI Router（HTTP 层）────────────────────────────────────────────────────
+
+# APIRouter 是 FastAPI 的子路由器，与 qa_router.py 用同款 prefix 约定。
+# prefix="/projects/{project_id}"：所有路由都以这个路径前缀开头。
+# tags=["code"]：OpenAPI 文档里把这些路由归入 "code" 分组（前端 Swagger 界面可见）。
+# 注意：不挂 require_infra_healthy —— 本端点只读 CodeGraph + 源码文件，
+#       不依赖 Weaviate/LLM，即使 infra 不健康时也应能正常提供代码查看功能。
+router = APIRouter(prefix="/projects/{project_id}", tags=["code"])
+
+
+@router.get(
+    "/code-snippet",
+    # dependencies 列表里的 Depends 会在路由函数执行前自动调用；
+    # require_project_role("reporter") 返回一个 async checker 闭包：
+    #   - 校验 project 存在（不存在 → 404）
+    #   - 校验当前用户 role ≥ "reporter"（不满足 → 403）
+    # 与 /qa/explain 端点使用相同的最低门槛（reporter = 只读访问权限）
+    dependencies=[Depends(require_project_role("reporter"))],
+)
+async def get_code_snippet(
+    project_id: str,  # 由 URL path 的 {project_id} 自动注入（与 prefix 中的占位符对应）
+    # Query(...)：声明必填 URL 查询参数；min_length=1 防止传空串；description 用于 OpenAPI 文档
+    entity_id: str = Query(..., min_length=1, description="实体持久 key，如 OmsXxx::m#(Long)"),
+    # Depends(get_db)：FastAPI 自动调用 get_db 生成器，yield 出 AsyncSession 注入这里
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """按 entity_id 返回代码片段 + callees（带调用点 line/col）+ callers。
+
+    404 三态：
+      1. 工程不存在（由 require_project_role dependency 返回，路由函数体不执行）
+      2. 工程未配置源码路径（repo_local_path is None）
+      3. 该实体无可用源码（entity 未入图 / file_path 越界）
+
+    403：用户无 reporter+ 权限（由 require_project_role dependency 返回）
+
+    设计约束（见 [[代码片段查看器-设计]] §4.3）：
+      - 不挂 require_infra_healthy：infra 不健康也能看代码
+      - 纯 CodeGraph + 本地文件读取，无网络依赖
+    """
+    # ── 1. 取工程记录 + 校验 repo_local_path ──────────────────────────────────
+    # db.get(Model, primary_key)：按主键查询（等价于 SELECT * FROM projects WHERE id = project_id）
+    # 注意：require_project_role dependency 已经校验了工程存在性（不存在→404）；
+    # 但 dependency 里使用的是独立 DB session，路由函数里需要重新查一次以确保数据一致性。
+    p = await db.get(ProjectModel, project_id)
+    if p is None:
+        # 理论上 require_project_role 已拦截，这里是双重防御
+        raise HTTPException(status_code=404, detail="工程不存在")
+
+    # repo_local_path 为 None 或空串 → 工程未配置本地源码路径
+    # 返回 404 而不是 500：这是"该工程尚未配置源码"的正常状态，非系统错误
+    if not p.repo_local_path:
+        raise HTTPException(status_code=404, detail="该工程未配置源码路径")
+
+    # ── 2. 解析图适配器（CodeGraph 或 NullGraphAdapter）──────────────────────
+    # resolve_graph_adapter：
+    #   - .codegraph/codegraph.db 存在 → CodeGraphGraphAdapter（真实图查询）
+    #   - 索引未建 / 路径不存在 → NullGraphAdapter（resolve_first 返 None → 下面 404）
+    # 这样在索引尚未构建的环境里，端点也不会 500，只会 404 说明"实体无源码"
+    graph_adapter = resolve_graph_adapter(p.repo_local_path)
+
+    # ── 3. 调纯逻辑 helper 组装响应 ─────────────────────────────────────────
+    # build_snippet_response：无 HTTP/鉴权，纯函数（已有独立单测覆盖）
+    # 返回 None 表示：entity 未解析出 / file_path 越界
+    result = build_snippet_response(graph_adapter, p.repo_local_path, entity_id)
+
+    if result is None:
+        # 404 detail 说明"实体无源码"（区分于"工程不存在"和"路径未配置"）
+        raise HTTPException(status_code=404, detail="未找到该实体的源码")
+
+    # 返回 dict；FastAPI 自动序列化为 JSON（Content-Type: application/json）
+    return result

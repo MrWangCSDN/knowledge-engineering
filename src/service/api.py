@@ -24,6 +24,7 @@ from src.service.project_member_router import router as project_member_router  #
 from src.service.user_router import router as user_router                      # v2.0 User Management CRUD 路由
 from src.service.project_router import router as project_router
 from src.service.qa_router import router as qa_router
+from src.service.code_router import router as code_router   # 代码片段查看端点（GET /projects/{pid}/code-snippet）
 from src.service.audit_router import router as audit_router  # v2.0 Task 11：审计日志查询路由
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
@@ -79,6 +80,7 @@ app.include_router(auth_router)
 app.include_router(archived_router)  # Task 6：跨工程归档列表
 app.include_router(project_router)
 app.include_router(qa_router)
+app.include_router(code_router)   # GET /projects/{pid}/code-snippet（代码片段查看器后端，不挂 require_infra_healthy）
 app.include_router(admin_router)
 app.include_router(credentials_router)  # v2.0：用户级凭证 CRUD（/credentials/*）
 app.include_router(group_router)        # v2.0：Groups CRUD（/groups/*）
