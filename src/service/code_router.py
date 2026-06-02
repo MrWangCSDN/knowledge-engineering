@@ -189,7 +189,8 @@ async def get_code_snippet(
     # 但 dependency 里使用的是独立 DB session，路由函数里需要重新查一次以确保数据一致性。
     p = await db.get(ProjectModel, project_id)
     if p is None:
-        # 理论上 require_project_role 已拦截，这里是双重防御
+        # 防御性兜底：正常情况下 require_project_role dependency 已先返 404（此处不可达）；
+        # 仅当日后有人移除该 dependency 时，这里避免后续 p.repo_local_path 触发 AttributeError
         raise HTTPException(status_code=404, detail="工程不存在")
 
     # repo_local_path 为 None 或空串 → 工程未配置本地源码路径
