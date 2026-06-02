@@ -11,7 +11,7 @@ import logging   # 降级时打 warning，留可观测痕迹
 import os        # os.path.exists 判断索引文件在不在
 from typing import Optional  # Optional[str] = str | None
 
-from src.integrations.codegraph.db import CodeGraphDB
+from src.integrations.codegraph.db import CodeGraphDB, CgNode  # CgNode：resolve_first 返回类型注解用
 from src.integrations.codegraph.graph_adapter import CodeGraphGraphAdapter
 from src.integrations.codegraph.paths import codegraph_db_path
 
@@ -36,6 +36,18 @@ class NullGraphAdapter:
     def module_of(self, entity_id: str) -> Optional[str]:
         """无 CodeGraph 索引 → 无模块信息（降级返 None，不报错）。"""
         return None
+
+    def resolve_first(self, entity_id: str) -> Optional[CgNode]:
+        """无 CodeGraph 索引 → 解析不出节点，返回 None。"""
+        return None
+
+    def successors_with_locations(self, entity_id: str) -> list[dict]:
+        """无 CodeGraph 索引 → 无调用点，返回空列表。"""
+        return []
+
+    def callers(self, entity_id: str) -> list[dict]:
+        """无 CodeGraph 索引 → 无调用者，返回空列表。"""
+        return []
 
 
 def resolve_graph_adapter(repo_local_path: Optional[str]):

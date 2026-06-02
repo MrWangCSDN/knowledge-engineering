@@ -103,6 +103,80 @@ class CodeGraphGraphAdapter:
         """
         return self._walk(entity_id, rel_type, "pred")  # 'pred' 方向 = 入边
 
+    def resolve_first(self, entity_id: str) -> Optional[CgNode]:
+        """把 entity_id 解析为单个 CgNode（重载/多命中取首个）；无命中或 sqlite 异常 → None。
+
+        Args:
+            entity_id: 持久身份 key，如 'OmsCtrl::generateOrder' 或 'OmsCtrl::generateOrder#(OrderParam)'
+        Returns:
+            首个匹配的 CgNode，或 None（无命中/DB 异常）
+        """
+        try:
+            # 复用 _resolve：split '#' 取 qualified_name → find_nodes_by_qualified_name（重载已处理）
+            nodes = self._resolve(entity_id)
+            # 取首个；同 qualified_name 的重载处于同一文件/模块，首个即代表性片段
+            return nodes[0] if nodes else None
+        except sqlite3.Error as e:
+            # 库缺失/锁/损坏 → 降级返回 None，与 _walk / module_of 降级风格保持一致
+            _LOG.warning("[codegraph] resolve_first 失败，返回 None (entity_id=%s): %s", entity_id, e)
+            return None
+
+    def successors_with_locations(self, entity_id: str) -> list[dict]:
+        """entity_id 的 callees + 调用点位置：[{entity_id, name, line, col}, ...]。
+
+        不去重（每个调用点一项），供前端在片段里逐个标可点击跳转。sqlite 异常 → []（降级）。
+
+        Args:
+            entity_id: 调用方节点的持久 key
+        Returns:
+            每个调用点的字典列表，字段：entity_id(durable_key)、name、line、col
+        """
+        try:
+            # 解析出节点列表（可能有重载）
+            nodes = self._resolve(entity_id)
+            if not nodes:                       # entity_id 在图中不存在 → 空列表
+                return []
+            out: list[dict] = []
+            # 只取首个节点的出边（与 resolve_first 选的片段一致，保证调用点落在该片段内）
+            for tgt, line, col in self._db.successors_with_locations(nodes[0].id, "calls"):
+                # durable_key(tgt)：把目标 CgNode 转为持久身份（qualified_name + 签名），供前端跳转
+                out.append({"entity_id": durable_key(tgt), "name": tgt.name, "line": line, "col": col})
+            return out
+        except sqlite3.Error as e:
+            # 库缺失/锁/损坏 → 降级返 []，避免整体崩溃
+            _LOG.warning("[codegraph] successors_with_locations 失败，返回 [] (entity_id=%s): %s", entity_id, e)
+            return []
+
+    def callers(self, entity_id: str) -> list[dict]:
+        """谁调用了 entity_id：[{entity_id, name}, ...]（按 entity_id 去重）。sqlite 异常 → []。
+
+        与 successors_with_locations 不去重不同，callers 以 caller 为粒度去重：
+        同一 caller 多次调用 entity_id 只计一次，避免"A 被 B 调用了 3 次"导致 B 出现 3 次。
+
+        Args:
+            entity_id: 被调用节点的持久 key
+        Returns:
+            去重后的调用方字典列表，字段：entity_id(durable_key)、name
+        """
+        try:
+            # 解析出节点列表（可能有重载）
+            nodes = self._resolve(entity_id)
+            if not nodes:                       # entity_id 在图中不存在 → 空列表
+                return []
+            out: list[dict] = []
+            seen: set[str] = set()              # 按 durable_key 去重：同一 caller 多次调用只记一次
+            # predecessors 返回 CgNode 列表（含 .name），逐个转换为 durable_key
+            for src in self._db.predecessors(nodes[0].id, "calls"):
+                key = durable_key(src)          # 持久身份：qualified_name + 签名
+                if key not in seen:             # 去重判断
+                    seen.add(key)
+                    out.append({"entity_id": key, "name": src.name})
+            return out
+        except sqlite3.Error as e:
+            # 库缺失/锁/损坏 → 降级返 []，不整体崩溃
+            _LOG.warning("[codegraph] callers 失败，返回 [] (entity_id=%s): %s", entity_id, e)
+            return []
+
     def module_of(self, entity_id: str) -> Optional[str]:
         """返回 entity 所属模块（CodeGraph file_path 顶层目录，如 'mall-portal'/'mall-admin'）。
 
