@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+# 2026-06-02：json-repair 是宽容 JSON 解析器，遇到未转义/截断也能尽力还原；
+# 在标准 json.loads 失败后用它作为兜底（详见 _parse_sections）
+from json_repair import repair_json
 from dataclasses import dataclass, field
 # AsyncIterator: complete_stream 的返回值类型
 # Awaitable / Callable: on_token 回调类型
@@ -307,9 +310,13 @@ class QASynthesizer:
     def _parse_sections(raw: str) -> list[dict]:
         """解析 LLM 输出。
 
-        优先解析 ```json ... ``` fenced block；
-        若没 fence 直接当 JSON 试；
-        都失败时降级成单段 markdown。
+        策略（按尝试顺序）：
+          1. 找 ```json ... ``` fence 抽出 JSON 候选串（rsplit 处理嵌入 ```mermaid 子 fence）
+          2. 标准 json.loads 试一次（最严格）
+          3. 失败 → json-repair 兜底（2026-06-02 新增）：自动补全/转义/修复，宽容解析
+          4. 仍失败 → 降级成单段 markdown，把整段 raw 当回答展示
+          5. 成功抽到 sections 后，对每段 content 做 _fix_gfm_table_cells 后处理
+             —— 把表格 cell 内换行转 <br>，避免前端 GFM parser 把多行表格断成多个段
         """
         # 1. 找 ```json fence
         # 注意：LLM 的 sections.content 里允许嵌入 ```mermaid 这种子代码块，
@@ -339,26 +346,50 @@ class QASynthesizer:
             except IndexError:
                 pass
 
-        # 2. 尝试解析 JSON
+        # 2. 第一道：严格 json.loads
+        data: Any = None
         try:
             data = json.loads(candidate)
-            sections = data.get("sections", []) if isinstance(data, dict) else []
-            # 过滤无效条目（必须有 type 和 content）
-            valid = [
-                s for s in sections
-                if isinstance(s, dict) and "type" in s and "content" in s
-            ]
-            if valid:
-                return valid
-        except (json.JSONDecodeError, ValueError, AttributeError):
-            pass
+        except (json.JSONDecodeError, ValueError):
+            # 2026-06-02：第二道 — json-repair 兜底
+            # LLM 在 GFM 表格 / 代码块里偶发会吐 未转义 " 或 \，导致标准 json 直接炸
+            # repair_json 会自动补 } / 转义引号 / 修复尾逗号等；
+            # return_objects=True 让它返回 Python 对象而不是字符串
+            try:
+                data = repair_json(candidate, return_objects=True)
+            except Exception:
+                # json-repair 也救不回来 → data 保持 None，落到下面的兜底
+                data = None
 
-        # 3. 降级：包成单段 markdown
+        # 3. 抽 sections
+        # data 可能是 dict / list / None / 其它 — 只接受 dict 且含 "sections" key
+        if isinstance(data, dict):
+            sections = data.get("sections", [])
+            if isinstance(sections, list):
+                # 过滤无效条目（必须含 type 和 content 字段，且 content 是字符串）
+                valid = [
+                    s for s in sections
+                    if isinstance(s, dict)
+                    and "type" in s
+                    and "content" in s
+                    and isinstance(s["content"], str)
+                ]
+                if valid:
+                    # 4. 对每段 content 做 GFM 表格 cell 多行修复
+                    # 用浅拷贝 dict 避免改到 caller 持有的引用（防御性）
+                    return [
+                        {**s, "content": _fix_gfm_table_cells(s["content"])}
+                        for s in valid
+                    ]
+
+        # 5. 兜底：包成单段 markdown
+        # 整段 raw 输出（含 fence + JSON 原文）作为回答展示给用户
+        # 也对兜底内容做一次表格修复（不会有损失）
         return [
             {
                 "type": "overview",
                 "title": "回答",
-                "content": raw,
+                "content": _fix_gfm_table_cells(raw),
                 "references": [],
             }
         ]
@@ -387,3 +418,70 @@ def _estimate_tokens(system: str, user: str, output: str) -> int:
     """
     total_chars = len(system) + len(user) + len(output)
     return max(1, int(total_chars / 1.5))
+
+
+def _fix_gfm_table_cells(content: str) -> str:
+    """修复 GFM 表格里 cell 内的换行。
+
+    问题背景：
+        GFM 规范要求表格 cell 内容必须单行；多行需用 <br>。
+        但 LLM 经常吐这种输出 ——
+            | 字段 | 含义        |
+            | --- | ---         |
+            | name | 用户名
+            （必填） |
+        中间那行 cell 内换行后，前端 GFM parser 看到 "用户名" 那行不以 | 结尾
+        → 整张表渲染断裂（变成 2 行表 + 一段普通文字 + 1 行表）。
+
+    算法：
+        - 按行扫描；遇到 `|` 开头的行进入"表格上下文"
+        - 表格上下文里若出现"非 | 开头但非空白"的行，且**上一行未以 | 闭合**
+          → 判定为 cell 续行，用 <br> 接到上一行尾部
+        - 空行 / 上一行已闭合时退出表格上下文
+
+    边界处理：
+        - 表头分隔行 (| --- | --- |) 以 | 结尾 → 不会触发合并
+        - 表格后正文段：上一行已经以 | 结尾 → 不会被吸进表格
+        - 不嵌入复杂的 fence/blockquote 上下文识别 —— 99% 场景这个简单算法够用
+
+    Args:
+        content: 单段 markdown 字符串（一般是 section.content）
+
+    Returns:
+        修复后的 markdown 字符串；如果没有表格上下文则原样返回
+    """
+    # 没有 | 直接 short-circuit（绝大多数 section 无表格，省 split 开销）
+    if "|" not in content:
+        return content
+
+    # split 不带参数会按 \n 切；保留行内不含 \n
+    lines = content.split("\n")
+    # result 累积修复后的行；in_table 跟踪是否在表格上下文里
+    result: list[str] = []
+    in_table = False
+
+    for line in lines:
+        # 表格行的明确信号：以 `|` 开头
+        if line.startswith("|"):
+            in_table = True
+            result.append(line)
+            continue
+
+        # 空白行 → 结束当前表格上下文（GFM 表格被空行打断）
+        if not line.strip():
+            in_table = False
+            result.append(line)
+            continue
+
+        # 处于表格上下文 + 上一行未以 `|` 闭合 → 判定为 cell 续行
+        # result[-1].rstrip() 去掉尾空白再看是否以 `|` 结尾
+        if in_table and result and not result[-1].rstrip().endswith("|"):
+            # 合并：上一行末（去掉尾空白）+ <br> + 当前行（去掉首尾空白）
+            result[-1] = result[-1].rstrip() + "<br>" + line.strip()
+            continue
+
+        # 处于表格上下文但上一行已闭合 → 真的是表格后正文，结束上下文
+        in_table = False
+        result.append(line)
+
+    return "\n".join(result)

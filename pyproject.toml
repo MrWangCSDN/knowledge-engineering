@@ -20,6 +20,9 @@ dependencies = [
     # qa_engine.docx_exporter 用 python-docx 把 assistant 答案导出 Word；
     # 2026-05-21 发现 dependencies 漏列（生产 clone 后 import api 即 ModuleNotFoundError），补上
     "python-docx>=1.1",
+    # 2026-06-02：QASynthesizer 解析 LLM 输出 JSON 时的容错兜底
+    # 遇到未转义引号/反斜杠（LLM 在 GFM 表格 / 代码块里偶发输出）时 json.loads 不再炸
+    "json-repair>=0.30.0",
 ]
 
 [project.optional-dependencies]
