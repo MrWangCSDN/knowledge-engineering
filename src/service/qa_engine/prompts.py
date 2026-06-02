@@ -211,13 +211,47 @@ context 不足时**不要直接放弃**，先用工具探索：
   - 你能基于代码本身解读：方法签名、调用关系、SQL preview（MyBatis）等
   - **不要**因 summary_text 为空就说"未找到"——代码层数据已经足够给出有意义的回答
 
-【Mermaid 约定（画图时遵守）】
+【画图约定（v1.12 2026-06-02 起首选 ReactFlow JSON，兜底 Mermaid）】
+
+──【首选】ReactFlow JSON（前端 ReactFlow 渲染，支持缩放/全屏/PNG 导出/MiniMap）──
+
+调用链 / 业务流程 / 架构图 / 模块依赖 / 数据流 等"节点-边"类图，用 ` ```reactflow `
+fenced code block 包裹 JSON 输出（**fence 内是合法 JSON**，**不要再包 ```json fence**）：
+
+  ```reactflow
+  {
+    "nodes": [
+      {
+        "id": "n1",                              // 必填，ASCII 标识符（字母开头 + [A-Za-z0-9_]）
+        "label": "OrderController.create",       // 必填，节点显示文本（方法短名）
+        "kind": "controller",                    // 可选；枚举 controller/service/mapper/method/external
+        "classOf": "com.foo.OrderController",    // 可选，类全限定名（hover 显示）
+        "sig": "(OrderParam)",                   // 可选，方法签名
+        "entityId": "method://com.foo.OrderController#create"   // 推荐，跳源码
+      }
+    ],
+    "edges": [
+      {"from": "n1", "to": "n2", "label": "调用业务层"}  // label 可选，业务动作
+    ]
+  }
+  ```
+
+ReactFlow JSON 约束：
+- id 只能 ASCII [A-Za-z0-9_]，含 . / / 空格 / 中文 → 用下划线替换（如 `com.foo.Bar` → `com_foo_Bar`）
+- kind 不在枚举里 → 用 'method'
+- edges.from / edges.to 必须引用 nodes 里存在的 id（无悬挂边）
+- 节点 5-15 个最佳；超过 20 拆图
+- entityId 字段用 context 里给的真实 entity_id，不能编造
+
+──【兜底】Mermaid（时序图 / ER 图 / 状态图 / Gantt 等"非节点-边"图仍用 Mermaid）──
+
+不适合 ReactFlow 的图（sequenceDiagram / erDiagram / stateDiagram / gantt）仍用 mermaid：
 - 节点 ID 必须用 context 给出的 entity_id，不能编造。
 - 节点标签两行：显示名 + `\\n` + 真实路径，例：`open-account["OpenAccount\\nsrc/deposit/OpenAccount.java"]`。
 - 边必带语义标签：`A -->|"调用 / 写入 / 校验"| B`。
 - 节点超过 5 个时拆图，避免毛球图。
 - 4 类预设样式：external `#585b70`（外部系统）/ entry `#89b4fa`（入口）/ store `#a6e3a1`（持久化）/ concern `#f38ba8`（风险）。
-- Mermaid 写在 ` ```mermaid ` fenced code block 里。
+- 写在 ` ```mermaid ` fenced code block 里。
 """
 
 
