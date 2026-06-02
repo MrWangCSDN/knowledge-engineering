@@ -15,6 +15,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+# 召回 query 预处理（快赢 A）：剥离渲染指令/口水，仅用于召回向量化
+# 设计 [[召回链路缺陷诊断与修复方案]] 快赢 A
+from src.service.qa_engine.query_preprocess import clean_recall_query
+
 
 # ─── 结构类型（Protocol）─ 不导入主仓，只定义"接口"────────────────────────
 
@@ -111,8 +115,11 @@ class QARetriever:
         3. top1 ≥ recall_threshold → architecture：1 跳上下游 + 表访问(best-effort)
         """
         # 1. 语义召回候选实体（composite：解读库优先，空/异常兜底 CodeEntity；命中带 score）
+        # 快赢 A：召回用提纯后的 query（剥离"用流程图展示/是怎么实现的"等渲染指令+口水，
+        # 提升代码语义信噪比）；门控 / ctx.question / 作答仍用原始 question，保留用户意图
+        recall_text = clean_recall_query(question)
         candidates = self.interpretation_store.search_method_hits_by_text(
-            text=question, project_id=project_id, limit=top_k
+            text=recall_text, project_id=project_id, limit=top_k
         )
 
         # 2. 召回门控：取 top1 相似度

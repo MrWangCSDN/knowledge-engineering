@@ -20,6 +20,7 @@ v1 简化点：
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -29,6 +30,25 @@ from src.service.qa_engine.retriever import QARetriever
 from src.service.qa_engine.router import SkillRouter
 from src.service.qa_engine.synthesizer import QASynthesizer
 from src.service.qa_engine.token_batcher import TokenBatcher
+
+
+# ─── 召回广度（快赢 B）─────────────────────────────────────────────────────
+
+# 召回候选数默认值（快赢 B：5→15，给流程/架构类问题足够候选池重建调用链）
+# 设计 [[召回链路缺陷诊断与修复方案]] 快赢 B；可用环境变量 KE_RECALL_TOP_K 覆盖
+_RECALL_TOP_K_DEFAULT = 15
+
+
+def _recall_top_k() -> int:
+    """读召回候选数：环境变量 KE_RECALL_TOP_K，缺失/非法/非正 → 默认 15。"""
+    try:
+        # int(...) 把环境变量字符串转整数；os.environ.get(k, default) 缺失返回 default
+        v = int(os.environ.get("KE_RECALL_TOP_K", str(_RECALL_TOP_K_DEFAULT)))
+    except (TypeError, ValueError):
+        # 非数字（如 "abc"）→ 回落默认
+        return _RECALL_TOP_K_DEFAULT
+    # 非正数（0 / 负）无意义 → 回落默认
+    return v if v > 0 else _RECALL_TOP_K_DEFAULT
 
 
 # ─── 工具：format SSE 行 ────────────────────────────────────────────────────
@@ -124,7 +144,8 @@ async def stream_qa_answer(
     try:
         # 召回门控：不传 skill_id，retrieve 内部按 top1 相似度决定 KE/闲聊
         # 设计参见 [[召回门控路由-设计]]；旧的 router.route → skill_id 路径已移除
-        ctx = await retriever.retrieve(question=question, project_id=project_id, top_k=5)
+        # 快赢 B：召回候选数从 env 读（默认 15，旧值 5 太小，入口易被截断）
+        ctx = await retriever.retrieve(question=question, project_id=project_id, top_k=_recall_top_k())
     except Exception as e:
         yield format_sse("error", {
             "code": "RETRIEVE_FAILED",

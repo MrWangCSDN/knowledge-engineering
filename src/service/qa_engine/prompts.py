@@ -268,6 +268,11 @@ _SKILL_HINTS: dict[str, str] = {
 }
 
 
+# 快赢 B（[[召回链路缺陷诊断与修复方案]]）：渲染给 LLM 的候选入口上限。
+# 5→10：配合召回 top_k 调大，让更多入口/链路成员进入作答上下文，流程图才完整。
+TOP_CANDIDATES_FOR_PROMPT = 10
+
+
 def build_user_prompt(question: str, context: dict[str, Any], free_format: bool = False) -> str:
     """把 retriever 返回的 context 拼成 LLM user prompt。
 
@@ -303,8 +308,9 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
     if candidates:
         parts.append("")
         parts.append("候选入口方法（按相关度倒序）:")
-        # 取前 5 个候选：渲染循环与下方模块指引守卫共用同一份，避免两处切片不同步（DRY）
-        top_candidates = candidates[:5]
+        # 取前 N 个候选渲染给 LLM（快赢 B：上限 TOP_CANDIDATES_FOR_PROMPT=10）。
+        # 渲染循环与下方模块指引守卫共用同一份切片，避免两处不同步（DRY）。
+        top_candidates = candidates[:TOP_CANDIDATES_FOR_PROMPT]
         for i, c in enumerate(top_candidates, 1):
             entity_id = c.get("entity_id", "?")
             level = c.get("level", "method")
