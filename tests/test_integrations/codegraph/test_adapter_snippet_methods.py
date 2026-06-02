@@ -47,3 +47,54 @@ def test_null_adapter_degrades(tmp_path):
     assert null.resolve_first("X::y#()") is None
     assert null.successors_with_locations("X::y#()") == []
     assert null.callers("X::y#()") == []
+
+
+def test_successors_with_locations_passes_none_col(tmp_path):
+    """col 为 NULL 时透传为 None（不过滤、不填默认值）。"""
+    import sqlite3
+    db_path = str(tmp_path / "nullcol.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, "
+        "file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER, signature TEXT);"
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, target TEXT, "
+        "kind TEXT, line INTEGER, col INTEGER);"
+    )
+    conn.executemany(
+        "INSERT INTO nodes(id,kind,name,qualified_name,file_path,language,start_line,end_line,signature) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        [("a", "method", "m", "A::m", "A.java", "java", 1, 9, "void ()"),
+         ("b", "method", "h", "B::h", "B.java", "java", 2, 3, "int ()")],
+    )
+    conn.execute("INSERT INTO edges(source,target,kind,line,col) VALUES ('a','b','calls',5,NULL)")
+    conn.commit(); conn.close()
+    adp = CodeGraphGraphAdapter(CodeGraphDB(db_path))
+    callees = adp.successors_with_locations("A::m")
+    assert callees == [{"entity_id": "B::h#()", "name": "h", "line": 5, "col": None}]
+
+
+def test_callers_dedupes_multiple_calls(tmp_path):
+    """同一 caller 多次调用 entity_id → callers 只返回一项（按 entity_id 去重）。"""
+    import sqlite3
+    db_path = str(tmp_path / "dupcaller.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, "
+        "file_path TEXT, language TEXT, start_line INTEGER, end_line INTEGER, signature TEXT);"
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, target TEXT, "
+        "kind TEXT, line INTEGER, col INTEGER);"
+    )
+    conn.executemany(
+        "INSERT INTO nodes(id,kind,name,qualified_name,file_path,language,start_line,end_line,signature) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        [("a", "method", "m", "A::m", "A.java", "java", 1, 20, "void ()"),
+         ("b", "method", "h", "B::h", "B.java", "java", 2, 3, "int ()")],
+    )
+    conn.executemany(
+        "INSERT INTO edges(source,target,kind,line,col) VALUES (?,?,?,?,?)",
+        [("a", "b", "calls", 3, 4), ("a", "b", "calls", 10, 6)],   # a 调 b 两次
+    )
+    conn.commit(); conn.close()
+    adp = CodeGraphGraphAdapter(CodeGraphDB(db_path))
+    callers = adp.callers("B::h")
+    assert callers == [{"entity_id": "A::m#()", "name": "m"}]
