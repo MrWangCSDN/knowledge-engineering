@@ -115,8 +115,9 @@ class WeaviateTopologicalAdapter:
         :param project_id: 必填，作为 Weaviate tenant 标识（= 项目 ID）；
                            空字符串时直接返回 []，防止跨 tenant 误查
         :param limit: 返回最多多少条候选
-        :return: list[dict]，每条含 entity_id / summary_text / level / business_domain
-                 / business_capabilities / entity_type / language
+        :return: list[dict]，每条含 entity_id（←method_entity_id）/ summary_text
+                 （←interpretation_text，空则回退 context_summary）/ level（固定 "method"）
+                 / language / score
         """
         # 边界保护：空问题 → 直接返回 []
         # 空 project_id 也保护：避免 with_tenant("") 查到跨租户数据或报错
@@ -132,7 +133,7 @@ class WeaviateTopologicalAdapter:
         # 调用主仓的私有方法做近邻搜索；这里复用 store 的内部组件以减少重复
         # 类型注解 `Optional[list[...]]` = `list[...] | None`，表示可能返回 None
         try:
-            # 1) 拿 embedding：主仓的 `get_embedding` 走 Ollama bge-m3
+            # 1) 拿 embedding：主仓的 `get_embedding`（已迁 DashScope text-embedding-v4，1024 维）
             from src.semantic.embedding import get_embedding
             # 2) 近邻向量检索的封装：返回 (properties_dict, score) 列表
             from src.knowledge.weaviate_near_vector import near_vector_property_hits
@@ -159,12 +160,14 @@ class WeaviateTopologicalAdapter:
                 limit=fetch_limit,
                 collection_name=self._store._collection_name,
                 return_properties=[
-                    "entity_id",
-                    "entity_type",
-                    "level",
-                    "summary_text",
-                    "business_domain",
-                    "business_capabilities",
+                    # TopologicalInterpretation 集合真实列（schema 对齐，2026-06-02 修
+                    # [[召回链路缺陷诊断与修复方案]] Layer 2）：主键是 method_entity_id（非 entity_id），
+                    # 正文是 interpretation_text（非 summary_text），context_summary 作回退。
+                    # 旧代码请求的 entity_type/level/business_domain/business_capabilities/summary_text/entity_id
+                    # 集合并不存在 → Weaviate 抛 `no such prop` → 每次召回异常降级。删掉这些幻影列。
+                    "method_entity_id",
+                    "interpretation_text",
+                    "context_summary",
                     "language",
                 ],
                 # tenant 分区已经做了隔离，不再需要额外的 project_id filter
@@ -183,17 +186,19 @@ class WeaviateTopologicalAdapter:
         # 翻译成 QARetriever 期望的格式
         out: list[dict[str, Any]] = []
         for props, score in rows[: int(limit)]:
-            # `props.get(k, "")` 是字典的"取值带默认"语法；找不到 k 时返回 ""
+            # schema 对齐映射（2026-06-02 修 [[召回链路缺陷诊断与修复方案]] Layer 2）：
+            # 把集合真实列映射成下游（retriever / build_user_prompt）期望的契约 key。
             out.append(
                 {
-                    "entity_id": props.get("entity_id", ""),
-                    "entity_type": props.get("entity_type", ""),
-                    "level": props.get("level", ""),
-                    "summary_text": props.get("summary_text", ""),
-                    "business_domain": props.get("business_domain", ""),
-                    "business_capabilities": props.get("business_capabilities", ""),
+                    # entity_id ← method_entity_id（集合主键；下游用它拼引用 / 取调用链 / 标 module）
+                    "entity_id": props.get("method_entity_id", ""),
+                    # summary_text ← interpretation_text（业务解读正文）；为空回退 context_summary
+                    "summary_text": props.get("interpretation_text") or props.get("context_summary") or "",
+                    # level 固定 "method"：方法级解读；非 "code_entity"，让 build_user_prompt 识别为
+                    # "有真实解读数据"（level=="code_entity" 会被判为"拓扑解读缺失"，见 prompts.py）
+                    "level": "method",
                     "language": props.get("language", ""),
-                    # 把相似度也带出来，方便上层调试；不在 Protocol 里但 dict 允许多余字段
+                    # 相似度带出来供上层门控 / 调试；dict 允许多余字段
                     "score": float(score),
                 }
             )

@@ -94,6 +94,64 @@ def test_search_passes_tenant_view_to_near_vector():
     assert captured_calls[0] is fake_tenant_view
 
 
+# ─── search_method_hits_by_text：return_properties 与集合真实 schema 对齐 ──────
+
+def test_search_maps_real_schema_props_and_drops_phantom_props():
+    """适配器必须按集合真实 schema 取列 + 映射，不能请求不存在的幻影列。
+
+    修 2026-06-02（[[召回链路缺陷诊断与修复方案]] Layer 2）：
+    TopologicalInterpretation 真实列是 method_entity_id / interpretation_text /
+    context_summary / language（无 entity_id / entity_type / summary_text）。
+    旧代码 return_properties 请求 entity_type 等幻影列 → Weaviate 抛
+    `no such prop with name 'entity_type'` → 每次解读召回都异常 → 静默降级 CodeEntity。
+
+    本测试锁定：
+      1) return_properties 只含真实列（含 method_entity_id / interpretation_text，
+         不含 entity_type / summary_text / entity_id）；
+      2) 输出映射 method_entity_id→entity_id、interpretation_text→summary_text、
+         level 固定 "method"（非 "code_entity"，让 build_user_prompt 识别为真解读数据）。
+    """
+    adapter, fake_store, fake_collection, fake_tenant_view = _make_adapter_with_fake_store()
+
+    # 捕获 near_vector_property_hits 的 kwargs（拿 return_properties 做断言）
+    captured = {}
+
+    def fake_near_vector(coll, **kwargs):
+        """假实现：记录 kwargs，并返回"集合真实 schema 形态"的命中。"""
+        captured.update(kwargs)
+        # 模拟真实列：method_entity_id / interpretation_text / context_summary / language
+        return [
+            (
+                {
+                    "method_entity_id": "OmsPortalOrderController::generateOrder#(OrderParam)",
+                    "interpretation_text": "用户提交购物车生成订单的下单入口",
+                    "context_summary": "下单上下文",
+                    "language": "java",
+                },
+                0.83,
+            )
+        ]
+
+    with patch("src.semantic.embedding.get_embedding", return_value=[0.1] * 1024, create=True), \
+         patch("src.knowledge.weaviate_near_vector.near_vector_property_hits", side_effect=fake_near_vector, create=True):
+        out = adapter.search_method_hits_by_text(text="下单流程", project_id="mall-swarm", limit=5)
+
+    # ① 输出映射正确
+    assert len(out) == 1
+    assert out[0]["entity_id"] == "OmsPortalOrderController::generateOrder#(OrderParam)"
+    assert out[0]["summary_text"] == "用户提交购物车生成订单的下单入口"
+    assert out[0]["level"] == "method"          # 非 "code_entity" → prompt 视为真解读
+    assert out[0]["score"] == 0.83
+
+    # ② return_properties 只含真实列，不含会触发 Weaviate `no such prop` 的幻影列
+    rp = captured.get("return_properties") or []
+    assert "method_entity_id" in rp
+    assert "interpretation_text" in rp
+    assert "entity_type" not in rp              # 旧 bug 根因列
+    assert "summary_text" not in rp             # 集合正文列叫 interpretation_text
+    assert "entity_id" not in rp                # 集合主键叫 method_entity_id
+
+
 # ─── search_method_hits_by_text：边界保护 ───────────────────────────────────
 
 def test_search_returns_empty_when_project_id_empty():
@@ -144,16 +202,15 @@ def test_search_maps_rows_to_expected_keys():
     adapter, fake_store, fake_collection, fake_tenant_view = _make_adapter_with_fake_store()
 
     # 构造模拟的 near_vector 返回值：list of (props_dict, score_float)
+    # 用集合**真实 schema** 的列名（method_entity_id / interpretation_text / ...），
+    # 而非旧代码假想的 entity_id / summary_text（2026-06-02 schema 对齐修复）
     fake_rows = [
         (
             {
-                "entity_id": "method://com.example.PetController.findAll",
-                "entity_type": "method",
-                "level": "api",
-                "summary_text": "查询所有宠物列表",
-                "business_domain": "宠物管理",
-                "business_capabilities": "列表查询",
-                "language": "Java",
+                "method_entity_id": "OmsPortalOrderService::generateOrder#(OrderParam)",
+                "interpretation_text": "下单核心业务：生成订单主链路入口",
+                "context_summary": "下单上下文",
+                "language": "java",
             },
             0.92,
         )
@@ -161,14 +218,14 @@ def test_search_maps_rows_to_expected_keys():
 
     with patch("src.semantic.embedding.get_embedding", return_value=[0.1] * 1024, create=True), \
          patch("src.knowledge.weaviate_near_vector.near_vector_property_hits", return_value=fake_rows, create=True):
-        result = adapter.search_method_hits_by_text(text="查询宠物", project_id="petclinic", limit=5)
+        result = adapter.search_method_hits_by_text(text="下单流程", project_id="mall-swarm", limit=5)
 
-    # 应该返回 1 条，且结构正确
+    # 应该返回 1 条，且按真实 schema 正确映射
     assert len(result) == 1
     row = result[0]
-    assert row["entity_id"] == "method://com.example.PetController.findAll"
-    assert row["level"] == "api"
-    assert row["summary_text"] == "查询所有宠物列表"
+    assert row["entity_id"] == "OmsPortalOrderService::generateOrder#(OrderParam)"  # ← method_entity_id
+    assert row["level"] == "method"                                                  # 固定 "method"（非 code_entity）
+    assert row["summary_text"] == "下单核心业务：生成订单主链路入口"                  # ← interpretation_text
     # score 应该被包含（float 类型）
     assert abs(row["score"] - 0.92) < 1e-6
 
