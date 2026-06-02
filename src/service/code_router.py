@@ -40,6 +40,13 @@ from src.integrations.codegraph.source_reader import read_snippet
 # resolve_safe_path：路径沙箱，防止 file_path 越界（../.. 逃逸、绝对路径），返回 Path 或 raise ValueError
 from src.service.qa_engine.tools._path_sandbox import resolve_safe_path
 
+# 2026-06-02 v1.13：整文件视角支持的 size cap
+# 超过 200 KB 的文件不返回 file_content（前端 fallback 到方法片段）
+# 200 KB 约等于 6000 行 Java，覆盖 99% 的实际单文件；
+# 超过这个 size 一般是生成代码 / lombok / 测试 fixture，整文件查看价值不大且会让 SSE/HTTP payload 变大
+_MAX_FILE_CONTENT_BYTES = 200 * 1024
+
+
 # 文件后缀 → 前端 Monaco 编辑器 / 语法高亮用的语言标识符（小写匹配）
 # 未收录的后缀统一用 "plaintext"（前端降级无高亮，不报错）
 _LANG_BY_SUFFIX: dict[str, str] = {
@@ -56,6 +63,55 @@ _LANG_BY_SUFFIX: dict[str, str] = {
     ".go": "go",               # Go 源文件
     ".properties": "ini",      # Java .properties（key=value 格式，Monaco 用 ini 高亮）
 }
+
+
+def _try_read_full_file(
+    repo_local_path: str,
+    file_path: str,
+) -> tuple[str | None, int]:
+    """读整个源文件 → 返回 (file_content, file_size_bytes)；超 cap / 读不到时 file_content=None。
+
+    2026-06-02 v1.13 引入：让前端 CodeViewer 能显示整文件 + 滚动定位到方法，
+    取代"只看方法片段"的旧体验。
+
+    安全策略：
+      1. 用 resolve_safe_path 校验路径不越界（防 ../../etc/passwd 这类路径逃逸）
+      2. 先 stat 拿文件大小；超 _MAX_FILE_CONTENT_BYTES 直接 abort（不把大文件载入内存）
+      3. 编码用 utf-8 + errors='replace'，二进制/混合编码不会抛错（罕见但防御性）
+
+    任何异常路径（路径越界 / 文件不存在 / 读失败 / 超 cap）都返回 (None, size_or_0)
+    让前端 fallback 到老的 code 字段（方法片段），保持向后兼容。
+
+    Args:
+        repo_local_path: 工程源码根目录绝对路径
+        file_path: 相对仓库根的文件路径（来自 node.file_path）
+    Returns:
+        (content, size)：content=None 表示前端走 fallback；size>0 即使 content=None 也回真值
+        让前端能展示"文件 XX KB 超大，显示方法片段"的提示
+    """
+    try:
+        # resolve_safe_path 抛 ValueError 表示路径越界或绝对路径
+        safe_path = resolve_safe_path(repo_local_path, file_path)
+    except ValueError:
+        return None, 0
+
+    # 防御性：文件不存在 / 权限不足 → size 取不到
+    try:
+        size = safe_path.stat().st_size
+    except OSError:
+        return None, 0
+
+    # 超 cap → 不读，返回 None + 真实 size（让前端展示"超大文件"提示）
+    if size > _MAX_FILE_CONTENT_BYTES:
+        return None, size
+
+    # 实际读取；errors='replace' 让非 utf-8 字节被替换成 U+FFFD 不抛错
+    try:
+        content = safe_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, size
+
+    return content, size
 
 
 def _lang_from_path(file_path: str) -> str:
@@ -120,11 +176,16 @@ def build_snippet_response(
         # ValueError：路径越界或为绝对路径；静默返回 None，不暴露路径信息
         return None
 
-    # ── 3. 读源码片段 ─────────────────────────────────────────────────────────
+    # ── 3. 读源码片段（方法范围）+ 整文件（v1.13 起）─────────────────────────
+    # 3a. 方法片段：旧字段 code 保留作向后兼容 + 超大文件 fallback
     # read_snippet(repo_root, file_path, start_line, end_line)
     #   → str，1-indexed 闭区间；文件不存在/行号非法返回 ""
     #   → 末尾不带换行（函数内部已处理），前端直接渲染
     code = read_snippet(repo_local_path, node.file_path, node.start_line, node.end_line)
+
+    # 3b. 整文件源码（v1.13 新增）：让前端显示完整文件 + 滚动定位到方法范围
+    # 超过 _MAX_FILE_CONTENT_BYTES 时 file_content=None，前端走 code 字段（方法片段）fallback
+    file_content, file_size_bytes = _try_read_full_file(repo_local_path, node.file_path)
 
     # ── 4. 组装 spec §3 响应 dict ────────────────────────────────────────────
     # 所有字段含义见设计文档 §3（代码片段查看器-设计.md §3 响应结构）
@@ -137,6 +198,9 @@ def build_snippet_response(
         "start_line": node.start_line,                   # 1-indexed 起始行（含）
         "end_line": node.end_line,                       # 1-indexed 结束行（含）
         "code": code,                                    # 源码片段字符串（空串=读不到）
+        # v1.13 新增：整文件 + 大小（前端用 file_content 显示完整文件，没有 / 超 cap 时 fallback 到 code）
+        "file_content": file_content,                    # 整文件源码字符串；None=未读到或超 cap
+        "file_size_bytes": file_size_bytes,              # 文件字节数（前端展示 "超大文件" 提示用）
         # callees：当前实体调用的下游实体列表，每项携带 line/col 便于前端点击跳转
         "callees": graph_adapter.successors_with_locations(entity_id),
         # callers：调用当前实体的上游实体列表（反向导航，用于"谁调用了我"）
