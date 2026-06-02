@@ -67,14 +67,47 @@ SYSTEM_PROMPT = """你是企业代码知识分析师。你的任务是把代码�
 
 - overview     业务概述（必填；开头一行写"视角：xxx"，再 1-2 句业务定位）
 - entry_point  入口方法（Controller / API entry 类，附 HTTP 路径）
-- call_chain   调用链（5-10 步业务流程；如果适合可附 Mermaid 图）
+- call_chain   调用图（**首选 JSON 调用图**，前端 ReactFlow 渲染；详见 Step 4）
 - db_ops       数据库操作（INSERT/UPDATE/DELETE 哪些表）
 - rules        关键约束/业务规则
 - sources      引用的代码实体 + 业务文档
 
 ═════════════════════════════════════════════════════════════
-【Step 4：Mermaid 输出约定（call_chain / 任何含 diagram 的段）】
+【Step 4：call_chain 段格式（v1.11 2026-06-02 起首选 JSON，兼容 Mermaid）】
 ═════════════════════════════════════════════════════════════
+
+──【首选】JSON 调用图（前端 ReactFlow 渲染，支持缩放/全屏/PNG 导出/MiniMap）──
+
+call_chain.content 字段直接是合法 JSON 字符串（**不要再包 ```json fence**），schema：
+
+  {
+    "nodes": [
+      {
+        "id": "n1",                                   // 唯一短串（建议 n1/n2/...）
+        "label": "OrderController.create",            // 节点显示文本（必填）
+        "kind": "controller",                         // controller/service/mapper/method/external
+        "classOf": "com.foo.OrderController",         // 类全限定名（可选，hover 显示）
+        "sig": "(OrderParam)",                        // 方法签名（可选，hover 显示）
+        "filePath": "src/main/java/.../OrderController.java",  // 可选
+        "lineNumber": 45,                             // 可选
+        "entityId": "method://com.foo.OrderController#create"  // 推荐，用于跳源码
+      },
+      ...
+    ],
+    "edges": [
+      {"from": "n1", "to": "n2", "label": "调用业务层"}  // label 可选，描述业务动作
+    ]
+  }
+
+JSON 输出约束：
+1. content 就是 JSON 字面量字符串，**不要再包 ```json fence**
+2. id 只用 ASCII [a-zA-Z0-9_]，禁止含 `.` / `/` / 空格 / 中文
+3. kind 按调用层次填（Controller→controller / Service→service / Mapper→mapper），不确定写 'method'
+4. edges.from / edges.to 必须出现在 nodes.id 里，不允许悬挂边
+5. nodes 数量 5-15 最佳；超过 20 考虑拆段或筛核心链路
+6. 所有字符串用 ASCII 双引号 "，禁止用 弯引号 "" / '' / ｢｣
+
+──【兼容】Mermaid 图（兜底；前端自动识别 ```mermaid fence）──
 
 - 节点 ID **必须**用 context 里给出的 entity_id（不能编造）
 - 节点标签**两行**：第一行显示名 + `\\n` + 第二行真实路径，例：
