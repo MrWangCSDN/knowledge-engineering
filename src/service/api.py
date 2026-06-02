@@ -386,8 +386,11 @@ async def health(request: Request) -> dict:
     # 写回 state，让 require_infra_healthy 下一次也能用上最新值
     request.app.state.infra_status = status
 
-    # all() 接受可迭代对象，全 True 才返回 True；字典的 .values() 返回所有 value 的视图
-    healthy = all(v.get("ok") for v in status.values())
+    # all() 全 True 才 True；但**排除 _NON_CRITICAL_DEPS**（如已退役的 neo4j）——
+    # 与 startup「产品不可用」判定 + require_infra_healthy 同口径（单一事实来源 deps_infra）。
+    # 否则 neo4j 停服会让 /health 误报 unhealthy → 前端弹「系统暂时不可用」横幅（2026-06-02 修）。
+    from src.service.deps_infra import _NON_CRITICAL_DEPS
+    healthy = all(v.get("ok") for k, v in status.items() if k not in _NON_CRITICAL_DEPS)
     # 类型注解 dict：说明变量类型，帮助 IDE 做静态检查
     body: dict = {
         "healthy": healthy,

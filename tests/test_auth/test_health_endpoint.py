@@ -80,3 +80,31 @@ async def test_health_unhealthy_still_returns_200():
     assert r.status_code == 200
     # healthy 应该是 False（因为有依赖挂了）
     assert r.json()["healthy"] is False
+
+
+@pytest.mark.asyncio
+async def test_health_noncritical_neo4j_down_still_healthy():
+    """非关键依赖（已退役的 neo4j）down 时，/health 仍 healthy=True。
+
+    修 2026-06-02：/health 的 healthy 须排除 _NON_CRITICAL_DEPS（neo4j），
+    与 startup「产品不可用」判定 + require_infra_healthy 同口径；否则 neo4j 停服
+    会让 /health 误报 unhealthy → 前端弹「系统暂时不可用」横幅。
+    """
+    # neo4j 挂（已退役、非关键），其余 3 个 critical 依赖都正常
+    fake_status = {
+        "mysql": {"ok": True},
+        "neo4j": {"ok": False, "error": "down (retired)"},
+        "weaviate": {"ok": True},
+        "dashscope": {"ok": True},
+    }
+
+    async def fake_check(*a, **k):
+        return fake_status
+
+    with patch("src.service.infra_health.check_all_deps", side_effect=fake_check):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            r = await client.get("/health")
+
+    assert r.status_code == 200
+    # neo4j 在 _NON_CRITICAL_DEPS 里 → 不拉低 healthy → 仍为 True
+    assert r.json()["healthy"] is True
