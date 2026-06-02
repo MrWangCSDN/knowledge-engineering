@@ -84,18 +84,20 @@ class CodeGraphDB:
 
     def successors_with_locations(
         self, node_id: str, kind: str = "calls"
-    ) -> list[tuple[CgNode, int, Optional[int]]]:
+    ) -> list[tuple[CgNode, Optional[int], Optional[int]]]:
         """出边目标(callees) + 每次调用的调用点位置 (line, col)。
 
         与 successors 的区别：① 多带 edges.line/col；② **不去重**——同一目标被调用多次
         会返回多行（每个调用点一行），供前端在代码片段里逐个标成可点击跳转。
-        col 在真实库里可能为 NULL（约 10%）→ 返回 None。
 
         Args:
             node_id: 起点（caller）节点 ID
             kind:    边类型，默认 'calls'
         Returns:
-            [(callee CgNode, line, col), ...]，按 (line, col) 升序
+            [(callee CgNode, line, col), ...]，按 (line, col) 升序。
+            line：真实库中调用点行号几乎必填，但 edges 列无 NOT NULL 约束，理论可为 None。
+            col：真实库约 10% 为 NULL（解析未定位到列）→ None；ORDER BY 下 SQLite 把
+            col=NULL 的行排在同一 line 内最前（NULL < 任何值）。
         """
         # with 语句（上下文管理器）：块结束自动关闭连接，等效 try/finally close()
         with self._connect() as conn:
