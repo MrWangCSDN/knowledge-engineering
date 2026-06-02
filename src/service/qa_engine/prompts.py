@@ -349,6 +349,19 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
             for d in downs:
                 parts.append(f"      → {d}")
 
+    # 2b. 多跳调用链路（C2 [[召回链路缺陷诊断与修复方案]]）：保留 from→to 边，供 LLM 画 call_chain 调用图。
+    # 1 跳骨架太空会让 LLM 省略 call_chain；这里给多跳边 + 明确提示"据此画"，让流程图类问题能出 ReactFlow。
+    call_edges = context.get("call_edges_by_entry") or {}
+    if any(call_edges.values()):
+        parts.append("")
+        parts.append("调用链路（入口向下多跳展开，from → to 边）—— 画调用图/流程图时请据此输出 call_chain 段:")
+        for entry, edges in call_edges.items():
+            if not edges:
+                continue
+            parts.append(f"  入口 {entry}:")
+            for frm, to in edges:
+                parts.append(f"      {frm}  →  {to}")
+
     callers = context.get("callers_by_entry") or {}
     if any(callers.values()):
         parts.append("")

@@ -65,6 +65,11 @@ class RetrievedContext:
     callers_by_entry: dict[str, list[str]] = field(default_factory=dict)
     """{ entity_id: [上游 caller id, ...] }。"""
 
+    call_edges_by_entry: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    """{ entity_id: [(from_id, to_id), ...] }。入口向下**多跳**展开的调用边（保留父→子关系）。
+    C2（[[召回链路缺陷诊断与修复方案]]）：1 跳骨架太空 → LLM 嫌不完整而省略 call_chain；
+    故多跳取边喂 LLM 画调用图。仅 top-N 候选展开以控成本。"""
+
     table_access_by_entry: dict[str, list[dict]] = field(default_factory=dict)
     """{ entity_id: [{table_id, operation}, ...] }。Mode B 需要的数据访问信息。"""
 
@@ -91,6 +96,10 @@ class QARetriever:
     # 控制 context 长度：每个方向只取前 5 个节点
     MAX_CALLEES = 5
     MAX_CALLERS = 5
+    # C2：调用链路多跳展开（画流程图用）。深度 2 = 入口→Service→Service 的下游
+    # （覆盖下单/退货等主链）；边数上限防 BFS 爆炸 + 控 prompt 体积。
+    CHAIN_DEPTH = 2
+    MAX_CHAIN_EDGES = 25
 
     def __init__(self, *, interpretation_store: InterpretationStoreProto, graph: GraphProto,
                  recall_threshold: float = 0.45):
@@ -170,6 +179,10 @@ class QARetriever:
             )
             # 数据表访问（best-effort；CodeGraph 无 accesses_table 边时返 []）
             ctx.table_access_by_entry[entity_id] = self._extract_table_access(entity_id)
+            # C2：入口向下多跳展开调用边（保留 from→to），供 LLM 画 call_chain 调用图
+            ctx.call_edges_by_entry[entity_id] = self._bfs_edges(
+                entity_id, max_depth=self.CHAIN_DEPTH, max_edges=self.MAX_CHAIN_EDGES
+            )
         return ctx
 
     # 模块级编译过的正则（编译一次，多次使用）
@@ -252,6 +265,49 @@ class QARetriever:
                 break  # 没有更深的邻居可走
 
         return result
+
+    def _bfs_edges(
+        self,
+        start_id: str,
+        *,
+        max_depth: int,
+        max_edges: int,
+    ) -> list[tuple[str, str]]:
+        """对图向下做有限深度 BFS，返回 (父, 子) 调用边列表（**保留层级关系**）。
+
+        与 _bfs_chain（返回扁平节点列表）的区别：本方法保边，让 LLM 能画出正确的多跳
+        调用图——不会把 2 跳节点误当成入口的直接 callee（C2 [[召回链路缺陷诊断与修复方案]]）。
+
+        :param start_id: 入口实体 id
+        :param max_depth: 最大跳数（C2 用 2：入口→直接 callee→再下一跳）
+        :param max_edges: 边数上限（防 BFS 爆炸 + 控 prompt 体积）
+        :return: [(from_id, to_id), ...]，按 BFS 发现顺序；可能含指向已访问节点的横向边
+        """
+        edges: list[tuple[str, str]] = []
+        # visited 防止重复**展开**同一节点（横向边仍记录，保留图结构）
+        visited: set[str] = {start_id}
+        frontier: list[str] = [start_id]
+
+        # range(max_depth) 跑 max_depth 层；与 _bfs_chain 同构，额外记录父→子边
+        for _ in range(max_depth):
+            next_frontier: list[str] = []
+            for node in frontier:
+                try:
+                    children = list(self.graph.successors(node))
+                except Exception:
+                    # 节点查不到 / 图后端异常：跳过该节点，不中断整体
+                    children = []
+                for child in children:
+                    edges.append((node, child))      # 保边：node → child
+                    if len(edges) >= max_edges:
+                        return edges                 # 达边数上限即停（防爆）
+                    if child not in visited:
+                        visited.add(child)
+                        next_frontier.append(child)  # 只展开未访问过的子节点
+            frontier = next_frontier
+            if not frontier:
+                break                                # 没有更深的节点可走
+        return edges
 
     def _extract_table_access(self, entity_id: str) -> list[dict]:
         """从图谱里提取这个方法访问的数据表。
