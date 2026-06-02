@@ -19,7 +19,7 @@ def make_fixture_db(path: str) -> None:
         );
         CREATE TABLE edges (
             id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,
-            target TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER
+            target TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER, col INTEGER
         );
         """
     )
@@ -37,9 +37,12 @@ def make_fixture_db(path: str) -> None:
         "INSERT INTO nodes(id,kind,name,qualified_name,file_path,language,"
         "start_line,end_line,signature) VALUES (?,?,?,?,?,?,?,?,?)", nodes
     )
+    # 带调用点位置（line/col）：模拟真实 .codegraph.db 的 edges（代码片段查看器用）
+    # n1→n2：OmsCtrl::generateOrder 在第 41 行第 8 列调用 OmsService::generateOrder
+    # n2→n3：OmsService::generateOrder 在第 27 行第 12 列调用 OmsOrderDao::save
     conn.executemany(
-        "INSERT INTO edges(source,target,kind) VALUES (?,?,?)",
-        [("n1", "n2", "calls"), ("n2", "n3", "calls")]
+        "INSERT INTO edges(source,target,kind,line,col) VALUES (?,?,?,?,?)",
+        [("n1", "n2", "calls", 41, 8), ("n2", "n3", "calls", 27, 12)]
     )
     conn.commit()  # 提交事务
     conn.close()   # 关连接

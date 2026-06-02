@@ -82,6 +82,38 @@ class CodeGraphDB:
             ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    def successors_with_locations(
+        self, node_id: str, kind: str = "calls"
+    ) -> list[tuple[CgNode, int, Optional[int]]]:
+        """出边目标(callees) + 每次调用的调用点位置 (line, col)。
+
+        与 successors 的区别：① 多带 edges.line/col；② **不去重**——同一目标被调用多次
+        会返回多行（每个调用点一行），供前端在代码片段里逐个标成可点击跳转。
+        col 在真实库里可能为 NULL（约 10%）→ 返回 None。
+
+        Args:
+            node_id: 起点（caller）节点 ID
+            kind:    边类型，默认 'calls'
+        Returns:
+            [(callee CgNode, line, col), ...]，按 (line, col) 升序
+        """
+        # with 语句（上下文管理器）：块结束自动关闭连接，等效 try/finally close()
+        with self._connect() as conn:
+            # SELECT t.* 投影目标节点列（_row_to_node 按列名读）+ edges 的 line/col
+            # e.line AS edge_line：起别名 edge_line，避免与 nodes 表中同名列冲突
+            # e.col  AS edge_col ：同理
+            # ORDER BY e.line, e.col：按调用点位置升序，前端展示时从上到下排列
+            rows = conn.execute(
+                f"SELECT {self._prefixed('t')}, e.line AS edge_line, e.col AS edge_col "
+                "FROM edges e JOIN nodes t ON e.target = t.id "
+                "WHERE e.source = ? AND e.kind = ? "
+                "ORDER BY e.line, e.col",
+                (node_id, kind),  # 参数化查询，? 占位符防止 SQL 注入
+            ).fetchall()   # fetchall：一次取回所有结果行（list of sqlite3.Row）
+        # 列表推导式：把每一行转换为 (CgNode, line, col) 三元组
+        # r["edge_line"] / r["edge_col"]：按别名取 edges 的位置列（不与 nodes 列冲突）
+        return [(self._row_to_node(r), r["edge_line"], r["edge_col"]) for r in rows]
+
     def predecessors(self, node_id: str, kind: str = "calls") -> list[CgNode]:
         """入边来源(callers)：找所有 edges.target = node_id 且 kind 匹配的来源节点。
 
