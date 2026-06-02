@@ -65,8 +65,11 @@ def build_snippet_response(
         repo_local_path: 工程源码根目录绝对路径
         entity_id: 实体持久 key（如 "OmsPortalOrderController::confirmReceiveOrder#(Long)"）
     Returns:
-        符合设计 §3 的 dict，包含 entity_id/qualified_name/kind/file_path/language/
-        start_line/end_line/code/callees/callers；或 None（调用方返回 404）
+        spec §3 的 dict；**即使源码文件读不到，也返回 dict 且 code=""**（让前端显示"源码不可用"+元数据，而非 404）。
+        返回 None 表示无可用源码：entity 未解析出（resolve_first→None），或 file_path 越界/
+        repo_local_path 为空（resolve_safe_path 抛 ValueError）。
+        注：repo_local_path 为空时此处返 None，但路由层应在调用本函数前先判 repo_local_path 是否配置、
+        返更贴切的状态码，避免与"实体未找到"混淆。
 
     Examples:
         >>> out = build_snippet_response(adapter, "/repos/mall-swarm", "Ctrl::method#(Long)")

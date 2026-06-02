@@ -58,3 +58,17 @@ def test_build_none_when_path_escapes(tmp_path):
     class _EscapeNode(_Node):
         file_path = "../../etc/passwd"
     assert build_snippet_response(_Adapter(_EscapeNode()), str(tmp_path), "X::y#()") is None
+
+
+def test_build_empty_code_when_file_missing(tmp_path):
+    """源码文件不存在 → read_snippet 返 ''；仍返回 dict（code=''）而非 None，让前端显示空片段。"""
+    node = _Node()
+    node.file_path = "nonexistent/Foo.java"   # tmp_path 下不存在该文件
+    out = build_snippet_response(_Adapter(node), str(tmp_path), "X::y#()")
+    assert out is not None                     # 文件读不到不代表实体不存在 → 仍返 dict
+    assert out["code"] == ""                   # 空片段，前端可显示"源码不可用"
+
+
+def test_lang_properties_is_ini():
+    """.properties → ini（最不直观的一条映射，单独锁住）。"""
+    assert _lang_from_path("a/app.properties") == "ini"
