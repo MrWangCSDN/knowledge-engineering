@@ -12,8 +12,9 @@
 """
 from __future__ import annotations
 
-# 标准库：命令行解析
+# 标准库：命令行解析 + 读环境变量（Weaviate 连接与 ke-api 同源）
 import argparse
+import os
 
 # 新增主体：CodeGraph → StructureFacts
 from src.knowledge.codegraph_facts_provider import CodeGraphFactsProvider
@@ -57,20 +58,20 @@ def _build_llm(config_path: str):
     return LLMProviderFactory.from_method_interpretation(mi).provider
 
 
-def _build_store(config_path: str, project_id: str) -> _TenantBoundStore:
-    """构建绑定 project tenant 的解读库 store（集合用默认 TopologicalInterpretation）。"""
-    from src.pipeline.config_bootstrap import load_config
-    config = load_config(config_path)
-    vc = config.knowledge.vectordb_interpret
-    # 维度优先取配置；缺省 1024（DashScope text-embedding-v4）
-    dim = int(vc.dimension) if vc.dimension else 1024
+def _build_store(project_id: str) -> _TenantBoundStore:
+    """构建绑定 project tenant 的解读库 store。
+
+    Weaviate 连接走 **os.environ**（与 ke-api 的 _try_connect_backends 同源），确保批量写到
+    QA 实际读取的同一 Weaviate 实例；**不取 config/project.yaml 的 weaviate_url**——实测服务器上
+    project.yaml=localhost:8080 而 .env WEAVIATE_URL=真实地址，取 config 会写错实例、QA 读不到。
+    集合用基类默认 TopologicalInterpretation。
+    """
     return _TenantBoundStore(
         tenant=project_id,
-        url=vc.weaviate_url,
-        grpc_port=int(vc.weaviate_grpc_port or 50051),
-        dimension=dim,
-        api_key=vc.weaviate_api_key,
-        # 不传 collection_name：用基类默认 TopologicalInterpretation（避免 config 残留旧名 MethodInterpretation）
+        url=os.environ.get("WEAVIATE_URL", "http://localhost:8080"),
+        grpc_port=int(os.environ.get("WEAVIATE_GRPC_PORT", "50051")),
+        dimension=int(os.environ.get("WEAVIATE_DIMENSION", "1024")),
+        api_key=os.environ.get("WEAVIATE_API_KEY") or None,
     )
 
 
@@ -81,9 +82,9 @@ def build_and_run(*, db_path: str, repo_path: str, project_id: str,
     # 1. CodeGraph → StructureFacts（entity.id = qualified_name）
     provider = CodeGraphFactsProvider(db_path=db_path, repo_local_path=repo_path)
     facts = provider.build_structure_facts(module_filter=modules)
-    # 2. LLM + tenant-bound store（写到 project tenant）
+    # 2. LLM（走 config 的 method_interpretation backend）+ tenant-bound store（Weaviate 走 env，写到 project tenant）
     llm = _build_llm(config_path)
-    store = _build_store(config_path, project_id)
+    store = _build_store(project_id)
     # 3. 注入零改动复用的拓扑解读器；embedding_dim/language/llm_timeout 用默认（mall-swarm: 1024/zh/90）
     interp = TopologicalInterpreter(
         structure_facts=facts,
