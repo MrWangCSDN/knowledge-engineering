@@ -30,6 +30,7 @@ from src.service.qa_engine.prompts import (
     with_memory_block,
 )
 from src.service.qa_engine.retriever import RetrievedContext
+from src.knowledge.recall_rerank import is_callchain_noise
 
 # 模块级 logger；输出 call_chain 修复成功/失败的诊断信息
 log = logging.getLogger(__name__)
@@ -509,8 +510,6 @@ class QASynthesizer:
 # 已召回到调用链（ctx.call_edges_by_entry，C2 产出的多跳保边）但 LLM 没产出 call_chain 段时，
 # 后端用这些边确定性构造一段，保证流程类问题出 ReactFlow——不赌 LLM 是否"愿意"画。
 
-# 框架返回包装等噪声类（画进调用图无意义，过滤掉）
-_CALLCHAIN_NOISE_CLASSES = {"CommonResult", "IErrorCode"}
 # 注入图的节点上限（控图大小 + payload 体积）
 _CALLCHAIN_MAX_NODES = 18
 
@@ -536,9 +535,29 @@ def _cc_class_of(entity_id: str) -> str:
 
 
 def _cc_is_noise(entity_id: str) -> bool:
-    """是否框架噪声类（CommonResult / IErrorCode 等，按短类名判定）。"""
-    cls = _cc_class_of(entity_id).rsplit(".", 1)[-1]  # 取短类名（去包名）
-    return cls in _CALLCHAIN_NOISE_CLASSES
+    """是否调用图噪声（getter/setter、MyBatis Example/CRUD、结果包装类）。
+
+    复用召回降噪的 is_callchain_noise（[[召回降噪加权-设计]]），与 retriever._bfs_edges
+    同一口径——BFS 已过滤一道，这里作为注入侧的二次防线（也兜 LLM 段未走 BFS 的情况）。
+    """
+    return is_callchain_noise(entity_id)
+
+
+def _cc_kind(entity_id: str) -> str:
+    """按类名后缀推断节点角色（前端 MethodNode 据此着色 + 图标，区分调用分层）。
+
+    Controller→controller(🌐蓝)、ServiceImpl/Service→service(⚙️绿)、
+    Mapper/Dao→mapper(💾琥珀)、其余→method(⚡灰)。
+    """
+    cls = _cc_class_of(entity_id).rsplit(".", 1)[-1]  # 短类名（去包名）
+    if cls.endswith("Controller"):
+        return "controller"
+    # ServiceImpl 也以 "Service" 收尾前先判 Impl，二者都归 service 层（同绿色）
+    if cls.endswith("ServiceImpl") or cls.endswith("Service"):
+        return "service"
+    if cls.endswith("Mapper") or cls.endswith("Dao"):
+        return "mapper"
+    return "method"
 
 
 def _build_call_chain_section_from_edges(
@@ -585,9 +604,10 @@ def _build_call_chain_section_from_edges(
     kept_edges = [e for e in edges_out if e["from"] in keep and e["to"] in keep]
     if not kept_edges:
         return None
-    # 节点：id=实体 id（与 edges from/to 一致）；label=短方法名；classOf=类全名（前端 hover 显示）
+    # 节点：id=实体 id（与 edges from/to 一致）；label=短方法名；classOf=类全名（前端 hover 显示）；
+    # kind=按类名后缀推断的分层角色（前端据此着色+图标，区分 Controller/Service/Mapper 层）
     nodes = [
-        {"id": nid, "label": _cc_label(nid), "classOf": _cc_class_of(nid)}
+        {"id": nid, "label": _cc_label(nid), "classOf": _cc_class_of(nid), "kind": _cc_kind(nid)}
         for nid in node_order if nid in keep
     ]
 

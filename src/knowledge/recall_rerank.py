@@ -107,6 +107,38 @@ def classify_entity(entity_id: str) -> str:
     return "neutral"
 
 
+# 结果包装 / 错误码类：方法本身不承载业务逻辑（封装返回值），画进调用图是噪声。
+# classify_entity 会把它们归为 neutral（类名不带 Controller/Service/Example 后缀），
+# 故调用链降噪要单独按短类名补判一道。
+_RESULT_WRAPPER_CLASSES: frozenset[str] = frozenset({"CommonResult", "IErrorCode"})
+
+
+def is_callchain_noise(entity_id: str) -> bool:
+    """调用链 / 可视化降噪：判断该实体是否为「不该出现在调用图里的管道/样板节点」。
+
+    复用 classify_entity 的四分类，避免重复维护噪声规则：
+      - drop（XxxExample 条件类 / Base_Column_List）+ demote（getter/setter / *ByExample 生成 CRUD）
+        都属管道噪声——MyBatis 样板 + 属性访问，不承载业务步骤。
+      - 额外按短类名补判结果包装类（CommonResult / IErrorCode）。
+      - boost（Controller/Service/ServiceImpl）/ neutral（Mapper insert 等真实操作）→ 不是噪声。
+
+    与召回降噪的区别：召回里 demote 是「降权保留」（还有参考价值），但调用**图**里这些节点
+    纯属视觉噪声，应直接剔除，故这里把 demote 也算 noise。
+
+    Args:
+        entity_id: qualified_name（com.pkg.Class::method#(params)）
+    Returns:
+        True=噪声，应从调用图剔除；空串 / 格式异常 → False（保守保留，不误删业务）
+    """
+    # 复用召回降噪分类：drop / demote 即为样板 + 访问器噪声
+    if classify_entity(entity_id) in ("drop", "demote"):
+        return True
+    # 结果包装类：同 classify_entity 的解析口径取短类名再判
+    head = (entity_id or "").split("#", 1)[0]
+    simple_class = head.partition("::")[0].rsplit(".", 1)[-1]
+    return simple_class in _RESULT_WRAPPER_CLASSES
+
+
 def rerank_and_filter(
     hits: list[tuple[str, float]],
     limit: int,

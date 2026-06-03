@@ -18,6 +18,7 @@ from typing import Any, Protocol
 # 召回 query 预处理（快赢 A）：剥离渲染指令/口水，仅用于召回向量化
 # 设计 [[召回链路缺陷诊断与修复方案]] 快赢 A
 from src.service.qa_engine.query_preprocess import clean_recall_query
+from src.knowledge.recall_rerank import is_callchain_noise
 
 
 # ─── 结构类型（Protocol）─ 不导入主仓，只定义"接口"────────────────────────
@@ -298,6 +299,11 @@ class QARetriever:
                     # 节点查不到 / 图后端异常：跳过该节点，不中断整体
                     children = []
                 for child in children:
+                    # 降噪：getter/setter、MyBatis Example/CRUD、结果包装类等是调用图噪声，
+                    # 直接跳过——既不画进图，也不消耗有限的 max_edges 预算（把预算留给业务调用，
+                    # 否则 ServiceImpl 一上来调一串 setter 就把额度吃光，真业务调用反被截断）。
+                    if is_callchain_noise(child):
+                        continue
                     edges.append((node, child))      # 保边：node → child
                     if len(edges) >= max_edges:
                         return edges                 # 达边数上限即停（防爆）

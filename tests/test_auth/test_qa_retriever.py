@@ -147,3 +147,36 @@ async def test_retrieve_graph_failure_does_not_crash(mock_interpretation_store):
     # （实现里要 try/except）
 
 
+# ───────── _bfs_edges 调用链降噪（调用图质量优化）─────────
+
+
+def test_bfs_edges_skips_noise_children():
+    """BFS 多跳保边时跳过 getter/setter / MyBatis 噪声子节点，
+    把 max_edges 预算留给业务调用（[[召回链路缺陷诊断与修复方案]] 调用链图质量优化）。"""
+    # 业务入口 → [业务Service, setter噪声]；业务Service → [setter噪声, Mapper.insert]
+    succ = {
+        "com.x.controller.MemberController::register#(p)": [
+            "com.x.service.MemberService::register#(p)",
+            "com.x.model.UmsMember::setStatus#(Integer)",  # accessor 噪声
+        ],
+        "com.x.service.MemberService::register#(p)": [
+            "com.x.model.UmsMember::setPassword#(String)",  # accessor 噪声
+            "com.x.mapper.MemberMapper::insert#(m)",        # 业务 DB 写
+        ],
+    }
+    g = MagicMock()
+    g.successors.side_effect = lambda n: succ.get(n, [])
+    r = QARetriever(interpretation_store=MagicMock(), graph=g)
+    edges = r._bfs_edges(
+        "com.x.controller.MemberController::register#(p)", max_depth=2, max_edges=25
+    )
+    pairs = set(edges)
+    # 业务边保留（含多跳）
+    assert ("com.x.controller.MemberController::register#(p)",
+            "com.x.service.MemberService::register#(p)") in pairs
+    assert ("com.x.service.MemberService::register#(p)",
+            "com.x.mapper.MemberMapper::insert#(m)") in pairs
+    # setter 噪声子节点的边被跳过
+    assert not any("setStatus" in to or "setPassword" in to for (_f, to) in edges)
+
+

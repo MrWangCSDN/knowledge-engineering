@@ -52,6 +52,26 @@ def test_build_call_chain_filters_noise_and_preserves_edges():
     assert "create" in labels and "insert" in labels
 
 
+def test_build_call_chain_sets_kind_and_filters_accessor_noise():
+    """节点按类名后缀推断 kind（前端据此着色+图标）；setter 等访问器噪声被过滤。"""
+    edges = {
+        "X::create": [
+            ("com.x.controller.OmsController::create", "com.x.service.impl.OmsServiceImpl::create"),
+            ("com.x.service.impl.OmsServiceImpl::create", "com.x.model.OmsOrder::setStatus#(Integer)"),  # accessor 噪声
+            ("com.x.service.impl.OmsServiceImpl::create", "com.x.mapper.OmsMapper::insert#(o)"),
+        ],
+    }
+    sec = _build_call_chain_section_from_edges(edges)
+    data = json.loads(sec["content"])
+    nodes = {n["id"]: n for n in data["nodes"]}
+    # accessor 噪声节点被过滤（不在图里）
+    assert not any("setStatus" in nid for nid in nodes)
+    # kind 按类名后缀推断：Controller→controller、ServiceImpl→service、Mapper→mapper
+    assert nodes["com.x.controller.OmsController::create"]["kind"] == "controller"
+    assert nodes["com.x.service.impl.OmsServiceImpl::create"]["kind"] == "service"
+    assert nodes["com.x.mapper.OmsMapper::insert#(o)"]["kind"] == "mapper"
+
+
 def test_build_call_chain_none_when_empty_or_all_noise():
     """无边 / 全是框架噪声 → 返回 None（不注入空图）。"""
     assert _build_call_chain_section_from_edges({}) is None
