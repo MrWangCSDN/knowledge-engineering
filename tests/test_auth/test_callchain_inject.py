@@ -70,6 +70,9 @@ def test_build_call_chain_sets_kind_and_filters_accessor_noise():
     assert nodes["com.x.controller.OmsController::create"]["kind"] == "controller"
     assert nodes["com.x.service.impl.OmsServiceImpl::create"]["kind"] == "service"
     assert nodes["com.x.mapper.OmsMapper::insert#(o)"]["kind"] == "mapper"
+    # entityId 带 method:// scheme（前端 EntityRef 据此点击跳源码；后端 resolve_first 会剥 scheme）
+    assert nodes["com.x.controller.OmsController::create"]["entityId"] == "method://com.x.controller.OmsController::create"
+    assert nodes["com.x.mapper.OmsMapper::insert#(o)"]["entityId"] == "method://com.x.mapper.OmsMapper::insert#(o)"
 
 
 def test_build_call_chain_none_when_empty_or_all_noise():

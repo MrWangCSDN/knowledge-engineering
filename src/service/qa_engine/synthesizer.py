@@ -605,9 +605,16 @@ def _build_call_chain_section_from_edges(
     if not kept_edges:
         return None
     # 节点：id=实体 id（与 edges from/to 一致）；label=短方法名；classOf=类全名（前端 hover 显示）；
-    # kind=按类名后缀推断的分层角色（前端据此着色+图标，区分 Controller/Service/Mapper 层）
+    # kind=按类名后缀推断的分层角色（前端据此着色+图标）；entityId=method:// scheme（前端 EntityRef
+    # 据此点击跳源码、复用代码片段抽屉；后端 resolve_first 解析时会剥掉 scheme）。
     nodes = [
-        {"id": nid, "label": _cc_label(nid), "classOf": _cc_class_of(nid), "kind": _cc_kind(nid)}
+        {
+            "id": nid,
+            "label": _cc_label(nid),
+            "classOf": _cc_class_of(nid),
+            "kind": _cc_kind(nid),
+            "entityId": f"method://{nid}",
+        }
         for nid in node_order if nid in keep
     ]
 

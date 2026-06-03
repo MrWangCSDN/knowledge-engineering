@@ -24,6 +24,17 @@ def test_predecessors_returns_durable_keys(tmp_path):
     assert "OmsCtrl::generateOrder#(OrderParam)" in out
 
 
+def test_resolve_first_tolerates_ke_scheme(tmp_path):
+    """resolve_first 容忍 entityId 带 ke:// scheme（method://...）：剥 scheme 后按 qualified_name 解析，
+    与裸 qualified_name 命中同一节点。调用图节点注入的 entityId 带 method:// scheme，点击跳源码依赖此容错。"""
+    a = _adapter(tmp_path)
+    bare = a.resolve_first("OmsCtrl::generateOrder#(OrderParam)")
+    schemed = a.resolve_first("method://OmsCtrl::generateOrder#(OrderParam)")
+    assert bare is not None
+    assert schemed is not None
+    assert schemed.id == bare.id  # 剥 scheme 后命中同一节点
+
+
 def test_missing_db_degrades_to_empty():
     # 库文件不存在时，导航优雅降级为空列表（不抛异常）—— 对齐设计 §8
     from src.integrations.codegraph.db import CodeGraphDB

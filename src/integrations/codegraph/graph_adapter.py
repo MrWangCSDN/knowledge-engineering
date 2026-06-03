@@ -45,15 +45,20 @@ class CodeGraphGraphAdapter:
         Returns:
             匹配的 CgNode 列表
         """
+        # 先剥 ke:// scheme（如 'method://Cls::m#(p)' → 'Cls::m#(p)'）：调用图节点/前端 EntityRef
+        # 传入的 entityId 带 'method://' 等 scheme，而 qualified_name 列里不含它。split('://',1)[-1]
+        # 对裸 qualified_name（'Cls::m'，含 '::' 但不含 '://'）无副作用，对带 scheme 的精确剥离。
+        without_scheme = entity_id.split("://", 1)[-1]
         # split('#', 1)：最多切 1 刀，[0] 取 '#' 前的 qualified_name 部分
-        qn = entity_id.split("#", 1)[0]
+        qn = without_scheme.split("#", 1)[0]
         # 按 qualified_name 精确查找所有候选节点（可能包含重载）
         cands = self._db.find_nodes_by_qualified_name(qn)
         if len(cands) <= 1:             # 唯一或无结果 → 直接返回，无需精筛
             return cands
         # 多个候选（重载场景）：用完整 durable_key 再过滤一次
-        # 列表推导式：保留 durable_key(n) 与传入 entity_id 完全匹配的节点
-        exact = [n for n in cands if durable_key(n) == entity_id]
+        # 列表推导式：保留 durable_key(n) 与去 scheme 后的 entity_id 完全匹配的节点
+        # （用 without_scheme 而非 entity_id：durable_key 不含 scheme，否则带 scheme 时精筛恒空）
+        exact = [n for n in cands if durable_key(n) == without_scheme]
         # or 短路：精筛有结果则用精筛结果；否则退回全部候选（防漏）
         return exact or cands
 
