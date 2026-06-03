@@ -233,6 +233,8 @@ class QASynthesizer:
         # 2.5（2026-06-02）：call_chain JSON schema 校验 + 1 次 LLM retry 自修
         # feature flag KE_CALLCHAIN_AUTO_REPAIR（默认 on）；失败时保留原 content 走前端兜底
         sections = await self._repair_call_chain_sections(sections)
+        # Fix-2：LLM 没产出 call_chain 但召回到调用链 → 用 ctx 的多跳边确定性注入一段（必出 ReactFlow）
+        sections = _ensure_call_chain_section(sections, ctx)
 
         # 3. 估算 token usage（粗算，W8 后端再补真实值）
         # 注：memory_block 未计入 token 估算（P1 有意为之；token_usage 本就是粗算，
@@ -312,6 +314,8 @@ class QASynthesizer:
         # 流式 emit 已经把 raw_stream token 推给前端；retry 在 done 之前发生，
         # 前端拿到 final sections 后会自动用 hasSections 分支覆盖 raw_stream 渲染
         sections = await self._repair_call_chain_sections(sections)
+        # Fix-2：同非流式路径——无 call_chain 段则用 ctx 多跳边确定性注入
+        sections = _ensure_call_chain_section(sections, ctx)
         # 注：memory_block 未计入 token 估算（P1 有意为之；token_usage 本就是粗算，
         # 见 [[记忆系统-设计]] P1）。后续接计费/配额时需显式补上。
         approx_tokens = _estimate_tokens(SYSTEM_PROMPT, user_prompt, raw)
@@ -501,11 +505,127 @@ class QASynthesizer:
 
 # ─── 工具 ───────────────────────────────────────────────────────────────────
 
+# ─── Fix-2：确定性 call_chain 注入（[[召回链路缺陷诊断与修复方案]]）──────────────
+# 已召回到调用链（ctx.call_edges_by_entry，C2 产出的多跳保边）但 LLM 没产出 call_chain 段时，
+# 后端用这些边确定性构造一段，保证流程类问题出 ReactFlow——不赌 LLM 是否"愿意"画。
+
+# 框架返回包装等噪声类（画进调用图无意义，过滤掉）
+_CALLCHAIN_NOISE_CLASSES = {"CommonResult", "IErrorCode"}
+# 注入图的节点上限（控图大小 + payload 体积）
+_CALLCHAIN_MAX_NODES = 18
+
+
+def _cc_head(entity_id: str) -> str:
+    """去掉 '#(params)' 取 'Class::method' 部分。"""
+    # split('#', 1)[0]：'#' 前是 qualified_name 主体
+    return (entity_id or "").split("#", 1)[0]
+
+
+def _cc_label(entity_id: str) -> str:
+    """实体 id → 短方法名（去类名/参数），作节点展示 label。"""
+    head = _cc_head(entity_id)
+    # split('::')[-1]：取最后一段方法名；'or head' 兜底空串
+    return head.split("::")[-1] or head
+
+
+def _cc_class_of(entity_id: str) -> str:
+    """实体 id → 类全名（'Class::method' 的 Class 部分）。"""
+    head = _cc_head(entity_id)
+    # rsplit('::', 1)[0]：从右切一刀取类名部分；无 '::' 返回 ''
+    return head.rsplit("::", 1)[0] if "::" in head else ""
+
+
+def _cc_is_noise(entity_id: str) -> bool:
+    """是否框架噪声类（CommonResult / IErrorCode 等，按短类名判定）。"""
+    cls = _cc_class_of(entity_id).rsplit(".", 1)[-1]  # 取短类名（去包名）
+    return cls in _CALLCHAIN_NOISE_CLASSES
+
+
+def _build_call_chain_section_from_edges(
+    call_edges_by_entry: dict | None,
+    max_nodes: int = _CALLCHAIN_MAX_NODES,
+) -> dict | None:
+    """用 ctx.call_edges_by_entry 的多跳边确定性构造一个 call_chain 段。
+
+    Args:
+        call_edges_by_entry: {entry_id: [(from_id, to_id), ...]}（C2 产出）
+        max_nodes: 节点上限（截断控图大小）
+    Returns:
+        {"type":"call_chain","title":"调用链路","content":<CallChain JSON 字符串>}；
+        无可用边（空 / 全是框架噪声 / 截断后无边）→ None（不注入空图）。
+    """
+    if not call_edges_by_entry:
+        return None
+
+    node_order: list[str] = []                 # 节点首次出现顺序（截断时保前面的）
+    node_set: set[str] = set()
+    edges_out: list[dict] = []
+    seen_edges: set[tuple[str, str]] = set()    # 边去重
+
+    # 汇总所有 entry 的边：去重 + 过滤框架噪声
+    for edges in call_edges_by_entry.values():
+        for frm, to in edges:
+            if _cc_is_noise(frm) or _cc_is_noise(to):
+                continue
+            key = (frm, to)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            edges_out.append({"from": frm, "to": to})
+            for nid in (frm, to):
+                if nid not in node_set:
+                    node_set.add(nid)
+                    node_order.append(nid)
+
+    if not edges_out:
+        return None
+
+    # 截断节点控图大小：保留前 max_nodes 个；只留两端都在保留集内的边（避免悬挂边）
+    keep = set(node_order[:max_nodes])
+    kept_edges = [e for e in edges_out if e["from"] in keep and e["to"] in keep]
+    if not kept_edges:
+        return None
+    # 节点：id=实体 id（与 edges from/to 一致）；label=短方法名；classOf=类全名（前端 hover 显示）
+    nodes = [
+        {"id": nid, "label": _cc_label(nid), "classOf": _cc_class_of(nid)}
+        for nid in node_order if nid in keep
+    ]
+
+    # content 为合法 CallChain JSON 字符串（不包 ```json fence），与前端 tryParseCallChain 对齐
+    content = json.dumps({"nodes": nodes, "edges": kept_edges}, ensure_ascii=False)
+    return {"type": "call_chain", "title": "调用链路", "content": content}
+
+
+def _ensure_call_chain_section(sections: list[dict], ctx) -> list[dict]:
+    """Fix-2：sections 无 call_chain 段、但 ctx 有多跳调用边 → 确定性注入一段。
+
+    插入位置：entry_point 段之后（自然位置）> overview 之后 > 末尾。
+    已有 call_chain 段（LLM 自己产出）→ 原样返回，不重复注入。
+    """
+    if any(s.get("type") == "call_chain" for s in sections):
+        return sections
+    built = _build_call_chain_section_from_edges(getattr(ctx, "call_edges_by_entry", None))
+    if built is None:
+        return sections
+    # 找插入锚点：entry_point 之后 > overview 之后 > append
+    idx = next((i for i, s in enumerate(sections) if s.get("type") == "entry_point"), None)
+    if idx is None:
+        idx = next((i for i, s in enumerate(sections) if s.get("type") == "overview"), None)
+    if idx is None:
+        sections.append(built)
+    else:
+        sections.insert(idx + 1, built)
+    return sections
+
+
 def _ctx_to_dict(ctx: RetrievedContext) -> dict:
     """RetrievedContext → 给 prompts.build_user_prompt 用的 dict。"""
     return {
         "entry_candidates": ctx.entry_candidates,
         "callees_by_entry": ctx.callees_by_entry,
+        # C2/Fix-2：多跳调用边——build_user_prompt 的「调用链路」块 + 确定性注入都需要它。
+        # 之前漏带（C2 gap）→ prompt 调用链块在生产里一直空 → LLM 看不到多跳边。getattr 兼容旧实例。
+        "call_edges_by_entry": getattr(ctx, "call_edges_by_entry", {}),
         "callers_by_entry": ctx.callers_by_entry,
         "table_access_by_entry": ctx.table_access_by_entry,
         # v1.1：把 skill_id 一并送下去，build_user_prompt 据此加视角偏置提示
