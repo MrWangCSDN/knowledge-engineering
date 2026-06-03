@@ -52,9 +52,11 @@ def _build_llm(config_path: str):
     from src.pipeline.config_bootstrap import load_config
     from src.knowledge.llm import LLMProviderFactory
     config = load_config(config_path)
-    # method_interpretation 配置段携带 LLM backend 选择
-    mi = config.knowledge.method_interpretation
-    # from_method_interpretation 解析 backend；.provider 是可调用的 LLM 句柄
+    # 解读 LLM backend 配置段：拓扑解读统一化后字段名是 topological_interpretation
+    # （旧名 method_interpretation 已重命名；run_topological_interpret.py 是 stale 未更新）。
+    # 工厂方法 from_method_interpretation 名字未改，但它收的就是 TopologicalInterpretationConfig。
+    mi = config.knowledge.topological_interpretation
+    # .provider 是可调用的 LLM 句柄（与 method_interpretation_runner.py:224 同源）
     return LLMProviderFactory.from_method_interpretation(mi).provider
 
 
