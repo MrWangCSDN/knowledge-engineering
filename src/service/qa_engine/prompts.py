@@ -316,9 +316,17 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
 
     # 1. 候选入口方法
     candidates = context.get("entry_candidates") or []
+    # source-first grounding P1（[[业务问答-源码优先接地-P1设计]]）：候选真实源码 {entity_id: 源码}
+    code_snippets = context.get("candidate_code_snippets") or {}
     if candidates:
         parts.append("")
         parts.append("候选入口方法（按相关度倒序）:")
+        # 框架句：仅当至少有一个候选附了真实源码时加，重定位"代码细节以源码为准、2b 解读仅业务提示"
+        if code_snippets:
+            parts.append(
+                "  （注：以下候选凡附【真实源码片段】的，代码细节——SQL/表名/字段/存储技术/方法调用/状态码"
+                "——一律以源码为准，2b 业务说明仅作业务提示、不可当代码事实；引用仍用 entity_id。）"
+            )
         # 取前 N 个候选渲染给 LLM（快赢 B：上限 TOP_CANDIDATES_FOR_PROMPT=10）。
         # 渲染循环与下方模块指引守卫共用同一份切片，避免两处不同步（DRY）。
         top_candidates = candidates[:TOP_CANDIDATES_FOR_PROMPT]
@@ -336,6 +344,15 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
             mod_str = f"  (模块: {module})" if module else ""
             parts.append(f"  {i}. {entity_id}  [level={level}]{mod_str}")
             parts.append(f"     业务说明: {summary}")
+            # source-first grounding P1：该候选预读到真实源码 → 附上（代码细节以此为准）
+            snippet = code_snippets.get(entity_id)
+            if snippet:
+                parts.append("     【真实源码片段】(代码细节以此为准):")
+                parts.append("     ```")
+                # 逐行缩进对齐候选块（splitlines 按行切，不保留行尾换行）
+                for line in snippet.splitlines():
+                    parts.append(f"     {line}")
+                parts.append("     ```")
         # 模块判断指引：仅当至少一个候选带有 module 时追加，让 LLM 按 module 判前台/后台
         # any() 是内置函数，可迭代对象有任意一个真值即返回 True
         if any(c.get("module") for c in top_candidates):
