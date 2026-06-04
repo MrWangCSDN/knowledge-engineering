@@ -195,6 +195,55 @@ class WeaviateTopologicalInterpretStore(BaseWeaviateStore):
         except Exception:
             return None
 
+    def get_by_entity_with_tenant(
+        self, entity_id: str, *, tenant: str, level: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """按 method_entity_id 在**指定 tenant 分区**内取一条解读（tenant-aware 版 get_by_method_id）。
+
+        背景：2b 解读写在 project tenant 分区（Weaviate multi-tenancy），而普通 get_by_method_id
+        走默认（无 tenant）分区 → 取不到 tenant 数据。adapter.get_by_entity 自 Task 23 起优先调本方法
+        （此前主仓未实现 → adapter 一路 fallback 到不存在的 get_by_entity → 返 None，导致逻辑图中文化
+        富集失败 summaries=0）。本方法补齐该约定。
+
+        Args:
+            entity_id: 方法持久 id（qualified_name#params），用 variants 兼容格式差异
+            tenant: project_id（= Weaviate tenant 分区名）
+            level: 预留（解读库无层级过滤），保留签名与 adapter 调用兼容
+        Returns:
+            解读 dict（含 interpretation_text / context_summary 等），无命中/异常 → None
+        """
+        if not entity_id or not self._client:
+            return None
+        try:
+            # Filter：按属性精确过滤；与 get_by_method_id 同款查询
+            from weaviate.classes.query import Filter
+
+            # 关键区别：.with_tenant(tenant) 把查询限定到 project 分区（与 search 同口径）
+            coll = self._get_collection().with_tenant(tenant)
+            # method_entity_id_variants：兼容 id 格式差异（带/不带包名、带/不带参数签名）
+            for mid_try in method_entity_id_variants(entity_id):
+                result = coll.query.fetch_objects(
+                    filters=Filter.by_property("method_entity_id").equal(mid_try),
+                    limit=1,
+                )
+                for obj in result.objects:
+                    p = obj.properties or {}
+                    return {
+                        "method_entity_id": p.get("method_entity_id", mid_try),
+                        "method_name": p.get("method_name", ""),
+                        "signature": p.get("signature", ""),
+                        "interpretation_text": p.get("interpretation_text", ""),
+                        "class_entity_id": p.get("class_entity_id", ""),
+                        "class_name": p.get("class_name", ""),
+                        "language": p.get("language", ""),
+                        "context_summary": p.get("context_summary", ""),
+                        "related_entity_ids_json": p.get("related_entity_ids_json", ""),
+                    }
+            return None
+        except Exception:
+            # 与 get_by_method_id 同样静默降级（tenant 不存在/网络/解析异常都返 None）
+            return None
+
     def count(self) -> int:
         """返回 collection 中的对象总数，用于显示真实解读进度。"""
         if not self._client:
