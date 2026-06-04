@@ -22,6 +22,36 @@ from src.knowledge.recall_rerank import is_callchain_noise
 from src.service.qa_engine.semantic_rerank import should_rerank, rerank_candidates
 
 
+# ─── source-first grounding P1（[[业务问答-源码优先接地-P1设计]]）───────────────
+# 源码预读上限：整方法全文，仅病态超大方法才截断（1M 上下文窗口下常规方法 token 可忽略）。
+# 大方法（generateOrder/calcCartPromotion 等 100-150 行）正是 eval 臆造重灾区，给全文才有接地意义。
+_SNIPPET_MAX_LINES = 300   # 行数上限
+_SNIPPET_MAX_CHARS = 8000  # 字符上限（兜底防超长单行）
+
+
+def _truncate_snippet(snippet: str, max_lines: int = _SNIPPET_MAX_LINES,
+                      max_chars: int = _SNIPPET_MAX_CHARS) -> str:
+    """整方法全文返回；仅当超 max_lines 行或 max_chars 字才截断 + 标注。
+
+    标注提示 agent 可调 ke_read_entity 取全文，避免它对截断处的代码尾部臆测。
+
+    Args:
+        snippet: 真实源码片段
+        max_lines / max_chars: 截断阈值（病态巨型方法兜底）
+    Returns:
+        原文（常规方法）或「截断片段 + 标注行」（超大方法）
+    """
+    # str.splitlines()：按行切成列表（不保留行尾换行符）；len 即行数
+    lines = snippet.splitlines()
+    # 行数与字符数都在上限内 → 常规方法，原样全文返回
+    if len(lines) <= max_lines and len(snippet) <= max_chars:
+        return snippet
+    # 超限：先按行截到 max_lines，再按字符兜底截到 max_chars（防超长单行）
+    kept = "\n".join(lines[:max_lines])[:max_chars]
+    # 末尾附标注：告知原始行数 + 取全文途径（f-string 内联变量）
+    return kept + f"\n…（已截断，原方法共 {len(lines)} 行，调 ke_read_entity 取全文）"
+
+
 # ─── 结构类型（Protocol）─ 不导入主仓，只定义"接口"────────────────────────
 
 class InterpretationStoreProto(Protocol):
@@ -85,6 +115,11 @@ class RetrievedContext:
     """{ entity_id: 2b中文业务解读(截断) }。逻辑图中文化（[[逻辑图中文化-设计]] §4.1）：
     为 call_edges_by_entry 涉及的真实方法富集 2b 解读，喂 LLM 写准确的中文业务标签。"""
 
+    candidate_code_snippets: dict[str, str] = field(default_factory=dict)
+    """{ entity_id: 真实方法源码(整方法全文，仅病态超大截断) }。source-first grounding P1
+    （[[业务问答-源码优先接地-P1设计]]）：召回后预读 top-3 候选真实源码注入 prompt，
+    治 agent/6段 自由展开代码细节（SQL/表名/字段/存储技术/方法调用/状态码）时的臆造。"""
+
 
 # ─── 检索器 ─────────────────────────────────────────────────────────────────
 
@@ -106,6 +141,8 @@ class QARetriever:
     # （覆盖下单/退货等主链）；边数上限防 BFS 爆炸 + 控 prompt 体积。
     CHAIN_DEPTH = 2
     MAX_CHAIN_EDGES = 25
+    # source-first grounding P1：源码预读只取 top-K 候选（锚定方法几乎总在 top-3；控成本）
+    _TOP_K_FOR_SNIPPET = 3
 
     def __init__(self, *, interpretation_store: InterpretationStoreProto, graph: GraphProto,
                  recall_threshold: float = 0.45):
@@ -177,6 +214,11 @@ class QARetriever:
                 # 单个候选查模块失败不影响其余候选与主检索；写 None 占位，保持字段存在
                 c["module"] = None
 
+        # source-first grounding（P1，[[业务问答-源码优先接地-P1设计]]）：预读 top-3 候选真实源码注入，
+        # 让 synthesizer 答代码细节（SQL/字段/存储/状态码）时有一手料、不臆造。
+        # 候选已在上方定稿（rerank + entry_candidates 赋值），本步只 enrich、不影响门控/排序。
+        self._enrich_candidate_snippets(ctx)
+
         # 只对 top-N 候选取调用链（控成本）
         for c in candidates[: self.TOP_N_FOR_CHAIN_EXPANSION]:
             entity_id = c.get("entity_id")
@@ -231,6 +273,37 @@ class QARetriever:
                 # 截断控 token（设计 §9：每条 ≤120 字）
                 ctx.callchain_node_summaries[mid] = text[:120]
         return ctx
+
+    def _enrich_candidate_snippets(self, ctx: RetrievedContext) -> None:
+        """给 top-3 候选预读真实方法源码，写入 ctx.candidate_code_snippets（source-first grounding P1）。
+
+        best-effort 设计：
+        - interpretation_store(composite) 无 get_code_snippet（旧实例）→ 整体跳过、不崩；
+        - 单候选取不到 / None / 异常 → 跳过该候选；
+        - 永不抛、不改候选顺序与召回门控（候选已在 retrieve 上方定稿）。
+
+        Args:
+            ctx: 召回上下文；就地写入 ctx.candidate_code_snippets[entity_id] = 截断后源码
+        """
+        # getattr 探测 composite 是否提供 get_code_snippet（旧实例/未升级时无此方法）；缺省 None
+        getter = getattr(self.interpretation_store, "get_code_snippet", None)
+        # callable 校验：拿到的不是可调用对象（如 None）→ 整体跳过预读
+        if not callable(getter):
+            return
+        # 切片只取 top-K 候选（list[:k] 不越界，长度不足时返回全部）
+        for c in ctx.entry_candidates[: self._TOP_K_FOR_SNIPPET]:
+            eid = c.get("entity_id")    # 安全取 entity_id，缺键返 None
+            if not eid:                 # 无 id 的脏候选跳过
+                continue
+            try:
+                snippet = getter(eid)   # composite.get_code_snippet 已 fail-soft（内部不抛）
+            except Exception:
+                # 双保险：即便 getter 实现异常也不打断召回主流程
+                snippet = None
+            if not snippet:             # None / 空串 → 该候选无源码，退回仅靠 2b 解读
+                continue
+            # 整方法全文写入；仅病态超大方法被 _truncate_snippet 截断 + 标注
+            ctx.candidate_code_snippets[eid] = _truncate_snippet(snippet)
 
     # 模块级编译过的正则（编译一次，多次使用）
     # 匹配："<英文标识符>" + 可选空格 + "表"

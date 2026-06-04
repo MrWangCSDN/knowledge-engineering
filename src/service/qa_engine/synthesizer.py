@@ -785,6 +785,9 @@ def _ctx_to_dict(ctx: RetrievedContext) -> dict:
         "call_edges_by_entry": getattr(ctx, "call_edges_by_entry", {}),
         # 逻辑图中文化（[[逻辑图中文化-设计]] §4.2）：调用链方法的 2b 中文解读，喂 LLM 写业务标签
         "callchain_node_summaries": getattr(ctx, "callchain_node_summaries", {}),
+        # source-first grounding P1（[[业务问答-源码优先接地-P1设计]]）：候选真实源码片段，
+        # build_user_prompt 渲染给 LLM 作代码事实依据（治代码细节臆造）。getattr 兼容旧实例。
+        "candidate_code_snippets": getattr(ctx, "candidate_code_snippets", {}),
         "callers_by_entry": ctx.callers_by_entry,
         "table_access_by_entry": ctx.table_access_by_entry,
         # v1.1：把 skill_id 一并送下去，build_user_prompt 据此加视角偏置提示
