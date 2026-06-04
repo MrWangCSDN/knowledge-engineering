@@ -19,6 +19,7 @@ from typing import Any, Protocol
 # 设计 [[召回链路缺陷诊断与修复方案]] 快赢 A
 from src.service.qa_engine.query_preprocess import clean_recall_query
 from src.knowledge.recall_rerank import is_callchain_noise
+from src.service.qa_engine.semantic_rerank import should_rerank, rerank_candidates
 
 
 # ─── 结构类型（Protocol）─ 不导入主仓，只定义"接口"────────────────────────
@@ -153,6 +154,12 @@ class QARetriever:
             question=question, project_id=project_id,
             skill_id="architecture", recall_score=top1,
         )
+        # 召回二次语义重排（[[召回二次重排-设计]]）：门控式护栏——cosine 不自信时才 gte-rerank
+        # 重排候选顺序。recall_score 已于上方用原始 cosine top1 算好（门控解耦，不受影响）；
+        # 这里只改候选呈现顺序（→ 影响 LLM 候选 + call-chain top-3 入口展开）。用原始 question
+        # 而非 recall_text（cross-encoder 吃完整意图）。rerank 内部 best-effort，失败回退原序。
+        if should_rerank(candidates):
+            candidates = rerank_candidates(question, candidates)
         # entry_candidates 存全量召回结果，synthesizer 可按需截断
         ctx.entry_candidates = candidates
 

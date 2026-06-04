@@ -230,6 +230,53 @@ async def test_retrieve_enrich_param_stripped_fallback():
     assert ctx.callchain_node_summaries.get("S::register#(String,String)") == "会员注册业务"
 
 
+# ───────── 召回二次语义重排接线（门控解耦）─────────
+
+
+@pytest.mark.asyncio
+async def test_retrieve_applies_rerank_but_keeps_recall_score(monkeypatch):
+    """architecture 分支：rerank 重排 entry_candidates 顺序，但 recall_score 仍=原始 cosine top1。"""
+    import src.service.qa_engine.retriever as rmod
+    bs = MagicMock()
+    bs.search_method_hits_by_text.return_value = [
+        {"entity_id": "M1", "level": "method", "summary_text": "x", "score": 0.7},
+        {"entity_id": "M2", "level": "method", "summary_text": "y", "score": 0.55},
+    ]
+    g = MagicMock()
+    g.successors.return_value = []
+    g.predecessors.return_value = []
+    g.module_of.return_value = None
+    # 强制 rerank，且把候选倒序作为"重排结果"
+    monkeypatch.setattr(rmod, "should_rerank", lambda c: True)
+    monkeypatch.setattr(rmod, "rerank_candidates", lambda q, c: list(reversed(c)))
+    r = QARetriever(interpretation_store=bs, graph=g, recall_threshold=0.45)
+    ctx = await r.retrieve(question="q", project_id="p", top_k=5)
+    # 门控解耦不变量：recall_score 仍是原始 cosine top1（0.7），不被 rerank 改
+    assert ctx.recall_score == 0.7
+    # entry_candidates 顺序来自 rerank（倒序 → M2, M1）
+    assert [c["entity_id"] for c in ctx.entry_candidates] == ["M2", "M1"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chitchat_skips_rerank(monkeypatch):
+    """chit-chat 分支（top1<0.45）不调 rerank。"""
+    import src.service.qa_engine.retriever as rmod
+    bs = MagicMock()
+    bs.search_method_hits_by_text.return_value = [{"entity_id": "M1", "score": 0.2}]
+    g = MagicMock()
+    called = {"n": 0}
+
+    def _spy(q, c):
+        called["n"] += 1
+        return c
+
+    monkeypatch.setattr(rmod, "rerank_candidates", _spy)
+    r = QARetriever(interpretation_store=bs, graph=g, recall_threshold=0.45)
+    ctx = await r.retrieve(question="你好", project_id="p", top_k=5)
+    assert ctx.skill_id == "chit-chat"
+    assert called["n"] == 0  # chit-chat 不进 architecture 分支 → 不 rerank
+
+
 @pytest.mark.asyncio
 async def test_retrieve_enrich_skips_missing_and_does_not_raise():
     """get_by_entity 返回 None 或抛异常的节点跳过，不阻断整体。"""
