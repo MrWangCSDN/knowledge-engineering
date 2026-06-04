@@ -23,6 +23,20 @@ from src.service.qa_engine.synthesizer import SynthesizedAnswer, QASynthesizer
 from src.service.qa_engine.tools.base import Tool, ToolNotFound, ToolRegistry
 
 
+def _tool_message_content(tool_output: dict[str, Any]) -> str:
+    """把工具结果序列化成要回灌 LLM 的 tool message content。
+
+    渲染类工具（结果含非空 'render' 字段）：只回 summary（一句话）。
+    原因：render.data 是给前端内联渲染的大块图 JSON，灌回 LLM 既费 token，
+    又会诱导模型用文字复述图。LLM 只需知道"图已渲染"即可自然衔接。
+    其余（调查类 / render=None 的无图情况）：照常全量 json.dumps 回灌。
+    """
+    # dict.get('render') 非空 → 渲染类，只回 summary（缺 summary 兜底一句）
+    if isinstance(tool_output, dict) and tool_output.get("render") is not None:
+        return json.dumps({"ok": True, "summary": tool_output.get("summary", "已渲染")}, ensure_ascii=False)
+    return json.dumps(tool_output, ensure_ascii=False)
+
+
 # `Protocol` 定义"LLM provider 必须有的方法"，让 ReActSynthesizer 跟具体厂商解耦
 class ToolCallingLLMProto(Protocol):
     """支持 tool calling 的 LLM provider 接口。
@@ -173,8 +187,8 @@ class ReActSynthesizer:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    # tool message content 必须是 string；用 json.dumps 把 dict 序列化
-                    "content": json.dumps(tool_output, ensure_ascii=False),
+                    # tool message content 必须是 string；_tool_message_content：渲染类只回 summary、其余 json.dumps
+                    "content": _tool_message_content(tool_output),
                 })
             # 进入下一轮 LLM 调用
 
@@ -326,7 +340,7 @@ class ReActSynthesizer:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": json.dumps(tool_output, ensure_ascii=False),
+                    "content": _tool_message_content(tool_output),
                 })
 
         # max_iterations 用完仍没给 final answer → 兜底
