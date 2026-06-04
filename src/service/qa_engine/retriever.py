@@ -204,6 +204,10 @@ class QARetriever:
             try:
                 # interpretation_store 是 composite（内部按 self._project_id 绑 tenant）
                 rec = self.interpretation_store.get_by_entity(mid)
+                # id 带参查不到 → 剥参再试：2b 解读 id 多为无参 Class::method 形态，而调用边 id 常带
+                # 参数签名（Class::method#(params)）→ 不剥参会漏匹配大量解读（实测中文覆盖 3/11 的根因）
+                if not rec and "#" in mid:
+                    rec = self.interpretation_store.get_by_entity(mid.split("#", 1)[0])
             except Exception:
                 # best-effort 富集：单节点查询异常吞掉，不阻断整体召回
                 rec = None

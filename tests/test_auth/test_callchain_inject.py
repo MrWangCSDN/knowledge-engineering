@@ -105,6 +105,23 @@ def test_build_call_chain_uses_chinese_label_from_summaries():
     assert nodes["com.x.OmsServiceImpl::create"]["label"] == "create"
 
 
+def test_build_call_chain_dedups_param_and_noparam_same_method():
+    """同一方法的带参/无参 id 形态合并为一个节点（消除重复 register 节点 + 让中文标签命中）。"""
+    edges = {"E": [
+        ("A::reg", "B::save#(m)"),
+        ("A::reg#(String)", "B::save#(m)"),   # 与 A::reg 同方法（去参后同），应合并
+    ]}
+    sec = _build_call_chain_section_from_edges(edges)
+    data = json.loads(sec["content"])
+    # A::reg 的带参/无参合并为一个节点
+    a_nodes = [n for n in data["nodes"] if n["id"].split("#", 1)[0] == "A::reg"]
+    assert len(a_nodes) == 1
+    # 边不重复、不悬挂（都指向合并后的代表节点）
+    node_ids = {n["id"] for n in data["nodes"]}
+    for e in data["edges"]:
+        assert e["from"] in node_ids and e["to"] in node_ids
+
+
 def test_build_call_chain_label_falls_back_to_method_when_no_summaries():
     """不传 node_summaries（旧调用）→ label 仍是方法短名（向后兼容）。"""
     edges = {"X::create": [("com.x.OmsController::create", "com.x.OmsServiceImpl::create")]}

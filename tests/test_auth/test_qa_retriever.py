@@ -210,6 +210,27 @@ async def test_retrieve_enriches_callchain_node_summaries():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_enrich_param_stripped_fallback():
+    """调用边 id 带参查不到解读时，剥参再试（2b 解读 id 多为无参 Class::method 形态）。"""
+    bs = MagicMock()
+    bs.search_method_hits_by_text.return_value = [
+        {"entity_id": "C::register#(p)", "level": "method", "summary_text": "x", "score": 0.9},
+    ]
+    # 带参查 None，无参（剥参后）查到解读
+    def _get(eid, level=None):
+        return {"S::register": {"summary_text": "会员注册业务"}}.get(eid)
+    bs.get_by_entity.side_effect = _get
+    g = MagicMock()
+    g.successors.side_effect = lambda n: ["S::register#(String,String)"] if n == "C::register#(p)" else []
+    g.predecessors.return_value = []
+    g.module_of.return_value = None
+    r = QARetriever(interpretation_store=bs, graph=g)
+    ctx = await r.retrieve(question="注册", project_id="p", top_k=5)
+    # 带参的 S::register#(...) 通过剥参匹配到无参解读；key 仍是原带参 id（与节点 id 一致）
+    assert ctx.callchain_node_summaries.get("S::register#(String,String)") == "会员注册业务"
+
+
+@pytest.mark.asyncio
 async def test_retrieve_enrich_skips_missing_and_does_not_raise():
     """get_by_entity 返回 None 或抛异常的节点跳过，不阻断整体。"""
     bs = MagicMock()

@@ -607,18 +607,30 @@ def _build_call_chain_section_from_edges(
     node_set: set[str] = set()
     edges_out: list[dict] = []
     seen_edges: set[tuple[str, str]] = set()    # 边去重
+    # 节点去重：同一方法的带参/无参 id 形态（_cc_head 去参后相同）合并为一个代表节点，
+    # 消除"register 出现两次（一中一英）"。首见形态作代表（其 entityId 可点击、label 命中解读）。
+    canon: dict[str, str] = {}
 
-    # 汇总所有 entry 的边：去重 + 过滤框架噪声
+    def _rep(nid: str) -> str:
+        key = _cc_head(nid)            # Class::method（去 #参数）
+        if key not in canon:
+            canon[key] = nid          # 首见形态作代表
+        return canon[key]
+
+    # 汇总所有 entry 的边：端点规范化（带参/无参合并）+ 去重 + 过滤框架噪声
     for edges in call_edges_by_entry.values():
         for frm, to in edges:
             if _cc_is_noise(frm) or _cc_is_noise(to):
                 continue
-            key = (frm, to)
+            rf, rt = _rep(frm), _rep(to)
+            if rf == rt:               # 带参/无参指向同方法 → 自环，跳过
+                continue
+            key = (rf, rt)
             if key in seen_edges:
                 continue
             seen_edges.add(key)
-            edges_out.append({"from": frm, "to": to})
-            for nid in (frm, to):
+            edges_out.append({"from": rf, "to": rt})
+            for nid in (rf, rt):
                 if nid not in node_set:
                     node_set.add(nid)
                     node_order.append(nid)
