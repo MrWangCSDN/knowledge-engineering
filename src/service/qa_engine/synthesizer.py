@@ -565,9 +565,23 @@ def _cc_kind(entity_id: str) -> str:
     return "method"
 
 
+def _short_cn_label(text: str) -> str:
+    """从 2b 中文解读提炼一个短 label（取首句/首子句，截断 ~14 字），作业务流程节点名。"""
+    if not text:
+        return ""
+    # 取第一个句读符号前的部分（。/，/；/、/换行/左括号）作中文业务动作短语
+    for sep in ("。", "，", "；", "、", "\n", "（", "("):
+        idx = text.find(sep)
+        if idx > 0:
+            text = text[:idx]
+            break
+    return text.strip()[:14]
+
+
 def _build_call_chain_section_from_edges(
     call_edges_by_entry: dict | None,
     max_nodes: int = _CALLCHAIN_MAX_NODES,
+    node_summaries: dict | None = None,
 ) -> dict | None:
     """用 ctx.call_edges_by_entry 的多跳边确定性构造一个 call_chain 段。
 
@@ -612,16 +626,21 @@ def _build_call_chain_section_from_edges(
     # 节点：id=实体 id（与 edges from/to 一致）；label=短方法名；classOf=类全名（前端 hover 显示）；
     # kind=按类名后缀推断的分层角色（前端据此着色+图标）；entityId=method:// scheme（前端 EntityRef
     # 据此点击跳源码、复用代码片段抽屉；后端 resolve_first 解析时会剥掉 scheme）。
-    nodes = [
-        {
+    # label：有 2b 中文解读 → 取首句中文业务动作；否则回退方法短名
+    # （belt-and-suspenders：确定性兜底图也尽量中文，覆盖到的方法即使 LLM 不产 A1 图也是中文）
+    summaries = node_summaries or {}
+    nodes = []
+    for nid in node_order:
+        if nid not in keep:
+            continue
+        cn = _short_cn_label(summaries.get(nid, ""))
+        nodes.append({
             "id": nid,
-            "label": _cc_label(nid),
+            "label": cn or _cc_label(nid),
             "classOf": _cc_class_of(nid),
             "kind": _cc_kind(nid),
             "entityId": f"method://{nid}",
-        }
-        for nid in node_order if nid in keep
-    ]
+        })
 
     # content 为合法 CallChain JSON 字符串（不包 ```json fence），与前端 tryParseCallChain 对齐
     content = json.dumps({"nodes": nodes, "edges": kept_edges}, ensure_ascii=False)
@@ -709,7 +728,10 @@ def _ensure_call_chain_section(sections: list[dict], ctx) -> list[dict]:
     """
     if any(s.get("type") == "call_chain" for s in sections):
         return sections
-    built = _build_call_chain_section_from_edges(getattr(ctx, "call_edges_by_entry", None))
+    built = _build_call_chain_section_from_edges(
+        getattr(ctx, "call_edges_by_entry", None),
+        node_summaries=getattr(ctx, "callchain_node_summaries", None),
+    )
     if built is None:
         return sections
     # 找插入锚点：entry_point 之后 > overview 之后 > append

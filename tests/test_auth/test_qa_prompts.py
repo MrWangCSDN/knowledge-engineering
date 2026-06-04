@@ -231,8 +231,8 @@ def test_build_user_prompt_renders_callchain_summaries_and_a1():
         },
     }
     out = build_user_prompt("注册流程", ctx)
-    # 解读块标题 + 至少一条解读 + entityId（method:// scheme）
-    assert "调用链方法业务解读" in out
+    # A1 清单块标题 + 至少一条解读 + entityId（method:// scheme）
+    assert "调用链方法清单" in out
     assert "会员注册入口，校验后落库" in out
     assert "method://C::register#(p)" in out
     # A1 指令关键词
@@ -240,7 +240,7 @@ def test_build_user_prompt_renders_callchain_summaries_and_a1():
 
 
 def test_build_user_prompt_no_summary_block_when_empty():
-    """callchain_node_summaries 为空 → 不渲染解读块（不空标题）。"""
+    """callchain_node_summaries 为空 → 不渲染 A1 清单块（留给确定性兜底）。"""
     ctx = {
         "skill_id": "architecture",
         "entry_candidates": [{"entity_id": "C::register#(p)", "summary_text": "s", "level": "method"}],
@@ -248,5 +248,21 @@ def test_build_user_prompt_no_summary_block_when_empty():
         "callchain_node_summaries": {},
     }
     out = build_user_prompt("注册流程", ctx)
-    assert "调用链方法业务解读" not in out
+    assert "调用链方法清单" not in out
+
+
+def test_build_user_prompt_lists_all_recalled_methods_not_only_summarized():
+    """A1 清单必须列出所有召回真实方法（含无解读的）——否则 LLM 可锚定集太窄、与调用链矛盾。"""
+    ctx = {
+        "skill_id": "architecture",
+        "entry_candidates": [{"entity_id": "C::reg#(p)", "summary_text": "s", "level": "method"}],
+        "call_edges_by_entry": {"C::reg#(p)": [("C::reg#(p)", "B::save#(m)")]},
+        # 只有 C 有解读，B 没有：B 也必须出现在清单里
+        "callchain_node_summaries": {"C::reg#(p)": "会员注册入口"},
+    }
+    out = build_user_prompt("注册", ctx)
+    assert "method://C::reg#(p)" in out
+    assert "method://B::save#(m)" in out      # 无解读的 B 也列出
+    assert "会员注册入口" in out               # C 的解读附上
+    assert "严禁虚构" in out
 

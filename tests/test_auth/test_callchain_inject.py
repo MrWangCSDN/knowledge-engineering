@@ -83,6 +83,29 @@ def test_build_call_chain_sets_kind_and_filters_accessor_noise():
     assert nodes["com.x.mapper.OmsMapper::insert#(o)"]["entityId"] == "method://com.x.mapper.OmsMapper::insert#(o)"
 
 
+def test_build_call_chain_uses_chinese_label_from_summaries():
+    """确定性图（belt-and-suspenders）：节点有 2b 中文解读时 label 用解读首句（中文业务动作），
+    无解读则回退方法短名——保证覆盖到的方法即使 LLM 不产 A1 图也是中文。"""
+    edges = {"X::create": [("com.x.OmsController::create", "com.x.OmsServiceImpl::create")]}
+    summaries = {"com.x.OmsController::create": "订单创建入口，接收下单参数，校验后委派业务层"}
+    sec = _build_call_chain_section_from_edges(edges, node_summaries=summaries)
+    data = json.loads(sec["content"])
+    nodes = {n["id"]: n for n in data["nodes"]}
+    # 有解读 → label 用中文首句（到第一个逗号/句号，截断）
+    assert nodes["com.x.OmsController::create"]["label"] == "订单创建入口"
+    # 无解读 → 回退方法短名
+    assert nodes["com.x.OmsServiceImpl::create"]["label"] == "create"
+
+
+def test_build_call_chain_label_falls_back_to_method_when_no_summaries():
+    """不传 node_summaries（旧调用）→ label 仍是方法短名（向后兼容）。"""
+    edges = {"X::create": [("com.x.OmsController::create", "com.x.OmsServiceImpl::create")]}
+    sec = _build_call_chain_section_from_edges(edges)
+    data = json.loads(sec["content"])
+    labels = {n["label"] for n in data["nodes"]}
+    assert labels == {"create"}
+
+
 def test_build_call_chain_none_when_empty_or_all_noise():
     """无边 / 全是框架噪声 → 返回 None（不注入空图）。"""
     assert _build_call_chain_section_from_edges({}) is None
