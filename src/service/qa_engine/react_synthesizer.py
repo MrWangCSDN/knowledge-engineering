@@ -434,8 +434,12 @@ class ReActSynthesizer:
 3. **不要在 tool_call 输入里指定 project_id**。工具已经由后端绑定到当前会话的工程，
    你提供 project_id 会被忽略（schema 也不再包含该字段）。
 
-4. **能给最终答案就别再调工具**。tool_call 仅用于"我看了 candidates 还差关键信息"的场景；
-   如果 candidates 已经足够回答，直接输出 6 段式 JSON。
+4. **能直接答就别再调工具**，且**用自由、自然的 markdown 作答（不要套固定模板 / 结构化 JSON）**：
+   结构与篇幅随问题深浅自适应——简单问题简短直答、复杂问题再展开；引用代码实体照抄 candidates 的 entity_id
+   （前端可点击跳源码）；检索不到就如实说"未检索到 X"，不要编。
+   **涉及调用关系/流程/"它调了谁、谁调它"时，调 render_call_graph(entity_id, direction)** 内联一张可点击调用图：
+   它确定性构图、带中文业务标签，比手写 reactflow JSON 更准更省；图直接展示给用户，你只需文字里提"见下方调用图"，
+   **不要逐节点复述图**。
    **但**如果 candidates 全是 level="code_entity"（业务解读缺失），即使候选齐全也至少调 1 次
    ke_callees / ke_read_entity 补齐代码细节。
 
