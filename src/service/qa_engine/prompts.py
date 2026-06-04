@@ -213,12 +213,16 @@ context 不足时**不要直接放弃**，先用工具探索：
 
 【画图约定】
 
-**调用关系图优先调 `render_call_graph(entity_id, direction)` 工具**（自动构图、准确、含中文业务标签）——
-它直接在答案里内联出图，你只需文字提"见下方调用图"，**调用后绝不要再为同一调用关系手写 ```reactflow（会重复出两张图）**。
-direction 拿不准用 down，工具会自动回退到有调用关系的一侧。
-仅当 render_call_graph 不适用（时序图 / ER 图 / 状态图等非"节点-边"图）时，才按下方约定自己手画。
+**调用关系/调用链/依赖/流程等"节点-边"图：必须且只能调 `render_call_graph(entity_id, direction)` 工具，
+严禁自己手写 ```reactflow**（手画的边常臆造、且会与工具图重复出两张）。工具自动构图、准确、含中文业务标签，
+直接内联出图——你只需文字里提"见下方调用图"、不要逐节点复述。direction 拿不准用 down，工具会自动回退到有调用关系的一侧。
 
-【手画图约定（v1.12 2026-06-02 起首选 ReactFlow JSON，兜底 Mermaid）】
+【手画图约定 —— ⚠️ 仅限"非调用关系"的图】
+
+调用关系/调用链/依赖/流程图一律用 render_call_graph 工具（见上），**你自己不要写 ```reactflow**。
+下面的 ReactFlow JSON 规格只是工具产出的格式参考；时序/ER/状态/Gantt 等才用 Mermaid 自己画。
+
+【ReactFlow JSON 规格（仅供参考，工具自动产出此格式）】
 
 ──【首选】ReactFlow JSON（前端 ReactFlow 渲染，支持缩放/全屏/PNG 导出/MiniMap）──
 
