@@ -55,6 +55,16 @@ def test_render_call_graph_label_uses_summary_lookup():
     assert any("支付" in l for l in labels)               # 中文 label 生效
 
 
+def test_render_call_graph_falls_back_to_opposite_direction():
+    # 候选节点上下游不对称（典型：Dao 只有上游）：请求 down 无下游 → 自动回退 up → 仍出图
+    g = _FakeGraph({"Caller::m#()": ["Leaf::x#()"]})   # Leaf 有 predecessor(Caller)、无 successor
+    tool = build_render_call_graph_tool(g)
+    out = asyncio.run(tool.handler({"entity_id": "Leaf::x#()", "direction": "down", "depth": 2}))
+    assert out["render"] is not None                        # down 空 → 回退 up → 出图
+    assert len(out["render"]["data"]["nodes"]) >= 2
+    assert "上游" in out["summary"]                          # summary 反映实际命中方向
+
+
 def test_render_call_graph_registered_in_factory():
     """工具工厂 build_default_registry 应注册 render_call_graph（与 ke_callees 等并列）。"""
     from src.service.qa_engine.tools import build_default_registry

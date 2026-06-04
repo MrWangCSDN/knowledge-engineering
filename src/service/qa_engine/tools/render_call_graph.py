@@ -82,33 +82,39 @@ def build_render_call_graph_tool(
             depth = _DEFAULT_DEPTH
         depth = max(1, min(depth, _MAX_DEPTH))
 
-        # 选邻居函数：down=successors / up=predecessors
-        neighbors = graph.successors if direction == "down" else graph.predecessors
-
-        # BFS 收集"边"（与 ke_impact 收集节点不同，调用图要的是边）
-        edges: list[tuple[str, str]] = []
-        seen_edges: set[tuple[str, str]] = set()
-        seen_nodes: set[str] = {entity_id}
-        queue: deque[tuple[str, int]] = deque([(entity_id, 0)])
-        try:
+        # BFS 收集"边"的内部函数（与 ke_impact 同范式；统一成"调用方→被调用方"方向）
+        def _collect(dir_: str) -> tuple[list[tuple[str, str]], set[str]]:
+            neighbors = graph.successors if dir_ == "down" else graph.predecessors
+            edges_: list[tuple[str, str]] = []
+            seen_e: set[tuple[str, str]] = set()
+            seen_n: set[str] = {entity_id}
+            queue: deque[tuple[str, int]] = deque([(entity_id, 0)])
             while queue:
                 node, d = queue.popleft()
                 if d >= depth:
                     continue
                 for nxt in neighbors(node):
-                    # 统一成"调用方→被调用方"方向：down 时 node→nxt；up 时 nxt→node
-                    frm, to = (node, nxt) if direction == "down" else (nxt, node)
-                    if (frm, to) in seen_edges:
+                    frm, to = (node, nxt) if dir_ == "down" else (nxt, node)
+                    if (frm, to) in seen_e:
                         continue
-                    seen_edges.add((frm, to))
-                    edges.append((frm, to))
-                    if nxt not in seen_nodes:
-                        seen_nodes.add(nxt)
+                    seen_e.add((frm, to))
+                    edges_.append((frm, to))
+                    if nxt not in seen_n:
+                        seen_n.add(nxt)
                         queue.append((nxt, d + 1))
-                    if len(edges) >= _MAX_EDGES:
-                        break
-                if len(edges) >= _MAX_EDGES:
-                    break
+                    if len(edges_) >= _MAX_EDGES:
+                        return edges_, seen_n
+            return edges_, seen_n
+
+        # 先按请求方向收集；若该方向无边（典型：Controller 无上游 / Dao 无下游，候选节点上下游不对称），
+        # 自动回退反方向，避免"选错方向→空图→agent 手画兜底"。direction 改写为实际命中的方向（summary 用）。
+        try:
+            edges, seen_nodes = _collect(direction)
+            if not edges:
+                other = "up" if direction == "down" else "down"
+                e2, n2 = _collect(other)
+                if e2:
+                    edges, seen_nodes, direction = e2, n2, other
         except Exception as e:
             # 图后端挂了 → 错误信号，agent 改用文字描述、不崩
             return {"render": None, "summary": "图后端异常，未生成调用图", "error": f"graph backend error: {e}"}

@@ -438,8 +438,9 @@ class ReActSynthesizer:
    结构与篇幅随问题深浅自适应——简单问题简短直答、复杂问题再展开；引用代码实体照抄 candidates 的 entity_id
    （前端可点击跳源码）；检索不到就如实说"未检索到 X"，不要编。
    **涉及调用关系/流程/"它调了谁、谁调它"时，调 render_call_graph(entity_id, direction)** 内联一张可点击调用图：
-   它确定性构图、带中文业务标签，比手写 reactflow JSON 更准更省；图直接展示给用户，你只需文字里提"见下方调用图"，
-   **不要逐节点复述图**。
+   它确定性构图、带中文业务标签；图直接展示给用户——你只需文字里提"见下方调用图"，**不要逐节点复述、
+   也绝不要再自己写 ```reactflow 画同一张图（会重复出两张）**。direction 拿不准就用 down，
+   工具查不到该方向时会自动回退到有调用关系的另一侧。
    **但**如果 candidates 全是 level="code_entity"（业务解读缺失），即使候选齐全也至少调 1 次
    ke_callees / ke_read_entity 补齐代码细节。
 
