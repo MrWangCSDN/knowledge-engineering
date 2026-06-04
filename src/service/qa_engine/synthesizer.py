@@ -234,6 +234,9 @@ class QASynthesizer:
         # 2.5（2026-06-02）：call_chain JSON schema 校验 + 1 次 LLM retry 自修
         # feature flag KE_CALLCHAIN_AUTO_REPAIR（默认 on）；失败时保留原 content 走前端兜底
         sections = await self._repair_call_chain_sections(sections)
+        # 逻辑图中文化（[[逻辑图中文化-设计]] §4.3）：A1 接地校验——LLM 产的 call_chain 节点
+        # 必须锚定召回到的真实方法；虚构节点丢弃、有效<2 判废删段（交下方 _ensure 兜底）。
+        sections = _ground_call_chain_sections(sections, _recalled_ids(ctx))
         # Fix-2：LLM 没产出 call_chain 但召回到调用链 → 用 ctx 的多跳边确定性注入一段（必出 ReactFlow）
         sections = _ensure_call_chain_section(sections, ctx)
 
@@ -315,6 +318,8 @@ class QASynthesizer:
         # 流式 emit 已经把 raw_stream token 推给前端；retry 在 done 之前发生，
         # 前端拿到 final sections 后会自动用 hasSections 分支覆盖 raw_stream 渲染
         sections = await self._repair_call_chain_sections(sections)
+        # 逻辑图中文化 §4.3：A1 接地校验（同非流式路径），删幻觉节点/判废段
+        sections = _ground_call_chain_sections(sections, _recalled_ids(ctx))
         # Fix-2：同非流式路径——无 call_chain 段则用 ctx 多跳边确定性注入
         sections = _ensure_call_chain_section(sections, ctx)
         # 注：memory_block 未计入 token 估算（P1 有意为之；token_usage 本就是粗算，
@@ -621,6 +626,79 @@ def _build_call_chain_section_from_edges(
     # content 为合法 CallChain JSON 字符串（不包 ```json fence），与前端 tryParseCallChain 对齐
     content = json.dumps({"nodes": nodes, "edges": kept_edges}, ensure_ascii=False)
     return {"type": "call_chain", "title": "调用链路", "content": content}
+
+
+def _recalled_ids(ctx) -> set[str]:
+    """从 ctx.call_edges_by_entry 汇总调用链上全部真实方法 id（边的去重端点集）。
+
+    用作 A1 接地校验的「合法锚点全集」——真实方法即使无 2b 解读也算合法锚点。
+    """
+    ids: set[str] = set()
+    # getattr 兼容：ctx 可能是旧实例 / 测试桩
+    for edges in getattr(ctx, "call_edges_by_entry", {}).values():
+        for frm, to in edges:
+            ids.add(frm)
+            ids.add(to)
+    return ids
+
+
+def _ground_call_chain_sections(sections: list[dict], recalled_method_ids: set[str]) -> list[dict]:
+    """A1 接地校验（[[逻辑图中文化-设计]] §4.3）：LLM 产的 call_chain 节点必须锚定真实方法。
+
+    规则：
+      - 节点 entityId（剥 method:// scheme）∈ recalled_method_ids → 保留；不在（虚构）→ 丢节点；
+      - 丢节点后，引用被丢节点的边一并删（避免悬挂边）；
+      - 有效节点 < 2 → 该 call_chain 段判废、整段删除（交 _ensure 兜底重注入方法图）；
+      - content 非法 JSON → 同样判废删段；
+      - 边只校验 from/to 都引用保留下来的 node id（**允许逻辑边，不要求是真实 call**——抽象本质）。
+    非 call_chain 段原样返回。
+
+    两个守卫（实现期发现）：
+      1) recalled_method_ids 为空（无调用边）→ 无从接地，整体原样返回——此时 call_chain 可能
+         来自 mermaid / LLM 自有知识，不应被误删；
+      2) content 非 JSON（如 ```mermaid fence）→ 接地不适用，原样保留该段（不删）。
+    """
+    # 守卫 1：没有可接地的真实方法集 → 原样返回（不动任何 call_chain）
+    if not recalled_method_ids:
+        return sections
+    out: list[dict] = []
+    for sec in sections:
+        # 非 call_chain 段：原样保留
+        if sec.get("type") != "call_chain":
+            out.append(sec)
+            continue
+        # 解析 content（CallChain JSON 字符串）
+        try:
+            data = json.loads(sec.get("content") or "")
+            nodes = data.get("nodes") or []
+            edges = data.get("edges") or []
+        except (ValueError, TypeError):
+            # 守卫 2：非 JSON CallChain（mermaid 等）→ 接地不适用，原样保留（不误删合法图）
+            out.append(sec)
+            continue
+        # 逐节点接地：entityId 剥 scheme（split('://',1)[-1] 对裸 qn 无副作用）后判是否真实
+        kept_nodes = []
+        kept_node_ids: set[str] = set()
+        for n in nodes:
+            anchor = (n.get("entityId") or "").split("://", 1)[-1]
+            if anchor in recalled_method_ids:
+                kept_nodes.append(n)
+                kept_node_ids.add(n.get("id"))
+        # 有效节点 < 2 → 判废删段
+        if len(kept_nodes) < 2:
+            continue
+        # 边：from/to 都在保留节点里才留（允许逻辑边，只防悬挂）
+        kept_edges = [
+            e for e in edges
+            if e.get("from") in kept_node_ids and e.get("to") in kept_node_ids
+        ]
+        # 重写 content（保留 title 等其它字段）
+        new_sec = dict(sec)
+        new_sec["content"] = json.dumps(
+            {"nodes": kept_nodes, "edges": kept_edges}, ensure_ascii=False
+        )
+        out.append(new_sec)
+    return out
 
 
 def _ensure_call_chain_section(sections: list[dict], ctx) -> list[dict]:
