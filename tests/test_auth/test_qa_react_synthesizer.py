@@ -583,8 +583,8 @@ async def test_react_synthesize_stream_forwards_tool_call_callback() -> None:
     assert tool_events[1]["phase"] == "complete"
 
 
-def test_react_synthesizer_default_max_iterations_is_12():
-    """安全阀：默认循环上限 12（放开旧的 3，支撑多跳分析跑到收敛）。"""
+def test_react_synthesizer_default_max_iterations_is_8():
+    """安全阀：默认循环上限 8（2026-06-04 由 12 收紧；自适应下正常远不到，agent 化输出改造）。"""
     from src.service.qa_engine.react_synthesizer import ReActSynthesizer
 
     # 构造只需 llm + tool_registry（鸭子类型，传占位即可；本测试不跑循环）
@@ -595,7 +595,7 @@ def test_react_synthesizer_default_max_iterations_is_12():
     from src.service.qa_engine.tools.base import ToolRegistry
 
     synth = ReActSynthesizer(llm_provider=_DummyLLM(), tool_registry=ToolRegistry())
-    assert synth.max_iterations == 12
+    assert synth.max_iterations == 8
 
 
 @pytest.mark.asyncio

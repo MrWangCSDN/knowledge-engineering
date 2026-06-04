@@ -200,6 +200,10 @@ async def stream_qa_answer(
             # 结果可能很大，截断 600 字以内（足够前端展示概要）
             result_text = json.dumps(result or {}, ensure_ascii=False)
             payload["result_preview"] = result_text[:600]
+            # 渲染类工具（render_call_graph 等）：透传 render（图数据）给前端内联渲染（CallChainFlow）；
+            # 调查类工具无 render 字段，不受影响。设计 [[业务问答-agent化输出改造-设计]] §5.2
+            if isinstance(result, dict) and result.get("render") is not None:
+                payload["render"] = result["render"]
         pending_tool_events.append(("tool_call", payload))
 
     # 判断要不要带 on_tool_call：只有 ReActSynthesizer 才认这个 kwarg

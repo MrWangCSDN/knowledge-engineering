@@ -28,6 +28,7 @@ def test_default_registry_has_core_tools_plus_todo_write() -> None:
         "ke_callers",
         "ke_table_access",
         "ke_impact",
+        "render_call_graph",
         "todo_write",
         "ke_grep",
         "ke_glob",
