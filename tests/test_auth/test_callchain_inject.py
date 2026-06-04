@@ -22,6 +22,14 @@ def test_ctx_to_dict_includes_call_edges():
     assert d.get("call_edges_by_entry") == {"A::c": [("A::c", "B::c")]}
 
 
+def test_ctx_to_dict_includes_callchain_node_summaries():
+    """_ctx_to_dict 必须透传 callchain_node_summaries（否则 prompt 拿不到解读）。"""
+    ctx = RetrievedContext(question="q", project_id="p")
+    ctx.callchain_node_summaries = {"C::register#(p)": "会员注册入口"}
+    d = _ctx_to_dict(ctx)
+    assert d.get("callchain_node_summaries") == {"C::register#(p)": "会员注册入口"}
+
+
 def test_build_call_chain_filters_noise_and_preserves_edges():
     """从 call_edges 构造 call_chain：保边、短名 label、过滤 CommonResult/IErrorCode 框架噪声。"""
     edges = {

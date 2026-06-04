@@ -653,6 +653,8 @@ def _ctx_to_dict(ctx: RetrievedContext) -> dict:
         # C2/Fix-2：多跳调用边——build_user_prompt 的「调用链路」块 + 确定性注入都需要它。
         # 之前漏带（C2 gap）→ prompt 调用链块在生产里一直空 → LLM 看不到多跳边。getattr 兼容旧实例。
         "call_edges_by_entry": getattr(ctx, "call_edges_by_entry", {}),
+        # 逻辑图中文化（[[逻辑图中文化-设计]] §4.2）：调用链方法的 2b 中文解读，喂 LLM 写业务标签
+        "callchain_node_summaries": getattr(ctx, "callchain_node_summaries", {}),
         "callers_by_entry": ctx.callers_by_entry,
         "table_access_by_entry": ctx.table_access_by_entry,
         # v1.1：把 skill_id 一并送下去，build_user_prompt 据此加视角偏置提示

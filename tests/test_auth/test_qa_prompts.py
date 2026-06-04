@@ -215,3 +215,38 @@ def test_session_compact_system_is_faithful_digest_not_taskonly():
     assert "本次会话目标" not in s
     assert "150" not in s
 
+
+# ───────── 逻辑图中文化：调用链方法业务解读 + A1 指令 ─────────
+
+
+def test_build_user_prompt_renders_callchain_summaries_and_a1():
+    """callchain_node_summaries 非空 → 渲染「调用链方法业务解读」块 + A1 业务流指令。"""
+    ctx = {
+        "skill_id": "architecture",
+        "entry_candidates": [{"entity_id": "C::register#(p)", "summary_text": "s", "level": "method"}],
+        "call_edges_by_entry": {"C::register#(p)": [("C::register#(p)", "B::save#(m)")]},
+        "callchain_node_summaries": {
+            "C::register#(p)": "会员注册入口，校验后落库",
+            "B::save#(m)": "写入会员表",
+        },
+    }
+    out = build_user_prompt("注册流程", ctx)
+    # 解读块标题 + 至少一条解读 + entityId（method:// scheme）
+    assert "调用链方法业务解读" in out
+    assert "会员注册入口，校验后落库" in out
+    assert "method://C::register#(p)" in out
+    # A1 指令关键词
+    assert "锚定" in out and "严禁虚构" in out
+
+
+def test_build_user_prompt_no_summary_block_when_empty():
+    """callchain_node_summaries 为空 → 不渲染解读块（不空标题）。"""
+    ctx = {
+        "skill_id": "architecture",
+        "entry_candidates": [{"entity_id": "C::register#(p)", "summary_text": "s", "level": "method"}],
+        "call_edges_by_entry": {"C::register#(p)": [("C::register#(p)", "B::save#(m)")]},
+        "callchain_node_summaries": {},
+    }
+    out = build_user_prompt("注册流程", ctx)
+    assert "调用链方法业务解读" not in out
+

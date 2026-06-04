@@ -362,6 +362,24 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
             for frm, to in edges:
                 parts.append(f"      {frm}  →  {to}")
 
+    # 2c. 逻辑图中文化（[[逻辑图中文化-设计]] §4.2）：调用链方法的 2b 中文业务解读 + A1 业务流指令。
+    # 让 LLM 把上面的方法调用链「重抽象」成中文业务流程图——每个业务步骤节点锚定一个真实方法。
+    node_summaries = context.get("callchain_node_summaries") or {}
+    if node_summaries:
+        parts.append("")
+        parts.append("调用链方法业务解读（画业务流程图时只能用这里列出的方法，按 entityId 锚定）:")
+        # 逐方法列出：entityId（method:// scheme，节点 entityId 照搬此值）| 方法 | 中文解读
+        for mid, summary in node_summaries.items():
+            parts.append(f"  - entityId: method://{mid} | 方法: {mid} | 业务解读: {summary}")
+        # A1 业务流抽象指令（追加在解读块后，约束 call_chain 段产出方式）
+        parts.append("")
+        parts.append("【画 call_chain 业务流程图时（A1 锚定式）】")
+        parts.append("  1. 把上述调用链重写成中文业务步骤流：可把连续的几个方法合并成一个业务步骤；")
+        parts.append("  2. 每个节点必须锚定到上面列出的某一个真实方法，entityId 照搬其 method:// 值（点击可跳源码）；")
+        parts.append("  3. label 用中文业务动作（≤12 字，如「生成订单」「校验短信验证码」「发新人优惠券」）；")
+        parts.append("  4. edge.label 用中文衔接（如「校验通过后」「下单成功触发」）；")
+        parts.append("  5. 只能用上面列出的方法，严禁虚构代码里没有的步骤/方法。")
+
     callers = context.get("callers_by_entry") or {}
     if any(callers.values()):
         parts.append("")
