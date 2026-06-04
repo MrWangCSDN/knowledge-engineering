@@ -180,3 +180,51 @@ def test_bfs_edges_skips_noise_children():
     assert not any("setStatus" in to or "setPassword" in to for (_f, to) in edges)
 
 
+# ───────── callchain_node_summaries 富集（逻辑图中文化 §4.1）─────────
+
+
+@pytest.mark.asyncio
+async def test_retrieve_enriches_callchain_node_summaries():
+    """architecture 分支：为调用链方法批量查 2b 解读，存入 ctx.callchain_node_summaries。"""
+    bs = MagicMock()
+    bs.search_method_hits_by_text.return_value = [
+        {"entity_id": "C::register#(p)", "level": "method", "summary_text": "x", "score": 0.9},
+    ]
+    # get_by_entity：C::register 有解读，B::save 有解读，未知的返回 None
+    def _get(eid, level=None):
+        return {
+            "C::register#(p)": {"summary_text": "会员注册入口，校验后落库"},
+            "B::save#(m)": {"interpretation_text": "写入会员表"},
+        }.get(eid)
+    bs.get_by_entity.side_effect = _get
+    g = MagicMock()
+    # 调用边：C::register → B::save（这两个端点应被富集）
+    g.successors.side_effect = lambda n: ["B::save#(m)"] if n == "C::register#(p)" else []
+    g.predecessors.return_value = []
+    g.module_of.return_value = None
+    r = QARetriever(interpretation_store=bs, graph=g)
+    ctx = await r.retrieve(question="注册流程", project_id="p", top_k=5)
+    # 两个端点都富集到中文解读
+    assert ctx.callchain_node_summaries.get("C::register#(p)") == "会员注册入口，校验后落库"
+    assert ctx.callchain_node_summaries.get("B::save#(m)") == "写入会员表"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_enrich_skips_missing_and_does_not_raise():
+    """get_by_entity 返回 None 或抛异常的节点跳过，不阻断整体。"""
+    bs = MagicMock()
+    bs.search_method_hits_by_text.return_value = [
+        {"entity_id": "C::register#(p)", "level": "method", "summary_text": "x", "score": 0.9},
+    ]
+    bs.get_by_entity.side_effect = Exception("weaviate down")  # 富集查询全炸
+    g = MagicMock()
+    g.successors.side_effect = lambda n: ["B::save#(m)"] if n == "C::register#(p)" else []
+    g.predecessors.return_value = []
+    g.module_of.return_value = None
+    r = QARetriever(interpretation_store=bs, graph=g)
+    ctx = await r.retrieve(question="注册流程", project_id="p", top_k=5)
+    # 异常被吞，summaries 为空，但 retrieve 不崩、call_edges 仍在
+    assert ctx.callchain_node_summaries == {}
+    assert ctx.call_edges_by_entry  # 调用边照常
+
+

@@ -80,6 +80,10 @@ class RetrievedContext:
     recall_score: float = 0.0
     """召回门控：top1 相似度（meta/route 事件透传，便于前端显示匹配度 + 调阈值）。"""
 
+    callchain_node_summaries: dict[str, str] = field(default_factory=dict)
+    """{ entity_id: 2b中文业务解读(截断) }。逻辑图中文化（[[逻辑图中文化-设计]] §4.1）：
+    为 call_edges_by_entry 涉及的真实方法富集 2b 解读，喂 LLM 写准确的中文业务标签。"""
+
 
 # ─── 检索器 ─────────────────────────────────────────────────────────────────
 
@@ -184,6 +188,37 @@ class QARetriever:
             ctx.call_edges_by_entry[entity_id] = self._bfs_edges(
                 entity_id, max_depth=self.CHAIN_DEPTH, max_edges=self.MAX_CHAIN_EDGES
             )
+
+        # 逻辑图中文化（[[逻辑图中文化-设计]] §4.1）：为调用链涉及的真实方法批量查 2b 中文业务解读，
+        # 喂给 LLM 写准确的中文业务标签（A1 锚定式）。职责：retriever 管召回+富集，synthesizer 不碰 store。
+        # 端点集 = call_edges_by_entry 所有边的去重 from/to（= 调用链上全部真实方法）。
+        recalled_ids: set[str] = set()
+        # dict.values() 是各入口的边列表；每条边是 (from_id, to_id) 二元组
+        for edges in ctx.call_edges_by_entry.values():
+            for frm, to in edges:
+                recalled_ids.add(frm)
+                recalled_ids.add(to)
+        # 逐个查 2b 解读：composite.get_by_entity(entity_id, level=None) 永不抛、取不到返 None。
+        # 规模 ~10-25 节点/次，循环单查可接受（批量接口列为后续优化，YAGNI）。
+        for mid in recalled_ids:
+            try:
+                # interpretation_store 是 composite（内部按 self._project_id 绑 tenant）
+                rec = self.interpretation_store.get_by_entity(mid)
+            except Exception:
+                # best-effort 富集：单节点查询异常吞掉，不阻断整体召回
+                rec = None
+            if not rec:
+                continue
+            # 兼容多种返回字段名（解读库列 interpretation_text/context_summary；适配器映射 summary_text）
+            text = (
+                rec.get("summary_text")
+                or rec.get("interpretation_text")
+                or rec.get("context_summary")
+                or ""
+            ).strip()
+            if text:
+                # 截断控 token（设计 §9：每条 ≤120 字）
+                ctx.callchain_node_summaries[mid] = text[:120]
         return ctx
 
     # 模块级编译过的正则（编译一次，多次使用）
