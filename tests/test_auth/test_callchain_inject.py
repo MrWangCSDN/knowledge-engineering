@@ -83,6 +83,14 @@ def test_build_call_chain_sets_kind_and_filters_accessor_noise():
     assert nodes["com.x.mapper.OmsMapper::insert#(o)"]["entityId"] == "method://com.x.mapper.OmsMapper::insert#(o)"
 
 
+def test_short_cn_label_strips_marker_and_takes_first_phrase():
+    """_short_cn_label 去掉 2b 解读开头的 [摘要] 等方括号小节标记，取首个短语作 label。"""
+    from src.service.qa_engine.synthesizer import _short_cn_label
+    assert _short_cn_label("[摘要] 接收注册申请 校验后落库") == "接收注册申请"
+    assert _short_cn_label("订单创建入口，接收下单参数") == "订单创建入口"
+    assert _short_cn_label("") == ""
+
+
 def test_build_call_chain_uses_chinese_label_from_summaries():
     """确定性图（belt-and-suspenders）：节点有 2b 中文解读时 label 用解读首句（中文业务动作），
     无解读则回退方法短名——保证覆盖到的方法即使 LLM 不产 A1 图也是中文。"""

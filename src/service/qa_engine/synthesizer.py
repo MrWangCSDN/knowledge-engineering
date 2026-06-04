@@ -569,8 +569,16 @@ def _short_cn_label(text: str) -> str:
     """从 2b 中文解读提炼一个短 label（取首句/首子句，截断 ~14 字），作业务流程节点名。"""
     if not text:
         return ""
-    # 取第一个句读符号前的部分（。/，/；/、/换行/左括号）作中文业务动作短语
-    for sep in ("。", "，", "；", "、", "\n", "（", "("):
+    text = text.strip()
+    # 去掉 2b 解读开头的 "[摘要]"/"[业务]" 等方括号小节标记（仅短前缀，避免误伤正文方括号）
+    if text.startswith("[") or text.startswith("【"):
+        for close in ("]", "】"):
+            end = text.find(close)
+            if 0 < end < 8:
+                text = text[end + 1:].strip()
+                break
+    # 取第一个句读符号/空格前的部分（。/，/；/、/换行/左括号/空格）作中文业务动作短语
+    for sep in ("。", "，", "；", "、", "\n", "（", "(", " ", "　"):
         idx = text.find(sep)
         if idx > 0:
             text = text[:idx]
