@@ -14,6 +14,8 @@ from __future__ import annotations
 # json：把 tool 结果序列化成字符串喂回 LLM（OpenAI 协议要求 tool message content 是 string）
 import asyncio
 import json
+# time.monotonic：单调时钟（不受系统时间调整影响），算每请求 wall-clock 总超时 deadline
+import time
 # typing.Any 是"我不想标具体类型"的占位
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
@@ -72,18 +74,25 @@ class ReActSynthesizer:
         *,
         llm_provider: ToolCallingLLMProto,
         tool_registry: ToolRegistry,
-        max_iterations: int = 12,
+        max_iterations: int = 8,
+        total_timeout_sec: float = 75.0,
+        tool_timeout_sec: float = 20.0,
     ) -> None:
         """
         :param llm_provider: 实现 ToolCallingLLMProto 的实例
         :param tool_registry: 已经注册好的 ToolRegistry（含 5 个 ke_* 之类）
         :param max_iterations: ReAct 循环最多跑几轮；防止 LLM 死循环调工具
+        :param total_timeout_sec: 每请求 wall-clock 总预算；超时停循环、用已生成内容收尾
+        :param tool_timeout_sec: 单个工具调用超时（图遍历/读文件防卡死）
         """
         self.llm = llm_provider
         self.tool_registry = tool_registry
-        # 上限保护：12 轮安全阀，支撑多跳调用链/影响分析跑到收敛；
-        # 停止靠"模型给最终答案（无 tool_calls）即 return"，正常远不到 12
+        # 上限保护：8 轮安全阀（12→8 收紧），支撑多跳调用链/影响分析跑到收敛；
+        # 停止靠"模型给最终答案（无 tool_calls）即 return"，自适应下正常远不到 8
         self.max_iterations = max_iterations
+        # 护栏：总超时 + 单工具超时（自适应 + 硬上限，设计 §7）
+        self.total_timeout_sec = total_timeout_sec
+        self.tool_timeout_sec = tool_timeout_sec
 
     async def synthesize(
         self,
@@ -130,8 +139,14 @@ class ReActSynthesizer:
         # 上一轮 LLM 的响应；max_iterations 用完时拿它当 final fallback
         last_response: LLMToolResponse | None = None
 
+        # 总超时护栏：超预算停循环、用已生成内容收尾（设计 §7）
+        _deadline = time.monotonic() + self.total_timeout_sec
+
         # range(N) 跑 0..N-1，共 N 轮；每轮要么 LLM 给 final，要么调 tool 进下一轮
         for _iteration in range(self.max_iterations):
+            # 超总预算 → 停循环，走循环后兜底（last_response → _parse_sections / "未完成或超时" 段）
+            if time.monotonic() > _deadline:
+                break
             response = await self.llm.complete_with_tools(messages=messages, tools=tools_schema)
             last_response = response
 
@@ -201,7 +216,7 @@ class ReActSynthesizer:
             sections = [{
                 "type": "overview",
                 "title": "未完成",
-                "content": f"ReAct 循环达到 {self.max_iterations} 轮上限仍未收敛，请简化问题或拆分。",
+                "content": f"ReAct 循环达到 {self.max_iterations} 轮上限或总超时仍未收敛，请简化问题或拆分。",
                 "references": [],
             }]
         return SynthesizedAnswer(sections=sections, raw_output=raw, cited_entities=cited_entities)
@@ -260,7 +275,13 @@ class ReActSynthesizer:
             getattr(self.llm, "complete_stream_with_tools", None)
         )
 
+        # 总超时护栏：超预算停循环、用已生成内容收尾（设计 §7）
+        _deadline = time.monotonic() + self.total_timeout_sec
+
         for _iteration in range(self.max_iterations):
+            # 超总预算 → 停循环，走循环后兜底
+            if time.monotonic() > _deadline:
+                break
             if has_real_stream:
                 # ─── 真流式路径（v1.8）─────────────────────────────────
                 # 每轮收集本轮的 text + tool_calls
@@ -351,7 +372,7 @@ class ReActSynthesizer:
             sections = [{
                 "type": "overview",
                 "title": "未完成",
-                "content": f"ReAct 循环达到 {self.max_iterations} 轮上限仍未收敛，请简化问题或拆分。",
+                "content": f"ReAct 循环达到 {self.max_iterations} 轮上限或总超时仍未收敛，请简化问题或拆分。",
                 "references": [],
             }]
         return SynthesizedAnswer(sections=sections, raw_output=raw, cited_entities=cited_entities)
@@ -452,7 +473,13 @@ class ReActSynthesizer:
         异常一律转成 dict 形式的错误信号，永不抛 —— 一个工具错了不应该让整个 ReAct 失败。
         """
         try:
-            return await self.tool_registry.call(tc.name, tc.arguments)
+            # 单工具超时：图遍历/读文件等防卡死；超时 → error 信号，LLM 换工具/收敛
+            return await asyncio.wait_for(
+                self.tool_registry.call(tc.name, tc.arguments),
+                timeout=self.tool_timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            return {"error": f"tool timeout after {self.tool_timeout_sec}s: {tc.name!r}"}
         except ToolNotFound:
             return {"error": f"tool not registered: {tc.name!r}"}
         except Exception as e:
