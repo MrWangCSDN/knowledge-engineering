@@ -236,6 +236,38 @@ class CompositeKnowledgeStore:
             self._log_get_by_entity_exc(entity_id, exc)
             return None
 
+    # ─── source-first grounding P1（[[业务问答-源码优先接地-P1设计]]）────────────
+    def get_code_snippet(self, entity_id: str) -> Optional[str]:
+        """取实体真实源码片段，供 retriever 预读注入 prompt（治代码细节臆造）。
+
+        fail-soft（永不抛）：以下任一情况一律返回 None，由 caller 跳过该候选——
+        - `_code_store is None`（解读-only 部署，无兜底向量库）
+        - `_code_store` 实例没有 `get_by_entity_id`（`_CodeStoreLike` proto 只声明
+          `search_by_text`，故此方法靠运行时 `getattr` 鸭子类型探测，而非静态接口）
+        - 查不到该实体 / record 无 code_snippet
+        - 取数过程抛任何异常
+
+        Args:
+            entity_id: 实体 ID（与召回候选的 entity_id 同源）
+        Returns:
+            真实源码片段字符串；取不到则 None
+        """
+        store = self._code_store                      # 兜底数据源（CodeEntity 向量库），可能为 None
+        if store is None:                             # 无 code_store → 无源码可取
+            return None
+        # proto 未声明 get_by_entity_id，运行时探测；getattr 第三参缺省 None
+        getter = getattr(store, "get_by_entity_id", None)
+        if not callable(getter):                      # store 实例不支持按 id 取 → 优雅缺省
+            return None
+        try:
+            record = getter(entity_id)                # 形如 {name, entity_type, code_snippet} 或 None
+        except Exception:                             # 后端异常 fail-soft（不打断召回主流程）
+            return None
+        if not record:                                # 查不到该实体（None / 空 dict）
+            return None
+        snippet = record.get("code_snippet")          # 真实源码片段
+        return snippet if snippet else None           # 空串 / None 归一为 None
+
     def _log_get_by_entity_exc(self, entity_id: str, exc: Exception) -> None:
         """get_by_entity 内部异常的日志分流。
 
