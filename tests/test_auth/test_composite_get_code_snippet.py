@@ -27,11 +27,28 @@ def test_returns_snippet_when_code_store_has_it():
     class _CS:
         def search_by_text(self, *a, **k):
             return []
-        def get_by_entity_id(self, eid):
+        def get_by_entity_id(self, eid, *, tenant=None):   # 真实方法已支持 tenant kwarg
             # 真实 code_store 的返回形如 {name, entity_type, code_snippet}
             return {"name": "m", "code_snippet": "public void m(){...}"}
     # 断言：取到真实源码片段原样返回
     assert _mk(_CS()).get_code_snippet("A::m#()") == "public void m(){...}"
+
+
+def test_passes_project_id_as_tenant():
+    """get_code_snippet 必须用 project_id 作 tenant 调 get_by_entity_id（CodeEntity 是 multi-tenant）。
+
+    这是 P1 能取到源码的关键：不传 tenant 会被 Weaviate 拒（multi-tenancy without tenant）。
+    """
+    seen = {}                                     # 捕获 mock 收到的 tenant
+    class _CS:
+        def search_by_text(self, *a, **k):
+            return []
+        def get_by_entity_id(self, eid, *, tenant=None):
+            seen["tenant"] = tenant               # 记录传入的 tenant
+            return {"code_snippet": "code"}
+    store = CompositeKnowledgeStore(interpretation_store=object(), code_store=_CS(), project_id="mall-swarm")
+    assert store.get_code_snippet("A::m#()") == "code"
+    assert seen["tenant"] == "mall-swarm"         # 用 project_id 作 tenant
 
 
 def test_none_when_code_store_is_none():
@@ -53,12 +70,12 @@ def test_none_when_get_by_entity_id_raises_or_empty():
     class _Raise:
         def search_by_text(self, *a, **k):
             return []
-        def get_by_entity_id(self, eid):
+        def get_by_entity_id(self, eid, *, tenant=None):
             raise RuntimeError("boom")  # 模拟后端异常
     class _Empty:
         def search_by_text(self, *a, **k):
             return []
-        def get_by_entity_id(self, eid):
+        def get_by_entity_id(self, eid, *, tenant=None):
             return None                 # 模拟查不到该实体
     assert _mk(_Raise()).get_code_snippet("A::m#()") is None   # 异常 fail-soft
     assert _mk(_Empty()).get_code_snippet("A::m#()") is None   # 查不到

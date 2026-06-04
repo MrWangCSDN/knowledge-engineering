@@ -255,8 +255,16 @@ class WeaviateVectorStore(BaseWeaviateStore):
         vec = get_embedding(query_text, self._dim)
         return self.search_by_vector(vec, top_k=top_k, tenant=tenant)
 
-    def get_by_entity_id(self, entity_id: str) -> Optional[dict[str, Any]]:
-        """按 entity_id（图谱方法节点 id）取 Weaviate 中对应对象，用于「从方法查源代码」双向关联。"""
+    def get_by_entity_id(self, entity_id: str, *, tenant: Optional[str] = None) -> Optional[dict[str, Any]]:
+        """按 entity_id（图谱方法节点 id）取 Weaviate 中对应对象，用于「从方法查源代码」双向关联。
+
+        Args:
+            entity_id: 方法实体 id
+            tenant: multi-tenant collection 必传（= project_id）。CodeEntity 写入时带
+                tenant（见 repopulate.py），查询不 with_tenant 会被 Weaviate 拒：
+                "multi-tenancy enabled, but request was without tenant"。不传则按单租户查
+                （向后兼容旧调用，但对 multi-tenant collection 会取不到）。
+        """
         eid = (entity_id or "").strip()
         if not eid:
             return None
@@ -267,6 +275,9 @@ class WeaviateVectorStore(BaseWeaviateStore):
         try:
             from weaviate.classes.query import Filter
             coll = self._get_collection()
+            # multi-tenant collection 查询必须绑定 tenant 分区（与 search_by_vector / delete 一致）
+            if tenant:
+                coll = coll.with_tenant(tenant)
             for cand in candidates:
                 result = coll.query.fetch_objects(
                     filters=Filter.by_property("entity_id").equal(cand),

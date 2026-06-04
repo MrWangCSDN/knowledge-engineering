@@ -260,8 +260,10 @@ class CompositeKnowledgeStore:
         if not callable(getter):                      # store 实例不支持按 id 取 → 优雅缺省
             return None
         try:
-            record = getter(entity_id)                # 形如 {name, entity_type, code_snippet} 或 None
-        except Exception:                             # 后端异常 fail-soft（不打断召回主流程）
+            # 传 tenant=project_id：CodeEntity 是 multi-tenant collection，不绑 tenant 查不到。
+            # 老 store（get_by_entity_id 不接受 tenant kwarg）→ TypeError 被下方 except 吞 → None（fail-soft）。
+            record = getter(entity_id, tenant=self._project_id)  # {name, entity_type, code_snippet} 或 None
+        except Exception:                             # 后端异常 / 旧签名 TypeError fail-soft（不打断召回主流程）
             return None
         if not record:                                # 查不到该实体（None / 空 dict）
             return None
