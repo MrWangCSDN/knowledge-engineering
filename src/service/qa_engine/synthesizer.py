@@ -565,25 +565,35 @@ def _cc_kind(entity_id: str) -> str:
     return "method"
 
 
-def _short_cn_label(text: str) -> str:
-    """从 2b 中文解读提炼一个短 label（取首句/首子句，截断 ~14 字），作业务流程节点名。"""
+# 业务标签断句的分隔符（句读 + 中英空格 + 换行 + 左括号）；2b 解读多为空格分隔的短语列表
+_LABEL_SEPS = frozenset("。，；、 　\n（(")
+
+
+def _short_cn_label(text: str, max_len: int = 16) -> str:
+    """从 2b 中文解读提炼一个短 label 作业务流程节点名（取首个完整短语，不切词中间）。
+
+    步骤：① 去掉开头 [摘要]/【…】小节标记；② 在最早的分隔点断句取首短语；首短语太短（<4 字，
+    如「获取」）则延到下一个分隔点（→「获取 验证码」）；③ 兜底按 max_len 截断。
+    """
     if not text:
         return ""
     text = text.strip()
-    # 去掉 2b 解读开头的 "[摘要]"/"[业务]" 等方括号小节标记（仅短前缀，避免误伤正文方括号）
-    if text.startswith("[") or text.startswith("【"):
+    # ① 去掉开头短方括号小节标记（[摘要]/【…】；仅短前缀，避免误伤正文方括号）
+    if text[:1] in "[【":
         for close in ("]", "】"):
             end = text.find(close)
             if 0 < end < 8:
                 text = text[end + 1:].strip()
                 break
-    # 取第一个句读符号/空格前的部分（。/，/；/、/换行/左括号/空格）作中文业务动作短语
-    for sep in ("。", "，", "；", "、", "\n", "（", "(", " ", "　"):
-        idx = text.find(sep)
-        if idx > 0:
-            text = text[:idx]
-            break
-    return text.strip()[:14]
+    # ② 收集所有分隔点位置；在最早处断句，首短语过短则延到下一个分隔点
+    cuts = [i for i, ch in enumerate(text) if ch in _LABEL_SEPS and i > 0]
+    if cuts:
+        cut = cuts[0]
+        if cut < 4 and len(cuts) > 1:   # 首短语太短（如「获取」）→ 并上下一段
+            cut = cuts[1]
+        text = text[:cut]
+    # ③ 兜底截断（无分隔点的超长串）
+    return text.strip()[:max_len]
 
 
 def _build_call_chain_section_from_edges(

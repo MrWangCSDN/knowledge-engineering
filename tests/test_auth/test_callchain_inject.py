@@ -83,11 +83,17 @@ def test_build_call_chain_sets_kind_and_filters_accessor_noise():
     assert nodes["com.x.mapper.OmsMapper::insert#(o)"]["entityId"] == "method://com.x.mapper.OmsMapper::insert#(o)"
 
 
-def test_short_cn_label_strips_marker_and_takes_first_phrase():
-    """_short_cn_label 去掉 2b 解读开头的 [摘要] 等方括号小节标记，取首个短语作 label。"""
+def test_short_cn_label_strips_marker_and_cuts_clean():
+    """_short_cn_label：去 [摘要] 标记；在最早分隔点取首短语（不切词中间）；首段过短则并下一段。"""
     from src.service.qa_engine.synthesizer import _short_cn_label
-    assert _short_cn_label("[摘要] 接收注册申请 校验后落库") == "接收注册申请"
+    # 句读符号断句（逗号）
     assert _short_cn_label("订单创建入口，接收下单参数") == "订单创建入口"
+    # 去 [摘要] 标记 + 空格分隔短语：取首短语
+    assert _short_cn_label("[摘要] 接收注册申请 校验后落库") == "接收注册申请"
+    # 首短语太短（「获取」2字）→ 并上下一段
+    assert _short_cn_label("获取 验证码 缓存 接口规范") == "获取 验证码"
+    # 长短语取首段、不切词中间
+    assert _short_cn_label("注册接口方法 定义注册参数规范说明 处理请求") == "注册接口方法"
     assert _short_cn_label("") == ""
 
 
