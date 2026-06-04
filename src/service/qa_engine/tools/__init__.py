@@ -26,6 +26,7 @@ from src.service.qa_engine.tools.ke_grep import build_ke_grep_tool
 from src.service.qa_engine.tools.ke_glob import build_ke_glob_tool
 from src.service.qa_engine.tools.ke_read_file import build_ke_read_file_tool
 from src.service.qa_engine.tools.ke_ls import build_ke_ls_tool
+from src.service.qa_engine.tools.render_call_graph import build_render_call_graph_tool
 from src.service.qa_engine.retriever import InterpretationStoreProto, GraphProto
 
 
@@ -46,6 +47,7 @@ __all__ = [
     "build_ke_glob_tool",
     "build_ke_read_file_tool",
     "build_ke_ls_tool",
+    "build_render_call_graph_tool",
     "build_default_registry",
 ]
 
@@ -88,6 +90,9 @@ def build_default_registry(
     registry.register(build_ke_callers_tool(graph))
     registry.register(build_ke_table_access_tool(graph))
     registry.register(build_ke_impact_tool(graph))
+    # 渲染类工具：调用图（图数据走前端内联渲染，summary 回灌 LLM）。设计 [[业务问答-agent化输出改造-设计]] §5
+    # summary_lookup 暂留 None（label 回退方法短名）；后续可接 interpretation_store 取 2b 中文解读
+    registry.register(build_render_call_graph_tool(graph))
     # meta 工具：todo_write 无后端依赖，始终注册（设计 §3.3）
     registry.register(build_todo_write_tool())
     if code_store is not None:

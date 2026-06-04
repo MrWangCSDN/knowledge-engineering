@@ -53,3 +53,16 @@ def test_render_call_graph_label_uses_summary_lookup():
     out = asyncio.run(tool.handler({"entity_id": "Svc::pay#()", "direction": "down", "depth": 1}))
     labels = [n["label"] for n in out["render"]["data"]["nodes"]]
     assert any("支付" in l for l in labels)               # 中文 label 生效
+
+
+def test_render_call_graph_registered_in_factory():
+    """工具工厂 build_default_registry 应注册 render_call_graph（与 ke_callees 等并列）。"""
+    from src.service.qa_engine.tools import build_default_registry
+
+    class _G:                                              # 最小 GraphProto stub（构造工具不触发遍历）
+        def successors(self, n): return []
+        def predecessors(self, n): return []
+
+    reg = build_default_registry(graph=_G(), interpretation_store=object(), project_id="p")
+    names = [t.name for t in reg.list_tools()]
+    assert "render_call_graph" in names
