@@ -177,7 +177,7 @@ AGENT_SYSTEM_PROMPT = """你是企业代码知识分析师。你的任务是把�
 【作答风格】
 - 用**自然的 markdown** 作答：按需用标题、列表、表格、代码块（```lang）组织，不必套固定结构。
 - 简洁专业、中文；篇幅与问题复杂度匹配，不啰嗦也不凑字数。
-- 调用链/架构/数据流等适合图的，按下方 Mermaid 约定画图。
+- 调用链/架构/数据流等需要图时，**一律调 `render_call_graph` 工具出图**（见下【画图约定】），绝不自己手画。
 
 【严格规则】
 1. **不允许编造**：所有方法名、类名、表名必须出自我提供的 context 或工具返回结果，不能从你的知识里"想当然"；宁可说"未找到"也不要虚构 entity_id / 代码内容。
@@ -211,58 +211,20 @@ context 不足时**不要直接放弃**，先用工具探索：
   - 你能基于代码本身解读：方法签名、调用关系、SQL preview（MyBatis）等
   - **不要**因 summary_text 为空就说"未找到"——代码层数据已经足够给出有意义的回答
 
-【画图约定】
+【画图约定 —— 唯一规则，必须遵守】
 
-**调用关系/调用链/依赖/流程等"节点-边"图：必须且只能调 `render_call_graph(entity_id, direction)` 工具，
-严禁自己手写 ```reactflow**（手画的边常臆造、且会与工具图重复出两张）。工具自动构图、准确、含中文业务标签，
-直接内联出图——你只需文字里提"见下方调用图"、不要逐节点复述。direction 拿不准用 down，工具会自动回退到有调用关系的一侧。
+任何"节点-边"类图（调用链 / 业务流程 / 模块依赖 / 架构总览 / 数据流）**一律调
+`render_call_graph(entity_id, direction)` 工具**出图。工具自动生成 ReactFlow 图：准确、
+可缩放/全屏/PNG 导出、节点可点击跳源码、自带中文业务标签，直接内联渲染。
 
-【手画图约定 —— ⚠️ 仅限"非调用关系"的图】
+⚠️ **严禁自己手画任何格式的图**：不要输出 mermaid 代码块、不要输出 reactflow 代码块、
+不要用 ASCII 画框线图。手画的边常臆造、且前端无法稳定渲染（会"解析失败"显示裸代码）。
 
-调用关系/调用链/依赖/流程图一律用 render_call_graph 工具（见上），**你自己不要写 ```reactflow**。
-下面的 ReactFlow JSON 规格只是工具产出的格式参考；时序/ER/状态/Gantt 等才用 Mermaid 自己画。
-
-【ReactFlow JSON 规格（仅供参考，工具自动产出此格式）】
-
-──【首选】ReactFlow JSON（前端 ReactFlow 渲染，支持缩放/全屏/PNG 导出/MiniMap）──
-
-调用链 / 业务流程 / 架构图 / 模块依赖 / 数据流 等"节点-边"类图，用 ` ```reactflow `
-fenced code block 包裹 JSON 输出（**fence 内是合法 JSON**，**不要再包 ```json fence**）：
-
-  ```reactflow
-  {
-    "nodes": [
-      {
-        "id": "n1",                              // 必填，ASCII 标识符（字母开头 + [A-Za-z0-9_]）
-        "label": "OrderController.create",       // 必填，节点显示文本（方法短名）
-        "kind": "controller",                    // 可选；枚举 controller/service/mapper/method/external
-        "classOf": "com.foo.OrderController",    // 可选，类全限定名（hover 显示）
-        "sig": "(OrderParam)",                   // 可选，方法签名
-        "entityId": "method://com.foo.OrderController#create"   // 推荐，跳源码
-      }
-    ],
-    "edges": [
-      {"from": "n1", "to": "n2", "label": "调用业务层"}  // label 可选，业务动作
-    ]
-  }
-  ```
-
-ReactFlow JSON 约束：
-- id 只能 ASCII [A-Za-z0-9_]，含 . / / 空格 / 中文 → 用下划线替换（如 `com.foo.Bar` → `com_foo_Bar`）
-- kind 不在枚举里 → 用 'method'
-- edges.from / edges.to 必须引用 nodes 里存在的 id（无悬挂边）
-- 节点 5-15 个最佳；超过 20 拆图
-- entityId 字段用 context 里给的真实 entity_id，不能编造
-
-──【兜底】Mermaid（时序图 / ER 图 / 状态图 / Gantt 等"非节点-边"图仍用 Mermaid）──
-
-不适合 ReactFlow 的图（sequenceDiagram / erDiagram / stateDiagram / gantt）仍用 mermaid：
-- 节点 ID 必须用 context 给出的 entity_id，不能编造。
-- 节点标签两行：显示名 + `\\n` + 真实路径，例：`open-account["OpenAccount\\nsrc/deposit/OpenAccount.java"]`。
-- 边必带语义标签：`A -->|"调用 / 写入 / 校验"| B`。
-- 节点超过 5 个时拆图，避免毛球图。
-- 4 类预设样式：external `#585b70`（外部系统）/ entry `#89b4fa`（入口）/ store `#a6e3a1`（持久化）/ concern `#f38ba8`（风险）。
-- 写在 ` ```mermaid ` fenced code block 里。
+- 出图时机：用户问"怎么实现 / 流程 / 调用链 / 架构 / 依赖 / 数据流"等，先调 render_call_graph，
+  再用文字解释；正文里只说"见下方调用图"，不要逐节点复述。
+- entity_id 用 context 候选或「调用链方法清单」里的真实值（带 method:// 前缀的照搬）；
+  direction 拿不准用 down，工具会自动回退到有调用关系的一侧。
+- 工具返回空（该入口无调用边）→ 就不画图、改用文字/表格说明，**绝不退回手画**。
 """
 
 
@@ -273,7 +235,7 @@ ReactFlow JSON 约束：
 # 故意短小：LLM 看完不会被这一两句"覆盖"掉自己的判断，只在它犹豫时起锚定作用
 _SKILL_HINTS: dict[str, str] = {
     "business": "本题已被分类为 business（业务规则）。请优先采用 business-rule 视角；rules 段务必充实，db_ops 段可省略。",
-    "dependency": "本题已被分类为 dependency（调用 / 依赖）。请优先采用 dependency-map 或 request-lifecycle 视角；call_chain 段务必含 Mermaid 双向调用图。",
+    "dependency": "本题已被分类为 dependency（调用 / 依赖）。请优先采用 dependency-map 或 request-lifecycle 视角；务必给出双向调用图（机制按各自路径：agent 调 render_call_graph 工具，6 段出 call_chain 段）。",
     "data-flow": "本题已被分类为 data-flow（数据流 / 持久化）。请优先采用 data-flow 视角；db_ops 段务必列出所有涉及的表 + 读写操作。",
     "architecture": "本题已被分类为 architecture（整体架构）。请优先采用 overall-architecture 视角；entry_point + call_chain 都要写。",
 }
@@ -382,7 +344,11 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
     call_edges = context.get("call_edges_by_entry") or {}
     if any(call_edges.values()):
         parts.append("")
-        parts.append("调用链路（入口向下多跳展开，from → to 边）—— 画调用图/流程图时请据此输出 call_chain 段:")
+        if free_format:
+            parts.append("调用链路（入口向下多跳展开，from → to 边）—— 需要调用图时调 render_call_graph 工具"
+                         "（传入口 entity_id），不要手画；以下边供你理解调用结构:")
+        else:
+            parts.append("调用链路（入口向下多跳展开，from → to 边）—— 画调用图/流程图时请据此输出 call_chain 段:")
         for entry, edges in call_edges.items():
             if not edges:
                 continue
@@ -406,21 +372,26 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
                         seen_m.add(m)
                         recalled_methods.append(m)
         parts.append("")
-        parts.append("调用链方法清单（含业务解读；画业务流程图时只能锚定这些真实方法的 entityId，严禁虚构）:")
+        parts.append("调用链方法清单（含业务解读；引用 / 画图只能锚定这些真实方法的 entityId，严禁虚构）:")
         for m in recalled_methods:
             s = node_summaries.get(m)
             if s:
                 parts.append(f"  - entityId: method://{m} | 方法: {m} | 业务解读: {s}")
             else:
                 parts.append(f"  - entityId: method://{m} | 方法: {m} | （无解读，按方法名+签名理解）")
-        # A1 业务流抽象指令
+        # 画图指令分路径：agent（free_format）一律调 render_call_graph 工具、绝不手画；
+        # 6 段沿用 A1 锚定式手绘 call_chain JSON 段（QASynthesizer 一次性合成，无工具）。
         parts.append("")
-        parts.append("【画 call_chain 业务流程图时（A1 锚定式）】")
-        parts.append("  1. 把上述调用链重写成中文业务步骤流：可把连续的几个方法合并成一个业务步骤；")
-        parts.append("  2. 每个节点必须锚定到上面清单里的某个真实方法，entityId 照搬其 method:// 值（点击可跳源码）；")
-        parts.append("  3. label 用中文业务动作（≤12 字）；有「业务解读」的据其提炼，无解读的按方法名/签名理解；")
-        parts.append("  4. edge.label 用中文衔接（如「校验通过后」「下单成功触发」）；")
-        parts.append("  5. 只能用上面清单里的方法，严禁虚构代码里没有的步骤/方法。")
+        if free_format:
+            parts.append("【需要调用图 / 业务流程图时】调 `render_call_graph` 工具（用上面清单里的真实 entityId 作入口），"
+                         "工具自动出可点击的 ReactFlow 图——**不要自己手画 mermaid / reactflow**。")
+        else:
+            parts.append("【画 call_chain 业务流程图时（A1 锚定式）】")
+            parts.append("  1. 把上述调用链重写成中文业务步骤流：可把连续的几个方法合并成一个业务步骤；")
+            parts.append("  2. 每个节点必须锚定到上面清单里的某个真实方法，entityId 照搬其 method:// 值（点击可跳源码）；")
+            parts.append("  3. label 用中文业务动作（≤12 字）；有「业务解读」的据其提炼，无解读的按方法名/签名理解；")
+            parts.append("  4. edge.label 用中文衔接（如「校验通过后」「下单成功触发」）；")
+            parts.append("  5. 只能用上面清单里的方法，严禁虚构代码里没有的步骤/方法。")
 
     callers = context.get("callers_by_entry") or {}
     if any(callers.values()):
