@@ -387,3 +387,46 @@ async def test_stream_tool_call_carries_at_offset_for_inline_render() -> None:
     payload = _json.loads(tc_blocks[-1])
     assert payload.get("at") == 6                 # 内联锚点 = 调工具前已流式的 6 个字
     assert payload.get("render") is not None      # render 透传仍在
+
+
+@pytest.mark.asyncio
+async def test_stream_folds_render_into_on_complete_sections() -> None:
+    """RV2-T3：agent 流式调 render_call_graph → on_complete 的 sections 按 at 折叠出 call_chain 段
+    （持久化+有序，治"图跳末尾/reopen丢图"）。"""
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+    from src.service.qa_engine.llm_types import ToolCall as _ToolCall
+
+    retriever = _build_mock_retriever()
+    # 最终答案正文 = 流式吐的全文，便于 at=6 切片落在"先看调用关系"之后
+    final_answer = SynthesizedAnswer(
+        sections=[{"type": "overview", "title": "回答", "content": "先看调用关系详解"}],
+        token_usage=10, cost_yuan=0.0)
+    synth = MagicMock(spec=ReActSynthesizer)
+
+    async def fake_stream(ctx, history=None, on_token=None, on_tool_call=None, memory_block=None, **kwargs):
+        await on_token("先看调用关系")            # 6 字 → offset=6
+        call = _ToolCall(id="c1", name="render_call_graph", arguments={"entity_id": "M"})
+        await on_tool_call("complete", call,
+                           {"render": {"kind": "call_graph", "data": {"nodes": [{"id": "n1"}], "edges": []}}, "summary": "图"})
+        await on_token("详解")
+        return final_answer
+
+    synth.synthesize_stream = AsyncMock(side_effect=fake_stream)
+
+    captured: dict = {}
+
+    async def _on_complete(q, sections, meta):
+        captured["sections"] = sections
+
+    async for _ in stream_qa_answer(question="x", project_id="p", session_id="s",
+                                    retriever=retriever, synthesizer=synth,
+                                    on_complete=_on_complete):
+        pass
+
+    sections = captured["sections"]
+    # 折叠成 [文本(先看调用关系), call_chain(图), 文本(详解)]，图在 at=6 处
+    assert [s["type"] for s in sections] == ["overview", "call_chain", "overview"]
+    assert sections[0]["content"] == "先看调用关系"
+    assert sections[2]["content"] == "详解"
+    assert '"n1"' in sections[1]["content"]            # 图数据进了 call_chain 段
+    assert all(s.get("headerless") for s in sections)  # agent 自由输出无小节头

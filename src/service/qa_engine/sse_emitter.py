@@ -65,6 +65,58 @@ def format_sse(event_type: str, data: object) -> str:
     return f"event: {event_type}\ndata: {payload}\n\n"
 
 
+def fold_render_sections(sections: list[dict], renders: list[dict]) -> list[dict]:
+    """把 agent 自由输出里调 render_call_graph 产出的调用图，按 at 偏移折叠进 sections。
+
+    agent 自由输出原是单 overview 段（content=全部正文）。本函数据各图的 at（= 模型说到该处时
+    的正文字符偏移），把首个文本段切片，在对应位置插入 call_chain 段，使：
+      - 完成态前端按 sections 顺序渲染 → 图在正文对应位置（不再跳末尾）；
+      - 图随 sections 持久化（reopen 不丢）。
+    折叠出的段标 ``headerless=True``：agent 自由输出是连续叙述，不该出现「📌 回答」小节头
+    （原本单段靠 sections.length===1 免头，折成多段后失效，故显式标记）。
+
+    Args:
+        sections: synthesizer 产出的 sections（agent 路径通常 ``[{type:overview, content:全文}]``）
+        renders: ``[{"at": int, "data": {nodes,edges}}, ...]``（流式期间收集的图，按 at 折叠）
+    Returns:
+        折叠后的新 sections；无 renders / 异常 → 原样返回（fail-soft，不阻断持久化）。
+    """
+    # 无图 → 原样返回（单段叙述不动）
+    if not renders or not sections:
+        return sections
+    try:
+        # 取首个文本段作为折叠载体（agent 自由输出就是单段；6 段路径不收集 renders，不会进这里）
+        base = sections[0]
+        text = base.get("content") or ""
+        base_type = base.get("type", "overview")
+        # 按 at 升序（同 at 稳定）；at 夹到 [0, len(text)]，越界容错
+        pts = sorted(
+            ({"at": max(0, min(int(r["at"]), len(text))), "data": r["data"]} for r in renders),
+            key=lambda r: r["at"],
+        )
+        out: list[dict] = []
+        cursor = 0
+        for r in pts:
+            chunk = text[cursor:r["at"]]
+            if chunk:                                   # 非空文本段才 push（避免空段）
+                out.append({"type": base_type, "headerless": True, "content": chunk})
+            # 调用图作为 call_chain 段：content = {nodes,edges} JSON 字符串（与 6 段 call_chain 同构）
+            out.append({
+                "type": "call_chain",
+                "title": "",
+                "headerless": True,
+                "content": json.dumps(r["data"], ensure_ascii=False),
+            })
+            cursor = r["at"]
+        tail = text[cursor:]
+        if tail:                                        # 末段非空才 push
+            out.append({"type": base_type, "headerless": True, "content": tail})
+        out.extend(sections[1:])                        # 其余原始段（agent 路径通常没有）拼在后面
+        return out
+    except Exception:                                   # fail-soft：任何异常都不阻断持久化
+        return sections
+
+
 # ─── 类型：on_complete 回调 ─────────────────────────────────────────────────
 
 OnCompleteCallback = Callable[
@@ -177,6 +229,9 @@ async def stream_qa_answer(
     # 让前端把调用图内联插到"模型说到这里时"的位置（而非默认 text.length 末尾）。
     # _on_token 累加；_on_tool_call 读快照。用 list 容器以便闭包内可变。
     _offset = [0]
+    # 收集 agent 流式期间调 render_call_graph 产出的调用图（按 at 折叠进 sections，治跳末尾/reopen丢图）。
+    # 每项 {"at": 调工具时刻的正文偏移, "data": {nodes,edges}}。设计 [[业务问答-reactflow御用画图工具-设计]] §四④。
+    rendered_graphs: list[dict] = []
 
     async def _on_tool_call(phase: str, call, result=None):
         """ReActSynthesizer 调工具时触发；把事件压栈，主流程 yield 之前 flush。
@@ -209,6 +264,10 @@ async def stream_qa_answer(
             # 调查类工具无 render 字段，不受影响。设计 [[业务问答-agent化输出改造-设计]] §5.2
             if isinstance(result, dict) and result.get("render") is not None:
                 payload["render"] = result["render"]
+                # 调用图：记下 at（此刻正文偏移）+ 图数据，流结束后折叠进 sections（持久化+有序）
+                render = result["render"]
+                if isinstance(render, dict) and render.get("kind") == "call_graph" and render.get("data"):
+                    rendered_graphs.append({"at": _offset[0], "data": render["data"]})
         pending_tool_events.append(("tool_call", payload))
 
     # 判断要不要带 on_tool_call：只有 ReActSynthesizer 才认这个 kwarg
@@ -313,6 +372,10 @@ async def stream_qa_answer(
             "recoverable": True,
         })
         return
+
+    # 4.5 折叠调用图：把 agent 流式期间画的图按 at 插进 sections（call_chain 段），
+    #     使 SSE 按段 dump + on_complete 持久化的 sections 都自带图、且位置正确（治跳末尾/reopen丢图）。
+    answer.sections = fold_render_sections(answer.sections, rendered_graphs)
 
     # 5. 按段 dump（v1：每段 section_start + content + section_done）
     for section in answer.sections:
