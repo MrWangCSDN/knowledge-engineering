@@ -664,9 +664,14 @@ def _build_call_chain_section_from_edges(
         if nid not in keep:
             continue
         cn = _short_cn_label(summaries.get(nid, ""))
+        # 中英结合（治"节点空洞"）：label=中文业务名（无解读则方法短名兜底）；method=英文 class.method
+        # （去包名短类名 + 方法），前端两行展示——上行中文业务动作、下行真实代码标识。
+        cls_short = _cc_class_of(nid).rsplit(".", 1)[-1]
+        method_en = f"{cls_short}.{_cc_label(nid)}" if cls_short else _cc_label(nid)
         nodes.append({
             "id": nid,
             "label": cn or _cc_label(nid),
+            "method": method_en,
             "classOf": _cc_class_of(nid),
             "kind": _cc_kind(nid),
             "entityId": f"method://{nid}",

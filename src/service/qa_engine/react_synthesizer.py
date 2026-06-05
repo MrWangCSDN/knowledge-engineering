@@ -138,6 +138,8 @@ class ReActSynthesizer:
 
         # 上一轮 LLM 的响应；max_iterations 用完时拿它当 final fallback
         last_response: LLMToolResponse | None = None
+        # 累加每轮正文：调工具前那轮的文字（如"先看调用关系："）不能被最后一轮覆盖（修内容丢失）
+        acc_text = ""
 
         # 总超时护栏：超预算停循环、用已生成内容收尾（设计 §7）
         _deadline = time.monotonic() + self.total_timeout_sec
@@ -149,10 +151,11 @@ class ReActSynthesizer:
                 break
             response = await self.llm.complete_with_tools(messages=messages, tools=tools_schema)
             last_response = response
+            acc_text += (response.content or "")   # 累加本轮正文（含调工具前的开场白）
 
             # 没要求调工具 → final answer，解析后返回
             if not response.has_tool_calls():
-                raw = response.content or ""
+                raw = acc_text   # 用累加全文（含前序轮正文），修内容丢失
                 sections = QASynthesizer._parse_sections(raw)
                 return SynthesizedAnswer(sections=sections, raw_output=raw, cited_entities=cited_entities)
 
@@ -207,9 +210,9 @@ class ReActSynthesizer:
                 })
             # 进入下一轮 LLM 调用
 
-        # max_iterations 用完仍没给 final answer → 用最后一轮的 content 兜底
-        # 让用户至少看到 LLM 最后想说啥；不抛错保持稳健
-        raw = (last_response.content if last_response else "") or ""
+        # max_iterations 用完仍没给 final answer → 用累加全文兜底（含各轮正文，不只最后一轮）
+        # 让用户至少看到 LLM 说过啥；不抛错保持稳健
+        raw = acc_text or ((last_response.content if last_response else "") or "")
         if raw:
             sections = QASynthesizer._parse_sections(raw)
         else:
@@ -308,21 +311,24 @@ class ReActSynthesizer:
                     elif isinstance(event, ToolCall):
                         round_tool_calls.append(event)
                 round_content = "".join(round_text_buf)
-                last_raw_output = round_content
+                # 累加而非覆盖：调工具前那一轮的正文（如"先看调用关系："）必须留在最终答案里，
+                # 否则多轮时只剩最后一轮 → 用户感知"调用完成后内容丢失"。
+                last_raw_output += round_content
             else:
                 # ─── 伪流路径（v1.7 兼容）──────────────────────────────
                 response = await self.llm.complete_with_tools(messages=messages, tools=tools_schema)
                 round_content = response.content or ""
                 round_tool_calls = list(response.tool_calls)
-                last_raw_output = round_content
+                last_raw_output += round_content   # 同上：累加，不丢前序轮正文
 
             # 没有 tool_calls → 这是最终答案那一轮
             if not round_tool_calls:
                 # 伪流路径：还要分块推出（真流路径已经在循环里推过了）
                 if not has_real_stream and on_token is not None and round_content:
                     await self._pseudo_stream(round_content, on_token)
-                sections = QASynthesizer._parse_sections(round_content)
-                return SynthesizedAnswer(sections=sections, raw_output=round_content, cited_entities=cited_entities)
+                # 用累加后的全文（含调工具前的正文）解析 + 返回，修内容丢失
+                sections = QASynthesizer._parse_sections(last_raw_output)
+                return SynthesizedAnswer(sections=sections, raw_output=last_raw_output, cited_entities=cited_entities)
 
             # 有 tool_calls → 继续 ReAct 循环
             # 1) 把"assistant 这一轮"加进 messages

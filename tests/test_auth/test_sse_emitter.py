@@ -346,3 +346,44 @@ async def test_stream_handles_react_synthesizer_with_token_and_tool_call_events(
     # 标准 section + done 仍存在
     assert "event: section_start" in body
     assert "event: done" in body
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_call_carries_at_offset_for_inline_render() -> None:
+    """render 工具的 tool_call 事件带 at = 调工具时刻已流式字符数 → 前端据此内联插图（不甩末尾）。"""
+    from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+    from src.service.qa_engine.llm_types import ToolCall as _ToolCall
+
+    retriever = _build_mock_retriever()
+    final_answer = SynthesizedAnswer(
+        sections=[{"type": "overview", "title": "x", "content": "y", "references": []}],
+        token_usage=10, cost_yuan=0.0)
+    synth = MagicMock(spec=ReActSynthesizer)
+
+    async def fake_stream(ctx, history=None, on_token=None, on_tool_call=None, memory_block=None, **kwargs):
+        # 先流 6 个字 → offset 应为 6；再调 render 工具（at 锚定到这 6 个字之后）
+        if on_token:
+            await on_token("先看调用关系")
+        if on_tool_call:
+            call = _ToolCall(id="c1", name="render_call_graph", arguments={"entity_id": "M"})
+            await on_tool_call("complete", call,
+                               {"render": {"kind": "call_graph", "data": {"nodes": [], "edges": []}}, "summary": "图"})
+        if on_token:
+            await on_token("详解")
+        return final_answer
+
+    synth.synthesize_stream = AsyncMock(side_effect=fake_stream)
+
+    events: list[str] = []
+    async for chunk in stream_qa_answer(question="x", project_id="p", session_id="s",
+                                        retriever=retriever, synthesizer=synth):
+        events.append(chunk)
+    body = "".join(events)
+
+    import re
+    import json as _json
+    tc_blocks = re.findall(r"event: tool_call\ndata: (\{.*\})", body)
+    assert tc_blocks, "应有 tool_call 事件"
+    payload = _json.loads(tc_blocks[-1])
+    assert payload.get("at") == 6                 # 内联锚点 = 调工具前已流式的 6 个字
+    assert payload.get("render") is not None      # render 透传仍在

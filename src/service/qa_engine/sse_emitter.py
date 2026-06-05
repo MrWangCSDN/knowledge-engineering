@@ -173,6 +173,10 @@ async def stream_qa_answer(
     # 让它每次调工具前后都 emit SSE 事件给前端"实时反馈"
     # 用 nonlocal list 收集事件（async generator 跨 await 的标准做法）
     pending_tool_events: list[tuple[str, dict]] = []
+    # 已 emit 的正文字符数（流式偏移）：render 工具的 at 锚点 = 调工具时刻的累计字符数，
+    # 让前端把调用图内联插到"模型说到这里时"的位置（而非默认 text.length 末尾）。
+    # _on_token 累加；_on_tool_call 读快照。用 list 容器以便闭包内可变。
+    _offset = [0]
 
     async def _on_tool_call(phase: str, call, result=None):
         """ReActSynthesizer 调工具时触发；把事件压栈，主流程 yield 之前 flush。
@@ -192,8 +196,9 @@ async def stream_qa_answer(
                     items = []
                 pending_tool_events.append(("todo", {"items": items}))
             return
-        # 只塞最关键字段：name + arguments / result（截断）
-        payload: dict = {"phase": phase, "id": call.id, "name": call.name}
+        # 只塞最关键字段：name + arguments / result（截断）+ at 流式偏移（render 内联锚点）
+        # at 两阶段都带：starting 让前端按位置插"调用中"占位，complete 把 render 换到同一位置。
+        payload: dict = {"phase": phase, "id": call.id, "name": call.name, "at": _offset[0]}
         if phase == "starting":
             payload["arguments"] = call.arguments
         else:  # complete
@@ -226,6 +231,9 @@ async def stream_qa_answer(
 
     async def _on_token(delta: str) -> None:
         """LLM 一吐 chunk 就经过 batcher；攒够了再压栈让主循环 yield SSE。"""
+        # 先累加流式偏移（按原始 delta 字符数，与前端 raw_stream 累计长度对齐）——
+        # render 工具的 at 锚点据此快照，确保调用图插在"模型说到这里"的位置。
+        _offset[0] += len(delta)
         batch = await token_batcher.add(delta)
         if batch is not None:
             pending_tokens.append(batch)
