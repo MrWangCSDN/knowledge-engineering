@@ -65,54 +65,6 @@ def format_sse(event_type: str, data: object) -> str:
     return f"event: {event_type}\ndata: {payload}\n\n"
 
 
-# ─── A2 确定性调用图注入（[[业务问答-确定性调用图注入-A2设计]]）────────────────
-def _should_auto_render(ctx) -> bool:
-    """门控：KE 命中（skill_id=architecture，非 chit-chat）且有调用边 → 自动出主图。
-
-    chit-chat / 无调用边（纯查询/规则类）不出图。getattr 兜底旧 ctx / 异常 ctx。
-    """
-    if getattr(ctx, "skill_id", "architecture") != "architecture":   # 闲聊路径不出图
-        return False
-    edges = getattr(ctx, "call_edges_by_entry", None) or {}          # 缺字段 → 空 dict
-    return any(edges.values())                                       # 任一入口有边
-
-
-def build_auto_call_graph_event(ctx):
-    """门控命中 → 用 render_call_graph 的渲染核心确定性构图，返回合成 tool_call 事件 payload；
-    否则 / 构图为空 / 任何异常 → None（fail-soft，绝不阻断 agent 答题）。
-
-    Args:
-        ctx: RetrievedContext（读 skill_id / call_edges_by_entry / callchain_node_summaries）
-    Returns:
-        dict（{phase,id,name,render,at}）或 None
-    """
-    if not _should_auto_render(ctx):
-        return None
-    try:
-        # 复用 synthesizer 的确定性构图（= render_call_graph 工具的渲染核心，节点含 method 双语字段）
-        from src.service.qa_engine.synthesizer import _build_call_chain_section_from_edges
-        section = _build_call_chain_section_from_edges(
-            ctx.call_edges_by_entry,
-            node_summaries=getattr(ctx, "callchain_node_summaries", None),
-        )
-        if not section:                        # 全噪声 / 截断后无边 → 不注入
-            return None
-        data = json.loads(section["content"])  # section.content 是 {nodes,edges} 的 JSON 字符串
-        if not data.get("nodes"):              # 双保险：无节点不注入
-            return None
-        # 合成"complete 阶段的 render 工具调用"事件，复用现有 tool_call+render SSE 路径；
-        # at=0 → 前端 buildAnswerSegments 把图内联到回答最开头（graph-first）。
-        return {
-            "phase": "complete",
-            "id": "auto_cg",                   # 固定 id，不与 LLM 的 tool_call id 冲突
-            "name": "render_call_graph",       # 复用渲染类工具名（前端按此识别 render 段、不收敛进调查折叠）
-            "render": {"kind": "call_graph", "data": data},
-            "at": 0,
-        }
-    except Exception:                          # best-effort：构图/解析任何异常都不阻断主流程
-        return None
-
-
 # ─── 类型：on_complete 回调 ─────────────────────────────────────────────────
 
 OnCompleteCallback = Callable[
@@ -225,12 +177,6 @@ async def stream_qa_answer(
     # 让前端把调用图内联插到"模型说到这里时"的位置（而非默认 text.length 末尾）。
     # _on_token 累加；_on_tool_call 读快照。用 list 容器以便闭包内可变。
     _offset = [0]
-
-    # A2 确定性调用图注入（[[业务问答-确定性调用图注入-A2设计]]）：门控命中（架构题 + 有调用边）→
-    # 系统确定性出主图、压进 pending_tool_events（at=0、正文流式之前 flush），不靠 agent 自觉调工具。
-    _auto_cg = build_auto_call_graph_event(ctx)
-    if _auto_cg is not None:
-        pending_tool_events.append(("tool_call", _auto_cg))
 
     async def _on_tool_call(phase: str, call, result=None):
         """ReActSynthesizer 调工具时触发；把事件压栈，主流程 yield 之前 flush。

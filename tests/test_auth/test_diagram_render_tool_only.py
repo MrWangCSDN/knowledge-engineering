@@ -54,15 +54,15 @@ def test_agent_prompt_forbids_sequential_section_numbering():
     assert ("不要给小节编号" in body) or ("描述性小标题" in body)
 
 
-def test_agent_prompt_says_main_graph_auto_shown():
-    """A2：AGENT_SYSTEM_PROMPT 告知主调用图自动展示、无需自己调画图工具画主图。"""
-    body = AGENT_SYSTEM_PROMPT
-    assert "自动展示" in body
-    assert "无需" in body and "画图工具" in body
+def test_agent_prompt_no_a2_auto_shown():
+    """A2 撤销：回归 agent-native 后，AGENT_SYSTEM_PROMPT 不再声称'主图已自动展示'。"""
+    # A2 当时让 agent'以为'系统已出图（说'如上图所示'）→ 现在 agent 自己调工具画图，撤掉这句
+    assert "自动展示" not in AGENT_SYSTEM_PROMPT
 
 
-def test_free_format_user_prompt_says_main_graph_auto_shown():
-    """A2：free_format user prompt 也提示主图自动展示。"""
+def test_free_format_user_prompt_no_a2_auto_shown():
+    """A2 撤销：free_format user prompt 也不再声称'主图已自动展示'。"""
     from src.service.qa_engine.prompts import build_user_prompt
+    # 构造带 entry_candidates 的 ctx（走画图指令分支），确认其中不含 A2 的'自动展示'话术
     p = build_user_prompt("q", {"entry_candidates": [], "skill_id": "architecture"}, free_format=True)
-    assert "自动展示" in p
+    assert "自动展示" not in p
