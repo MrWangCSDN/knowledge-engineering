@@ -66,3 +66,27 @@ def test_free_format_user_prompt_no_a2_auto_shown():
     # 构造带 entry_candidates 的 ctx（走画图指令分支），确认其中不含 A2 的'自动展示'话术
     p = build_user_prompt("q", {"entry_candidates": [], "skill_id": "architecture"}, free_format=True)
     assert "自动展示" not in p
+
+
+def test_agent_prompt_has_two_draw_modes():
+    """唯一出口双模式：AGENT_SYSTEM_PROMPT 教 entity_id（代码调用图）+ nodes/edges（逻辑/架构图）两种用法。"""
+    body = AGENT_SYSTEM_PROMPT
+    assert "render_call_graph" in body
+    assert "entity_id" in body                          # 模式 A：代码调用图
+    assert "nodes" in body and "edges" in body          # 模式 B：freeform 逻辑/架构图
+    assert "严禁" in body and "手画" in body             # 仍禁手画（唯一出口）
+
+
+def test_render_call_graph_desc_mentions_two_modes():
+    """工具描述告知双模式（entity_id 调用图 / nodes-edges 逻辑图）。"""
+    from src.service.qa_engine.tools.render_call_graph import build_render_call_graph_tool
+
+    class _G:
+        def successors(self, n):
+            return []
+
+        def predecessors(self, n):
+            return []
+
+    desc = build_render_call_graph_tool(_G()).description
+    assert "nodes" in desc or "逻辑" in desc             # 描述提到 freeform/逻辑图能力

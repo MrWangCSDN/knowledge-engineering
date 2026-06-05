@@ -214,18 +214,25 @@ context 不足时**不要直接放弃**，先用工具探索：
 
 【画图约定 —— 唯一规则，必须遵守】
 
-任何"节点-边"类图（调用链 / 业务流程 / 模块依赖 / 架构总览 / 数据流）**一律调
-`render_call_graph(entity_id, direction)` 工具**出图。工具自动生成 ReactFlow 图：准确、
-可缩放/全屏/PNG 导出、节点可点击跳源码、自带中文业务标签，直接内联渲染。
+任何"节点-边"类图（调用链 / 业务流程 / 模块依赖 / 架构总览 / 数据流 / 状态流转）**一律调
+`render_call_graph` 工具**出图——它是本系统唯一的画图出口，自动生成可缩放/全屏/PNG 导出、
+节点可点击跳源码的 ReactFlow 图，内联渲染在你说到的位置。工具有两种用法（按需二选一）：
 
-⚠️ **严禁自己手画任何格式的图**：不要输出 mermaid 代码块、不要输出 reactflow 代码块、
-不要用 ASCII 画框线图。手画的边常臆造、且前端无法稳定渲染（会"解析失败"显示裸代码）。
+  · **代码调用关系**（"谁调谁 / 调用链 / 时序"）→ 传 `entity_id`（真实方法）+ `direction`，
+    工具自动 BFS 出调用图。entity_id 用 context 候选或「调用链方法清单」里的真实值
+    （带 method:// 前缀照搬）；direction 拿不准用 down，工具会自动回退到有边的一侧。
+  · **业务逻辑 / 流程 / 架构图**（没有现成代码调用边可锚定时）→ 直接传 `nodes` + `edges`：
+    nodes 每项 {id, label(中文业务名), code(英文 类.方法，可选), kind(controller/service/dao/method，可选)}；
+    edges 每项 {source, target, label(可选)}。由你构思节点与连线，工具负责渲染成同款 ReactFlow 图。
 
-- 出图时机：用户问"怎么实现 / 流程 / 调用链 / 架构 / 依赖 / 数据流"等，先调 render_call_graph，
-  再用文字解释；正文里只说"见下方调用图"，不要逐节点复述。
-- entity_id 用 context 候选或「调用链方法清单」里的真实值（带 method:// 前缀的照搬）；
-  direction 拿不准用 down，工具会自动回退到有调用关系的一侧。
-- 工具返回空（该入口无调用边）→ 就不画图、改用文字/表格说明，**绝不退回手画**。
+⚠️ **严禁自己手画任何"节点-边"图**：不要输出 mermaid 的 graph/flowchart 代码块、不要输出 reactflow
+代码块、不要用 ASCII 画框线图。手画的边常臆造、且前端无法稳定渲染（会"解析失败"显示裸代码）。
+（例外：时序图 / ER 图 / 状态机这类 ReactFlow 画不了的，才可用 mermaid 的 sequenceDiagram / erDiagram。）
+
+- 出图时机：用户问"怎么实现 / 流程 / 调用链 / 架构 / 依赖 / 数据流"等，**先调 render_call_graph 画图，
+  再用文字解释**；正文里只说"见下方调用图"，不要逐节点复述。
+- 代码调用图（模式一）返回空（该入口无调用边）→ 改用模式二（nodes/edges）画业务逻辑图，
+  或用文字/表格说明，**绝不退回手画**。
 """
 
 
@@ -384,8 +391,8 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
         # 6 段沿用 A1 锚定式手绘 call_chain JSON 段（QASynthesizer 一次性合成，无工具）。
         parts.append("")
         if free_format:
-            parts.append("【需要调用图 / 业务流程图时】调 `render_call_graph` 工具（用上面清单里的真实 entityId 作入口），"
-                         "工具自动出可点击的 ReactFlow 图——**不要自己手画 mermaid / reactflow**。")
+            parts.append("【需要画图时】一律调 `render_call_graph` 工具（唯一画图出口，绝不手画 mermaid/reactflow）："
+                         "代码调用图传真实 entityId（上面清单里照搬）作入口；业务逻辑/架构图无现成调用边时直接传 nodes+edges。")
         else:
             parts.append("【画 call_chain 业务流程图时（A1 锚定式）】")
             parts.append("  1. 把上述调用链重写成中文业务步骤流：可把连续的几个方法合并成一个业务步骤；")

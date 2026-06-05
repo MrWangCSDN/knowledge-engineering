@@ -258,9 +258,10 @@ def build_render_call_graph_tool(
     return Tool(
         name="render_call_graph",
         description=(
-            "渲染调用关系图（可视化）。当问题涉及'调用链路/流程/它调了谁/谁调它'时调用，"
-            "在答案里内联生成一张可点击的调用图。direction=down 下游、up 上游。"
-            "图直接展示给用户，你只需在文字里自然提及'见下方调用图'，不要用文字复述图里的节点。"
+            "渲染节点-边图（ReactFlow，唯一画图出口）。两种用法二选一："
+            "① 代码调用图——传 entity_id（真实方法）+ direction(down下游/up上游)，自动 BFS 出调用关系；"
+            "② 任意业务逻辑/流程/架构图——传 nodes(每项{id,label中文,code英文,kind})+edges(每项{source,target,label})，由你构思。"
+            "图内联展示给用户，你只需在文字里说'见下方调用图'，不要复述节点；任何图都用我、不要手画 mermaid/reactflow。"
         ),
         input_schema=_SCHEMA,
         handler=handler,
