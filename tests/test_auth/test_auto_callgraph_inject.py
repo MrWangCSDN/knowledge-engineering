@@ -50,3 +50,53 @@ def test_build_event_fail_soft_on_bad_ctx():
     class _Bad:  # 无 skill_id / call_edges_by_entry 属性 → 不崩、返 None
         pass
     assert build_auto_call_graph_event(_Bad()) is None
+
+
+# ─── sse_emitter 注入接线 ────────────────────────────────────────────────────
+import re
+import json as _json
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+from src.service.qa_engine.sse_emitter import stream_qa_answer
+from src.service.qa_engine.react_synthesizer import ReActSynthesizer
+from src.service.qa_engine.synthesizer import SynthesizedAnswer
+
+
+def _mock_retriever(ctx):
+    r = MagicMock(); r.retrieve = AsyncMock(return_value=ctx)
+    return r
+
+
+def _mock_react_synth():
+    synth = MagicMock(spec=ReActSynthesizer)
+    final = SynthesizedAnswer(sections=[{"type": "overview", "title": "x", "content": "y", "references": []}],
+                              token_usage=10, cost_yuan=0.0)
+    async def fake_stream(ctx, history=None, on_token=None, on_tool_call=None, memory_block=None, **kw):
+        if on_token:
+            await on_token("订单生成流程：")
+        return final
+    synth.synthesize_stream = AsyncMock(side_effect=fake_stream)
+    return synth
+
+
+@pytest.mark.asyncio
+async def test_sse_injects_auto_callgraph_for_architecture():
+    """架构题(有边) → SSE body 含 tool_call render 事件且 at:0（确定性注入主图）。"""
+    body = "".join([c async for c in stream_qa_answer(
+        question="q", project_id="p", session_id="s",
+        retriever=_mock_retriever(_arch_ctx()), synthesizer=_mock_react_synth())])
+    assert "event: tool_call" in body
+    tc = re.findall(r"event: tool_call\ndata: (\{.*\})", body)
+    assert any(_json.loads(b).get("name") == "render_call_graph" and _json.loads(b).get("at") == 0
+               and _json.loads(b).get("render") for b in tc)
+
+
+@pytest.mark.asyncio
+async def test_sse_no_inject_for_chitchat():
+    """chit-chat → 不注入自动图。"""
+    c = _arch_ctx(); c.skill_id = "chit-chat"
+    body = "".join([x async for x in stream_qa_answer(
+        question="q", project_id="p", session_id="s",
+        retriever=_mock_retriever(c), synthesizer=_mock_react_synth())])
+    tc = re.findall(r"event: tool_call\ndata: (\{.*\})", body)
+    assert not any(_json.loads(b).get("id") == "auto_cg" for b in tc)

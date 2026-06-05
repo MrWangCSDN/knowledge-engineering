@@ -226,6 +226,12 @@ async def stream_qa_answer(
     # _on_token 累加；_on_tool_call 读快照。用 list 容器以便闭包内可变。
     _offset = [0]
 
+    # A2 确定性调用图注入（[[业务问答-确定性调用图注入-A2设计]]）：门控命中（架构题 + 有调用边）→
+    # 系统确定性出主图、压进 pending_tool_events（at=0、正文流式之前 flush），不靠 agent 自觉调工具。
+    _auto_cg = build_auto_call_graph_event(ctx)
+    if _auto_cg is not None:
+        pending_tool_events.append(("tool_call", _auto_cg))
+
     async def _on_tool_call(phase: str, call, result=None):
         """ReActSynthesizer 调工具时触发；把事件压栈，主流程 yield 之前 flush。
 
