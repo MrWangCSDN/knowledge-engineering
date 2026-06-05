@@ -52,3 +52,17 @@ def test_agent_prompt_forbids_sequential_section_numbering():
     """禁止 一/二/三 顺序编号小节——避免这次没出调用图(没有"一、")时出现孤儿"二、"。"""
     body = AGENT_SYSTEM_PROMPT
     assert ("不要给小节编号" in body) or ("描述性小标题" in body)
+
+
+def test_agent_prompt_says_main_graph_auto_shown():
+    """A2：AGENT_SYSTEM_PROMPT 告知主调用图自动展示、无需自己调画图工具画主图。"""
+    body = AGENT_SYSTEM_PROMPT
+    assert "自动展示" in body
+    assert "无需" in body and "画图工具" in body
+
+
+def test_free_format_user_prompt_says_main_graph_auto_shown():
+    """A2：free_format user prompt 也提示主图自动展示。"""
+    from src.service.qa_engine.prompts import build_user_prompt
+    p = build_user_prompt("q", {"entry_candidates": [], "skill_id": "architecture"}, free_format=True)
+    assert "自动展示" in p
