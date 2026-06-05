@@ -20,38 +20,140 @@ from typing import Any, Callable, Optional
 # GraphProto：注入式图后端协议（与 ke_callees/ke_impact 同源，零依赖主仓实现）
 from src.service.qa_engine.retriever import GraphProto
 from src.service.qa_engine.tools.base import Tool
-# 复用 synthesizer 既有的确定性调用图构建 + 短名工具（模块级函数，可直接 import）
-from src.service.qa_engine.synthesizer import _build_call_chain_section_from_edges, _cc_label
+# 复用 synthesizer 既有的确定性调用图构建 + 短名工具 + 节点上限（模块级，可直接 import）
+from src.service.qa_engine.synthesizer import (
+    _build_call_chain_section_from_edges,
+    _cc_label,
+    _CALLCHAIN_MAX_NODES,
+)
 
 # 默认/上限：防超大图把渲染跑爆（与 ke_impact 同口径）
 _DEFAULT_DEPTH = 2
 _MAX_DEPTH = 4
 _MAX_EDGES = 60
 
-# input_schema：MCP 兼容；entity_id 必填，direction/depth 选填
+# input_schema：MCP 兼容。两种模式二选一——
+#   模式 A（代码调用图）：传 entity_id [+direction/depth]，从真实方法 BFS 出调用关系图。
+#   模式 B（freeform 逻辑/架构图）：传 nodes[]+edges[]，agent 直接给出任意节点-边图。
+# entity_id 不再 required（handler 内做"二选一"校验）。
 _SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "entity_id": {
             "type": "string",
-            "description": "起始实体 ID，形如 OmsPortalOrderServiceImpl::generateOrder#(OrderParam)",
+            "description": "【模式A】起始实体 ID，形如 OmsPortalOrderServiceImpl::generateOrder#(OrderParam)",
         },
         "direction": {
             "type": "string",
-            "description": "down=下游调用图（它调用了谁）；up=上游调用图（谁调用它）",
+            "description": "【模式A】down=下游调用图（它调用了谁）；up=上游调用图（谁调用它）",
             "enum": ["down", "up"],
             "default": "down",
         },
         "depth": {
             "type": "integer",
-            "description": "遍历跳数",
+            "description": "【模式A】遍历跳数",
             "default": _DEFAULT_DEPTH,
             "minimum": 1,
             "maximum": _MAX_DEPTH,
         },
+        "nodes": {
+            "type": "array",
+            "description": "【模式B】节点列表，画任意业务逻辑/架构图。每项 {id, label(中文业务名), code(英文 类.方法,可选), kind(controller/service/dao/method,可选)}",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "code": {"type": "string"},
+                    "kind": {"type": "string"},
+                },
+                "required": ["id", "label"],
+            },
+        },
+        "edges": {
+            "type": "array",
+            "description": "【模式B】边列表，每项 {source, target, label(可选)}（端点用 nodes 里的 id）",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "target": {"type": "string"},
+                    "label": {"type": "string"},
+                },
+                "required": ["source", "target"],
+            },
+        },
     },
-    "required": ["entity_id"],
 }
+
+
+def _build_freeform_graph(nodes_in: Any, edges_in: Any) -> dict[str, Any]:
+    """模式 B：用 agent 给的 nodes/edges 直接构造 reactflow 图（业务逻辑/架构图，不触图后端）。
+
+    输出与模式 A（``_build_call_chain_section_from_edges``）**同构**，前端零改动即可吃：
+      - node = ``{id, label(中文业务名), method(英文代码标识), kind, [entityId]}``
+      - edge = ``{from, to, [label]}``（统一成 from/to，非 source/target）
+
+    :param nodes_in: agent 给的节点列表，每项 ``{id, label, code?, kind?, entityId?}``
+    :param edges_in: agent 给的边列表，每项 ``{source/from, target/to, label?}``
+    :return: ``{render:{kind:'call_graph', data:{nodes,edges}}, summary}``；无有效节点 → error 信号
+    """
+    # 节点归一化 + 截断（控图大小，与模式 A 同口径 _CALLCHAIN_MAX_NODES）
+    out_nodes: list[dict[str, Any]] = []
+    valid_ids: set[str] = set()                          # 已收节点 id 集，用于校验边端点
+    for nd in (nodes_in or [])[:_CALLCHAIN_MAX_NODES]:
+        if not isinstance(nd, dict):                     # LLM 是系统边界，非 dict 项跳过
+            continue
+        nid = nd.get("id")
+        if not nid or str(nid) in valid_ids:             # 缺 id / 重复 → 跳过
+            continue
+        nid = str(nid)
+        valid_ids.add(nid)
+        # input 用 code 表示英文代码标识 → 输出字段名 method（对齐前端 MethodNode 读 data.method）
+        node: dict[str, Any] = {
+            "id": nid,
+            "label": str(nd.get("label") or nid),                       # 中文业务名（缺则 id 兜底）
+            "method": str(nd.get("code") or nd.get("method") or ""),    # 英文 类.方法
+            "kind": str(nd.get("kind") or "method"),                    # 分层角色（前端着色）
+        }
+        ent = nd.get("entityId") or nd.get("entity_id")  # 若该节点是真实方法 → 带 method:// 让前端可点击跳源码
+        if ent:
+            ent = str(ent)
+            node["entityId"] = ent if ent.startswith("method://") else f"method://{ent}"
+        out_nodes.append(node)
+
+    if not out_nodes:                                    # 无有效节点 → error 信号，agent 改文字、不崩
+        return {"render": None, "summary": "nodes 为空，未渲染图", "error": "freeform needs non-empty nodes"}
+
+    # 边归一化：接受 from/to 或 source/target → 统一 {from,to}；丢悬挂边（端点不在节点集）+ 去重 + 截断
+    out_edges: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for ed in (edges_in or []):
+        if not isinstance(ed, dict):
+            continue
+        frm = ed.get("from") or ed.get("source")         # 两种命名都收（agent 习惯 source/target）
+        to = ed.get("to") or ed.get("target")
+        if not frm or not to:
+            continue
+        frm, to = str(frm), str(to)
+        if frm not in valid_ids or to not in valid_ids:  # 悬挂边 → 丢（防前端渲染崩）
+            continue
+        if (frm, to) in seen:                            # 去重
+            continue
+        seen.add((frm, to))
+        edge: dict[str, Any] = {"from": frm, "to": to}
+        if ed.get("label"):                              # 可选边标签（前端忽略未知键也无害）
+            edge["label"] = str(ed["label"])
+        out_edges.append(edge)
+        if len(out_edges) >= _MAX_EDGES:                 # 上限保护
+            break
+
+    data = {"nodes": out_nodes, "edges": out_edges}
+    return {
+        "render": {"kind": "call_graph", "data": data},
+        # 只回一句 summary（与模式 A 一致：render.data 不灌回 LLM，省 token）
+        "summary": f"已渲染逻辑图（{len(out_nodes)} 节点）",
+    }
 
 
 def build_render_call_graph_tool(
@@ -68,10 +170,13 @@ def build_render_call_graph_tool(
 
     # handler 是 async function；闭包捕获 graph / summary_lookup（Python 注入式编程惯用法）
     async def handler(input: dict[str, Any]) -> dict[str, Any]:
-        # 校验必填：缺 entity_id → 返回错误信号（render=None，LLM 看到 error 不会以为渲染成功）
+        # 模式 B（freeform）：agent 给了 nodes → 直接构造任意逻辑/架构图（不触图后端 BFS）
+        if input.get("nodes"):
+            return _build_freeform_graph(input.get("nodes"), input.get("edges") or [])
+        # 模式 A：校验 entity_id；既无 entity_id 又无 nodes → 返回错误信号（render=None，LLM 不会误以为成功）
         entity_id = input.get("entity_id")
         if not entity_id:
-            return {"render": None, "summary": "缺少 entity_id，无法渲染调用图", "error": "missing required field: entity_id"}
+            return {"render": None, "summary": "缺少 entity_id 或 nodes，无法渲染图", "error": "need entity_id or nodes"}
 
         # direction 兜底：非 'up' 一律 'down'
         direction = "up" if input.get("direction") == "up" else "down"
