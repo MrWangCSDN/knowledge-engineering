@@ -46,3 +46,9 @@ def test_dependency_skill_hint_mechanism_neutral():
     """dependency skill hint 去掉 Mermaid 字样（机制由各路径 system prompt 决定）。"""
     assert "Mermaid" not in _SKILL_HINTS["dependency"]
     assert "调用图" in _SKILL_HINTS["dependency"]             # 仍要求出调用图
+
+
+def test_agent_prompt_forbids_sequential_section_numbering():
+    """禁止 一/二/三 顺序编号小节——避免这次没出调用图(没有"一、")时出现孤儿"二、"。"""
+    body = AGENT_SYSTEM_PROMPT
+    assert ("不要给小节编号" in body) or ("描述性小标题" in body)
