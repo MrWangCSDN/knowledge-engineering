@@ -287,22 +287,18 @@ class ReActSynthesizer:
                 break
             if has_real_stream:
                 # ─── 真流式路径（v1.8）─────────────────────────────────
-                # 每轮收集本轮的 text + tool_calls
+                # 每轮收集本轮的 text + tool_calls。**不再 live 推 on_token**：
+                # 工具轮的文本是过程旁白（"让我查一下…"），要进灰字思考、不进正文；
+                # 待轮末按"工具轮/最终答案轮"统一分流（修旁白泄漏进正文）。
                 round_text_buf: list[str] = []
                 round_tool_calls: list[ToolCall] = []
                 async for event in self.llm.complete_stream_with_tools(
                     messages=messages, tools=tools_schema,
                 ):
                     if isinstance(event, StreamTextDelta):
-                        round_text_buf.append(event.text)
-                        # 立刻推给 on_token（首 token 即可见的关键）
-                        if on_token is not None:
-                            try:
-                                await on_token(event.text)
-                            except Exception:
-                                pass
+                        round_text_buf.append(event.text)   # 仅缓冲，轮末分流
                     elif isinstance(event, StreamThinkingDelta):
-                        # 思考增量 → on_thinking（设计 §5 灰字）；不进 round_text_buf（不污染答案）
+                        # 原生思考 token → on_thinking（设计 §5 灰字）；不进 round_text_buf（不污染答案）
                         if on_thinking is not None:
                             try:
                                 await on_thinking(event.text)
@@ -311,24 +307,27 @@ class ReActSynthesizer:
                     elif isinstance(event, ToolCall):
                         round_tool_calls.append(event)
                 round_content = "".join(round_text_buf)
-                # 累加而非覆盖：调工具前那一轮的正文（如"先看调用关系："）必须留在最终答案里，
-                # 否则多轮时只剩最后一轮 → 用户感知"调用完成后内容丢失"。
-                last_raw_output += round_content
             else:
                 # ─── 伪流路径（v1.7 兼容）──────────────────────────────
                 response = await self.llm.complete_with_tools(messages=messages, tools=tools_schema)
                 round_content = response.content or ""
                 round_tool_calls = list(response.tool_calls)
-                last_raw_output += round_content   # 同上：累加，不丢前序轮正文
 
-            # 没有 tool_calls → 这是最终答案那一轮
+            # 分流（两路径统一，治"过程旁白泄漏进正文"）：
+            #   无 tool_calls → 最终答案轮：本轮文本即答案 → on_token（打字机）+ 累加进正文。
+            #   有 tool_calls → 工具轮：本轮文本是过程旁白（"让我查…"）→ 灰字思考过程，绝不进正文。
             if not round_tool_calls:
-                # 伪流路径：还要分块推出（真流路径已经在循环里推过了）
-                if not has_real_stream and on_token is not None and round_content:
+                if on_token is not None and round_content:
                     await self._pseudo_stream(round_content, on_token)
-                # 用累加后的全文（含调工具前的正文）解析 + 返回，修内容丢失
+                last_raw_output += round_content   # 仅最终答案轮进正文
                 sections = QASynthesizer._parse_sections(last_raw_output)
                 return SynthesizedAnswer(sections=sections, raw_output=last_raw_output, cited_entities=cited_entities)
+            # 工具轮：把这一轮的旁白推进灰字思考过程（on_thinking），不进正文 last_raw_output
+            if on_thinking is not None and round_content:
+                try:
+                    await on_thinking(round_content)
+                except Exception:
+                    pass
 
             # 有 tool_calls → 继续 ReAct 循环
             # 1) 把"assistant 这一轮"加进 messages

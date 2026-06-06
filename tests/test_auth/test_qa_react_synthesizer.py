@@ -444,10 +444,9 @@ async def test_react_synthesize_stream_does_not_emit_tokens_during_tool_rounds()
 
 @pytest.mark.asyncio
 async def test_react_synthesize_stream_uses_real_streaming_when_provider_supports_it() -> None:
-    """provider 有 `complete_stream_with_tools` 时，
-    synthesize_stream 应该走真流路径（不再走 v1.7 伪流）：
-      - 一边流入 StreamTextDelta 一边触发 on_token
-      - 流末解析的 ToolCall 列表当作 tool_calls 执行
+    """provider 有 `complete_stream_with_tools` 时走真流路径。
+    新不变量（旁白泄漏修复）：工具轮的文本是过程旁白（"我先查…"）→ on_thinking（灰字思考过程），
+    绝不进正文 on_token；只有最终答案轮（无 tool_calls）的文本进 on_token + raw_output。
     """
     from src.service.qa_engine.llm_types import StreamTextDelta
 
@@ -487,21 +486,27 @@ async def test_react_synthesize_stream_uses_real_streaming_when_provider_support
     )
 
     tokens: list[str] = []
+    thinks: list[str] = []
 
     async def on_token(t: str) -> None:
         tokens.append(t)
 
-    result = await synth.synthesize_stream(_make_ctx(), on_token=on_token)
+    async def on_thinking(t: str) -> None:
+        thinks.append(t)
+
+    result = await synth.synthesize_stream(_make_ctx(), on_token=on_token, on_thinking=on_thinking)
 
     # 真流式应该走过两轮 complete_stream_with_tools（非 complete_with_tools）
     assert llm.complete_stream_with_tools.call_count == 2
 
-    # tokens 应包含两轮的所有 text deltas：第一轮"我先" + "查"，第二轮的 JSON 三段
-    # 拼起来：第一轮文本 + 第二轮完整 JSON
-    full_stream = "".join(tokens)
-    assert "我先" in full_stream
-    assert "查" in full_stream
-    assert _ok_answer_json() in full_stream
+    body = "".join(tokens)
+    think = "".join(thinks)
+    # 第 1 轮（工具轮）的过程旁白"我先""查" → 灰字思考过程，绝不进正文
+    assert "我先" in think and "查" in think
+    assert "我先" not in body and "查" not in body
+    # 正文只含最终答案轮（第 2 轮）的内容，raw_output 同样不含旁白
+    assert body == _ok_answer_json()
+    assert result.raw_output == _ok_answer_json()
 
     # 工具被实际调用（ke_callees on M1）
     graph_mock.successors.assert_called_once_with("M1")

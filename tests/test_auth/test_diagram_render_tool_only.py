@@ -54,6 +54,16 @@ def test_agent_prompt_forbids_sequential_section_numbering():
     assert ("不要给小节编号" in body) or ("描述性小标题" in body)
 
 
+def test_agent_prompt_forbids_markdown_image_placeholder_for_graphs():
+    """禁止用 markdown 图片语法 ![]() 或'已渲染'旁白来引用图——图由工具自动内联，只说'见下方调用图'。
+
+    背景：实测 agent 写出 `![paySuccess调用图](render_call_graph 工具已渲染)`（裂图）+ '调用图已渲染'旁白。
+    """
+    body = AGENT_SYSTEM_PROMPT
+    assert "图片语法" in body          # 规则里点名禁止 markdown 图片语法
+    assert "![" in body               # 出现 ![ 这个被禁的语法样例
+
+
 def test_agent_prompt_no_a2_auto_shown():
     """A2 撤销：回归 agent-native 后，AGENT_SYSTEM_PROMPT 不再声称'主图已自动展示'。"""
     # A2 当时让 agent'以为'系统已出图（说'如上图所示'）→ 现在 agent 自己调工具画图，撤掉这句
