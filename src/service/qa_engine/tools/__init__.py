@@ -91,8 +91,25 @@ def build_default_registry(
     registry.register(build_ke_table_access_tool(graph))
     registry.register(build_ke_impact_tool(graph))
     # 渲染类工具：调用图（图数据走前端内联渲染，summary 回灌 LLM）。设计 [[业务问答-agent化输出改造-设计]] §5
-    # summary_lookup 暂留 None（label 回退方法短名）；后续可接 interpretation_store 取 2b 中文解读
-    registry.register(build_render_call_graph_tool(graph))
+    # summary_lookup：从 interpretation_store 取 2b 中文解读，让图节点 label 中文化
+    # （2026-06-08 修：早期 wiring 留 None → 节点全英文方法名；接通后跟随 2b 覆盖率自动中文化）
+    def _summary_lookup(entity_id: str) -> str:
+        """entity_id → 2b 解读全文（synthesizer 用 _short_cn_label 截首句作节点 label）。
+
+        fail-soft：tenant 缺失 / 网络挂 / 字段无 一律返空串，让 label 回退方法短名而非崩图。
+        """
+        try:
+            # composite/topological store 的 get_by_entity 签名：(entity_id, level=None) → Optional[dict]
+            hit = interpretation_store.get_by_entity(entity_id)
+        except Exception:
+            return ""                                    # 任何异常静默吞，render 不受影响
+        if not hit:
+            return ""                                    # 该 entity 无 2b 解读 → 走方法名
+        # interpretation_text：2b 业务解读全文（synthesizer 内部按分隔点截首句）
+        # .get(..., "") 兜底：字段缺也不抛
+        return hit.get("interpretation_text") or ""
+
+    registry.register(build_render_call_graph_tool(graph, summary_lookup=_summary_lookup))
     # meta 工具：todo_write 无后端依赖，始终注册（设计 §3.3）
     registry.register(build_todo_write_tool())
     if code_store is not None:

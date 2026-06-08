@@ -76,3 +76,50 @@ def test_render_call_graph_registered_in_factory():
     reg = build_default_registry(graph=_G(), interpretation_store=object(), project_id="p")
     names = [t.name for t in reg.list_tools()]
     assert "render_call_graph" in names
+
+
+def test_render_call_graph_factory_wires_summary_lookup_from_interpretation_store():
+    """build_default_registry 应把 interpretation_store.get_by_entity 接到 summary_lookup → 节点 label 中文化。
+
+    历史：tools/__init__.py 注释 "summary_lookup 暂留 None" → 调用图节点全英文方法名。
+    本测试守住"接通"不变量：interpretation_store 有 2b 解读 → 节点 label 中文化。
+    """
+    from src.service.qa_engine.tools import build_default_registry
+
+    g = _FakeGraph({"Svc::pay#()": ["Svc::notify#()"]})
+
+    class _Store:
+        """假 interpretation_store：get_by_entity 返 2b 解读 dict。"""
+        def get_by_entity(self, entity_id, level=None):
+            # 模拟 composite/interpretation store 返回结构（含 interpretation_text 字段）
+            if "pay" in entity_id:
+                return {"interpretation_text": "发起支付宝支付 返回支付表单"}
+            return None
+
+    reg = build_default_registry(graph=g, interpretation_store=_Store(), project_id="p")
+    tool = reg.get("render_call_graph")                  # 取注册的工具实例
+    out = asyncio.run(tool.handler({"entity_id": "Svc::pay#()", "direction": "down", "depth": 1}))
+    labels = [n["label"] for n in out["render"]["data"]["nodes"]]
+    # 期望 pay 节点 label 含"支付"中文；notify 节点 _Store 返 None → fallback 方法名 'notify'
+    assert any("支付" in l for l in labels), f"labels={labels}（中文 label 未生效）"
+
+
+def test_render_call_graph_factory_summary_lookup_fail_soft():
+    """interpretation_store.get_by_entity 抛异常 → summary_lookup 返 "" → 不传染、节点回退英文。
+
+    fail-soft 契约：tenant 不存在 / 网络抖动 / 字段缺失等异常都不应让图渲染失败。
+    """
+    from src.service.qa_engine.tools import build_default_registry
+
+    g = _FakeGraph({"Svc::pay#()": ["Svc::notify#()"]})
+
+    class _BrokenStore:
+        def get_by_entity(self, entity_id, level=None):
+            raise RuntimeError("weaviate down")           # 模拟解读库挂
+
+    reg = build_default_registry(graph=g, interpretation_store=_BrokenStore(), project_id="p")
+    tool = reg.get("render_call_graph")
+    out = asyncio.run(tool.handler({"entity_id": "Svc::pay#()", "direction": "down", "depth": 1}))
+    # 图照样渲染（无中文，但不崩）
+    assert out["render"] is not None
+    assert len(out["render"]["data"]["nodes"]) >= 2
