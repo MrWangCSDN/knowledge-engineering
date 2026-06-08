@@ -15,10 +15,14 @@ import os  # 标准库 os：取文件后缀判语言（os.path.splitext）
 # Depends：依赖注入工厂，FastAPI 自动解析并调用（常用于 DB session / 鉴权）
 # HTTPException：向客户端返回带状态码的 JSON 错误响应
 # Query：声明 URL 查询参数（?entity_id=...），支持校验规则（min_length 等）
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 # AsyncSession：SQLAlchemy 异步数据库会话（仅用于类型注解）
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Pydantic：FastAPI 自动用 BaseModel 校验请求体 → 字段缺失/类型错时返 422
+from pydantic import BaseModel, Field
+from typing import Optional
 
 # 数据库 session 注入 dependency（测试可 override）
 from src.service.db import get_db
@@ -39,6 +43,9 @@ from src.integrations.codegraph.source_reader import read_snippet
 
 # resolve_safe_path：路径沙箱，防止 file_path 越界（../.. 逃逸、绝对路径），返回 Path 或 raise ValueError
 from src.service.qa_engine.tools._path_sandbox import resolve_safe_path
+
+# resolve_symbol_at：IDE 化光标→实体三级解析（纯函数；详见 symbol_resolver.py）
+from src.service.qa_engine.symbol_resolver import resolve_symbol_at
 
 # 2026-06-02 v1.13：整文件视角支持的 size cap
 # 超过 200 KB 的文件不返回 file_content（前端 fallback 到方法片段）
@@ -280,3 +287,96 @@ async def get_code_snippet(
 
     # 返回 dict；FastAPI 自动序列化为 JSON（Content-Type: application/json）
     return result
+
+
+# ── POST /code/resolve-symbol（IDE 化光标解析端点；设计 [[代码查看器-IDE化导航-设计]] §4.1）──
+
+class ResolveSymbolRequest(BaseModel):
+    """光标解析请求体。
+
+    file_path/line/col 必填（前端 onMouseDown/onHover 一定能拿到）；
+    token + context_entity_id + want_doc 可选，对应名字回退/上下文/hover 路径。
+    """
+    # Field(...)：... 表示必填；description 进 OpenAPI 文档
+    file_path: str = Field(..., description="源文件相对路径（同 nodes.file_path）")
+    line: int = Field(..., ge=1, description="光标行（1-indexed）")
+    col: int = Field(..., ge=0, description="光标列（0-indexed，UTF-16 与 Monaco 一致）")
+    # 可选字段：默认 None；FastAPI 不强求传
+    token: Optional[str] = Field(None, description="光标处词（位置级落空时按名回退）")
+    context_entity_id: Optional[str] = Field(
+        None, description="当前查看实体 id（预留：未来用于精确位置匹配）"
+    )
+    want_doc: bool = Field(
+        False, description="True 时附 signature + summary（hover 路径）"
+    )
+
+
+@router.post(
+    "/code/resolve-symbol",
+    # 复用 require_project_role 鉴权（同 GET /code-snippet：reporter 即可）
+    dependencies=[Depends(require_project_role("reporter"))],
+)
+async def resolve_symbol(
+    project_id: str,                                 # URL path 注入
+    payload: ResolveSymbolRequest,                   # 请求体（Pydantic 自动校验，缺字段→422）
+    request: Request,                                # 取 app.state.weaviate_interp_store（hover summary 用）
+    db: AsyncSession = Depends(get_db),
+) -> Optional[dict]:
+    """光标位置 / token → 实体解析（三级；fail-soft 全落空返 null）。
+
+    响应：
+      - 200 + {entity_id, has_source, kind, ...}：任一级命中
+      - 200 + null：三级全落空（前端据此静默或显示"暂无源码"）
+      - 404：工程不存在 / 未配源码路径
+      - 422：必填字段缺失（file_path/line/col）
+      - 403：用户无 reporter+ 权限
+      - 401：未登录
+
+    设计约束：
+      - 不挂 require_infra_healthy：只读 CodeGraph + 本地文件，infra 不健康也能工作
+      - want_doc=True 时尝试取 composite store 的 interpretation_text 首句作 summary；
+        interp_store 缺失时静默回退（summary=None）
+    """
+    # ── 1. 工程 + repo_local_path 校验（与 /code-snippet 同模式）─────────────
+    p = await db.get(ProjectModel, project_id)
+    if p is None:
+        # 防御性兜底（require_project_role 已先返 404，此处不可达）
+        raise HTTPException(status_code=404, detail="工程不存在")
+    if not p.repo_local_path:
+        raise HTTPException(status_code=404, detail="该工程未配置源码路径")
+
+    # ── 2. 图适配器（CodeGraph 或 NullGraphAdapter；不存在索引时三原语降级返 None/[]） ─
+    graph_adapter = resolve_graph_adapter(p.repo_local_path)
+
+    # ── 3. 解读库 composite（仅 want_doc=True 时需要） ────────────────────────
+    # 从 app.state 取 singleton interp_store；未就绪（None）时 summary 取 None
+    # 不抛 503：本端点设计为"infra 不健康也能用"，与 /code-snippet 一致
+    composite_store = None
+    if payload.want_doc:
+        interp_store = getattr(request.app.state, "weaviate_interp_store", None)
+        if interp_store is not None:
+            # 复用与 qa_router 同款的 adapter + composite 包装路径
+            # 延迟 import：避免顶层循环依赖（adapters 模块依赖 retriever 间接依赖 fastapi）
+            from src.service.qa_engine.adapters import WeaviateTopologicalAdapter
+            from src.knowledge.composite_knowledge_store import CompositeKnowledgeStore
+            interp_adapter = WeaviateTopologicalAdapter(interp_store)
+            code_store = getattr(request.app.state, "weaviate_code_store", None)
+            composite_store = CompositeKnowledgeStore(
+                interpretation_store=interp_adapter,
+                code_store=code_store,
+                project_id=project_id,
+            )
+
+    # ── 4. 三级解析 ───────────────────────────────────────────────────────────
+    # resolve_symbol_at 是纯函数；fail-soft；全落空返 None → FastAPI 序列化为 null
+    return resolve_symbol_at(
+        graph_adapter,
+        composite_store,
+        file_path=payload.file_path,
+        line=payload.line,
+        col=payload.col,
+        token=payload.token,
+        context_entity_id=payload.context_entity_id,
+        repo_local_path=p.repo_local_path,
+        want_doc=payload.want_doc,
+    )
