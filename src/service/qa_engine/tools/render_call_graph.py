@@ -94,17 +94,29 @@ _SCHEMA: dict[str, Any] = {
 def _node_qn(node: dict[str, Any]) -> Optional[str]:
     """从 mode B 节点 dict 抽 CodeGraph qualified_name；非真实方法节点返 None。
 
-    优先级：
+    优先级（依次尝试）：
       1. entityId（'method://Cls::m#(p)'）→ 剥 scheme + 签名
-      2. id 含 '::' → 视作 qualified_name 直传（剥签名）
-      3. 都不匹配 → None（抽象概念节点，不参与边核验）
+      2. method 字段（_build_freeform_graph 输出格式）含 '::' → 视作 qn
+      3. code 字段（agent 输入格式）含 '::' → 视作 qn
+      4. id 含 '::' → 视作 qn 直传
+      5. 都不匹配 → None（抽象概念节点，不参与边核验）
 
-    例：'method://Cls::m#(Long)' → 'Cls::m'；'Cls::m#()' → 'Cls::m'；'user' → None。
+    2026-06-08 修补漏洞：mall-swarm 实测 agent 偶尔用中文 id + method 字段藏 qn 形态
+    （如 {id: "MQ配置", method: "RabbitMqConfig::orderTtlQueue"}）→ 原 _node_qn 只看
+    entityId/id 一律返 None → 假 calls 边漏过校验。补 method/code 字段检查堵之。
     """
     ent = node.get("entityId")
     if ent:
         # 剥 'method://' / 'class://' scheme，再剥 '#' 后的签名
         return str(ent).split("://", 1)[-1].split("#", 1)[0]
+    # method：_build_freeform_graph 标准化后的 qn 字段（agent 输入 code → 输出 method）
+    method = node.get("method")
+    if method and "::" in str(method):
+        return str(method).split("#", 1)[0]
+    # code：agent 输入字段（prompt 文档约定的命名）；若 _build_freeform_graph 还没归一化时也能命中
+    code = node.get("code")
+    if code and "::" in str(code):
+        return str(code).split("#", 1)[0]
     nid = str(node.get("id") or "")
     if "::" in nid:
         return nid.split("#", 1)[0]

@@ -149,3 +149,37 @@ def test_freeform_keeps_when_graph_throws():
     # 图后端抛错时不冤枉：边保留
     assert len(out["render"]["data"]["edges"]) == 1
     assert "已过滤" not in out["summary"]
+
+
+def test_freeform_extracts_qn_from_method_or_code_field():
+    """漏洞修补：agent 用中文 id + method/code 字段藏 qn 时也能校验（2026-06-08 修）。
+
+    2026-06-08 mall-swarm 实测案例：agent 输出节点 {id: "MQ配置", method:
+    "RabbitMqConfig::orderTtlQueue"} 形态绕过了 _node_qn 的 entityId/id 提取，导致
+    跨 MQ 边界的假 calls 边漏过 freeform 校验。修：也从 method / code 字段抽 qn。
+    """
+
+    class _Graph:
+        # sendDelay → orderTtlQueue 在 CodeGraph 里无 calls 边（@Bean 不被调）
+        def successors(self, qn):
+            return []                                       # 任何 source 都无下游
+        def predecessors(self, qn):
+            return []
+
+    tool = build_render_call_graph_tool(_Graph())
+    out = _run(tool.handler({
+        "nodes": [
+            # mall-swarm 实测格式：id 是中文标签，method 是 qualified_name，entityId 不设
+            {"id": "订单创建时", "label": "订单创建时", "method": "OmsPortalOrderServiceImpl::sendDelayMessageCancelOrder", "kind": "service"},
+            {"id": "MQ配置",     "label": "MQ延迟消息", "method": "RabbitMqConfig::orderTtlQueue",                          "kind": "mq"},
+        ],
+        "edges": [
+            # 该边在 CodeGraph 里不存在 → 应被识别 + 丢弃
+            {"source": "订单创建时", "target": "MQ配置"},
+        ],
+    }))
+    data = out["render"]["data"]
+    # 节点保留（节点不删），但边被丢
+    assert len(data["nodes"]) == 2
+    assert len(data["edges"]) == 0
+    assert "已过滤" in out["summary"]
