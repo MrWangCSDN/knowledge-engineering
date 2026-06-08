@@ -798,6 +798,9 @@ def _ctx_to_dict(ctx: RetrievedContext) -> dict:
         # v1.1：把 skill_id 一并送下去，build_user_prompt 据此加视角偏置提示
         # getattr 是为了向后兼容旧 RetrievedContext 实例（万一缺这个字段）
         "skill_id": getattr(ctx, "skill_id", "architecture"),
+        # 候选树（[[候选按调用顺序组装-设计]]）：build_user_prompt 据此选 tree / flat 分支
+        # 旧 ctx 没这字段 → getattr 兜底 None → prompt 走原扁平（向后兼容）
+        "candidate_tree": getattr(ctx, "candidate_tree", None),
     }
 
 

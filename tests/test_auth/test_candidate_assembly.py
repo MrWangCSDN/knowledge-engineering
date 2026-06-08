@@ -347,3 +347,72 @@ def test_build_candidate_tree_empty_candidates():
     assert tree.orphans == []
     assert tree.fallback_to_flat is False
     assert tree.notes == []
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Task 5: retriever wiring —— retrieve() 调 build_candidate_tree 写入 ctx.candidate_tree
+# ───────────────────────────────────────────────────────────────────────────────
+import pytest
+from src.service.qa_engine.candidate_assembly import CandidateTree as _CT
+from src.service.qa_engine.retriever import QARetriever
+
+
+class _MultiPathStore:
+    """假 interpretation_store：返双路径召回（generateOrder + OrderTimeOutCancelTask）。"""
+    def search_method_hits_by_text(self, *, text, project_id, limit):
+        return [
+            {"entity_id": "OrderTimeOutCancelTask::cancelTimeOutOrder", "summary_text": "定时取消", "level": "method", "score": 0.78},
+            {"entity_id": "OmsPortalOrderServiceImpl::generateOrder", "summary_text": "下单", "level": "method", "score": 0.76},
+        ]
+
+    def get_by_entity(self, eid):
+        # 用于 retriever 富集 callchain_node_summaries / candidate_tree 元信息
+        return None
+
+
+class _IsolatedGraph(_FakeGraph):
+    """假 graph：两候选互不调用 → compute_independent_entries 应返两个独立入口。"""
+    def __init__(self):
+        super().__init__({})                          # 邻接表空 → successors 都返 []
+    def module_of(self, qn): return "mall-portal"
+    def predecessors(self, qn, rel_type=None): return []
+
+
+@pytest.mark.asyncio
+async def test_retriever_attaches_candidate_tree_to_ctx():
+    """retriever.retrieve 完成后 ctx.candidate_tree 是 CandidateTree 实例。"""
+    retriever = QARetriever(
+        interpretation_store=_MultiPathStore(),
+        graph=_IsolatedGraph(),
+        recall_threshold=0.5,
+    )
+    ctx = await retriever.retrieve(question="订单超时", project_id="p", top_k=2)
+    # 两个独立入口 → 两棵子树
+    assert isinstance(ctx.candidate_tree, _CT)
+    assert len(ctx.candidate_tree.subtrees) == 2
+    # 子树根 == 两个候选（无下游 → 各自一棵单节点树）
+    subtree_roots = {st.entity_id for st in ctx.candidate_tree.subtrees}
+    assert subtree_roots == {
+        "OrderTimeOutCancelTask::cancelTimeOutOrder",
+        "OmsPortalOrderServiceImpl::generateOrder",
+    }
+
+
+@pytest.mark.asyncio
+async def test_retriever_candidate_tree_none_for_chit_chat():
+    """低召回走 chit-chat → ctx.entry_candidates 空 → candidate_tree 应为空 tree 或 None（向后兼容）。"""
+    class _LowStore:
+        def search_method_hits_by_text(self, *, text, project_id, limit):
+            return [{"entity_id": "X::y#()", "summary_text": "", "level": "method", "score": 0.3}]
+        def get_by_entity(self, eid): return None
+    retriever = QARetriever(
+        interpretation_store=_LowStore(),
+        graph=_IsolatedGraph(),
+        recall_threshold=0.5,
+    )
+    ctx = await retriever.retrieve(question="你好", project_id="p", top_k=2)
+    assert ctx.skill_id == "chit-chat"
+    # chit-chat 路径：候选空 / candidate_tree 是 None 或空 tree 均可
+    if ctx.candidate_tree is not None:
+        assert ctx.candidate_tree.subtrees == []
+        assert ctx.candidate_tree.orphans == []

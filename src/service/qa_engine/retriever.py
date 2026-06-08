@@ -20,6 +20,8 @@ from typing import Any, Protocol
 from src.service.qa_engine.query_preprocess import clean_recall_query
 from src.knowledge.recall_rerank import is_callchain_noise
 from src.service.qa_engine.semantic_rerank import should_rerank, rerank_candidates
+# 候选树编排（[[候选按调用顺序组装-设计]]）：把扁平候选重组成按调用子树分组的 prompt 表示
+from src.service.qa_engine.candidate_assembly import build_candidate_tree, CandidateTree
 
 
 # ─── source-first grounding P1（[[业务问答-源码优先接地-P1设计]]）───────────────
@@ -119,6 +121,14 @@ class RetrievedContext:
     """{ entity_id: 真实方法源码(整方法全文，仅病态超大截断) }。source-first grounding P1
     （[[业务问答-源码优先接地-P1设计]]）：召回后预读 top-3 候选真实源码注入 prompt，
     治 agent/6段 自由展开代码细节（SQL/表名/字段/存储技术/方法调用/状态码）时的臆造。"""
+
+    # 引号包裹的字符串注解：避免 retriever.py 顶部直接 import candidate_assembly 形成循环
+    # （candidate_assembly 反过来不依赖 retriever，但保持单向更安全）。运行时 Python 不解析
+    # 字符串注解的实际类型，只有需要时（如 dataclass field 校验）才会 eval。
+    candidate_tree: "CandidateTree | None" = None
+    """候选按调用顺序组装的树形结构（[[候选按调用顺序组装-设计]]）。
+    多个独立入口 → 多棵子树 + 孤儿 + notes；prompt 渲染时据此选 tree / flat 分支。
+    None 表示 retriever 未计算（chit-chat 或异常降级）。"""
 
 
 # ─── 检索器 ─────────────────────────────────────────────────────────────────
@@ -272,6 +282,28 @@ class QARetriever:
             if text:
                 # 截断控 token（设计 §9：每条 ≤120 字）
                 ctx.callchain_node_summaries[mid] = text[:120]
+
+        # 候选按调用顺序组装（[[候选按调用顺序组装-设计]]）：把扁平候选重组为按调用子树
+        # 分组的树形表示，喂给 build_user_prompt 渲染。多入口 → 多棵子树 + 跨边界 note，
+        # 治 LLM 在并行业务路径上的跨路径错连。
+        # 异常一律不阻断 retrieve；prompt 端见 None 走旧扁平分支（向后兼容）。
+        try:
+            ctx.candidate_tree = build_candidate_tree(
+                ctx.entry_candidates,
+                # code_snippets：P1 grounding 已写入 ctx.candidate_code_snippets；空 dict 兜底
+                code_snippets=ctx.candidate_code_snippets or {},
+                graph=self.graph,
+            )
+        except Exception as exc:
+            # 留 warning 让运维知道（不致命）；候选树降级为 None，prompt 走原扁平
+            # logging.getLogger 局部 import 避免顶部循环风险（同 module_of 风格）
+            import logging
+            logging.getLogger(__name__).warning(
+                "build_candidate_tree 异常，降级为 None：%s: %s",
+                type(exc).__name__, exc,
+            )
+            ctx.candidate_tree = None
+
         return ctx
 
     def _enrich_candidate_snippets(self, ctx: RetrievedContext) -> None:
