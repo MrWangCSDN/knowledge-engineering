@@ -74,3 +74,78 @@ def test_entity_and_nodes_both_missing_is_error():
     out = _run(tool.handler({}))
     assert out["render"] is None
     assert "error" in out
+
+
+# ── mode B 边核验（2026-06-08 加）─────────────────────────────────────────
+# 用户实测：LLM 在异步边界（MQ @Bean / Spring 配置）编伪 calls 边。修：两端点都
+# 能映射回 CodeGraph qualified_name 时校验，CodeGraph 无该边 → drop；端点是抽象
+# 概念时不校验，避免杀真业务流程图。
+
+
+def test_freeform_drops_unsupported_edges_in_codegraph():
+    """两端都是真实方法 entity_id 但 CodeGraph 无 calls/refs 边 → drop（治 LLM 伪边）。"""
+
+    # 假 graph：仅 generateOrder→sendDelay 边真实；MQ 配置不在 graph 里
+    class _Graph:
+        def successors(self, entity_id):
+            if "generateOrder" in entity_id:
+                return ["Cls::sendDelay#()"]               # 真实下游
+            return []                                       # 其他无下游
+
+        def predecessors(self, entity_id):
+            return []                                       # 简化：仅靠 successors 命中即可
+
+    tool = build_render_call_graph_tool(_Graph())
+    out = _run(tool.handler({
+        "nodes": [
+            # id 含 "::"：被识别为真实 CodeGraph 方法 → 触发校验
+            {"id": "Cls::generateOrder", "label": "下单", "entityId": "method://Cls::generateOrder"},
+            {"id": "Cls::sendDelay", "label": "发延迟消息", "entityId": "method://Cls::sendDelay"},
+            {"id": "QConfig::orderTtlQueue", "label": "队列配置", "entityId": "method://QConfig::orderTtlQueue"},
+        ],
+        "edges": [
+            {"source": "Cls::generateOrder", "target": "Cls::sendDelay"},          # ✅ 真
+            {"source": "Cls::sendDelay", "target": "QConfig::orderTtlQueue"},      # ❌ 伪（MQ 边界）
+        ],
+    }))
+    data = out["render"]["data"]
+    edge_set = {(e["from"], e["to"]) for e in data["edges"]}
+    assert ("Cls::generateOrder", "Cls::sendDelay") in edge_set        # 真边保留
+    assert ("Cls::sendDelay", "QConfig::orderTtlQueue") not in edge_set  # 伪边丢
+    assert "已过滤" in out["summary"] and "1" in out["summary"]       # summary 提示丢了 1 条
+
+
+def test_freeform_keeps_edges_with_abstract_endpoints():
+    """端点 id 不像 qualified_name（抽象概念节点）→ 不校验保留（不杀业务流程图）。"""
+
+    class _Graph:                                          # 即便能查也不会被调（id 无 "::"）
+        def successors(self, entity_id): return []
+        def predecessors(self, entity_id): return []
+
+    tool = build_render_call_graph_tool(_Graph())
+    out = _run(tool.handler({
+        "nodes": [
+            {"id": "user", "label": "用户"},               # 无 "::" → 抽象概念
+            {"id": "queue", "label": "消息队列"},          # 无 "::" → 抽象概念
+        ],
+        "edges": [{"source": "user", "target": "queue", "label": "下单"}],
+    }))
+    assert len(out["render"]["data"]["edges"]) == 1        # 保留
+    assert "已过滤" not in out["summary"]                  # 无过滤提示
+
+
+def test_freeform_keeps_when_graph_throws():
+    """图后端挂了（successors/predecessors 抛错）→ 边保留（fail-safe，不冤枉）。"""
+
+    class _BrokenGraph:
+        def successors(self, entity_id): raise RuntimeError("graph backend down")
+        def predecessors(self, entity_id): raise RuntimeError("graph backend down")
+
+    tool = build_render_call_graph_tool(_BrokenGraph())
+    out = _run(tool.handler({
+        "nodes": [{"id": "Cls::a"}, {"id": "Cls::b"}],     # 看似真实方法
+        "edges": [{"source": "Cls::a", "target": "Cls::b"}],
+    }))
+    # 图后端抛错时不冤枉：边保留
+    assert len(out["render"]["data"]["edges"]) == 1
+    assert "已过滤" not in out["summary"]

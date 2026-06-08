@@ -17,6 +17,10 @@ import json
 # typing：Callable/Optional 声明可选的 summary_lookup 注入；Any 占位 input/output dict 的值类型
 from typing import Any, Callable, Optional
 
+# logging：mode B 边核验丢弃的伪边走 INFO 留痕（同 ke_callees 风格）
+import logging
+_LOG = logging.getLogger(__name__)
+
 # GraphProto：注入式图后端协议（与 ke_callees/ke_impact 同源，零依赖主仓实现）
 from src.service.qa_engine.retriever import GraphProto
 from src.service.qa_engine.tools.base import Tool
@@ -87,8 +91,86 @@ _SCHEMA: dict[str, Any] = {
 }
 
 
-def _build_freeform_graph(nodes_in: Any, edges_in: Any) -> dict[str, Any]:
-    """模式 B：用 agent 给的 nodes/edges 直接构造 reactflow 图（业务逻辑/架构图，不触图后端）。
+def _node_qn(node: dict[str, Any]) -> Optional[str]:
+    """从 mode B 节点 dict 抽 CodeGraph qualified_name；非真实方法节点返 None。
+
+    优先级：
+      1. entityId（'method://Cls::m#(p)'）→ 剥 scheme + 签名
+      2. id 含 '::' → 视作 qualified_name 直传（剥签名）
+      3. 都不匹配 → None（抽象概念节点，不参与边核验）
+
+    例：'method://Cls::m#(Long)' → 'Cls::m'；'Cls::m#()' → 'Cls::m'；'user' → None。
+    """
+    ent = node.get("entityId")
+    if ent:
+        # 剥 'method://' / 'class://' scheme，再剥 '#' 后的签名
+        return str(ent).split("://", 1)[-1].split("#", 1)[0]
+    nid = str(node.get("id") or "")
+    if "::" in nid:
+        return nid.split("#", 1)[0]
+    return None
+
+
+def _filter_unsupported_edges(
+    graph: Any, out_nodes: list[dict[str, Any]], out_edges: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], int]:
+    """mode B 边核验：两端都映射到 CodeGraph qualified_name 时检查关系是否真实，无 → drop。
+
+    设计动机（2026-06-08，用户实测）：LLM 在 freeform 模式下画"异步触发 / Spring @Bean /
+    AOP"等代码静态分析抓不到的边时会编 calls 边。例如截图中 `CancelOrderSender.sendMessage
+    → RabbitMqConfig.orderTtlQueue`（@Bean 不会被调）和 `RabbitMqConfig.orderTtlQueue →
+    cancelTimeOutOrder`（@Bean 不会调 Service）。本核验把"两端都是真实方法 + CodeGraph 无边"
+    判为伪边丢弃，但保留**端点是抽象概念**（如 "queue" "用户"）的边——不杀真业务流程图。
+
+    fail-soft：graph 后端抛错（stub / 异常 / 没连）一律保留边，不冤枉。
+
+    :returns: (kept_edges, dropped_count) — 保留的边列表 + 被丢的边数
+    """
+    # 1) 节点 id → qualified_name 映射（只对真实方法节点有值，抽象节点为 None）
+    qn_by_id = {n["id"]: _node_qn(n) for n in out_nodes}
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for edge in out_edges:
+        src_qn = qn_by_id.get(edge["from"])
+        tgt_qn = qn_by_id.get(edge["to"])
+        # 任一端是抽象节点（无 qn 映射）→ 不校验，保留（LLM 画业务流程图常用抽象节点）
+        if not src_qn or not tgt_qn:
+            kept.append(edge)
+            continue
+        # 两端都看似真实方法 → 询问 graph 后端是否有真实关系
+        try:
+            # successors/predecessors 返回 list[durable_key]（可能含 # 签名）
+            succs = graph.successors(src_qn) or []
+            preds = graph.predecessors(tgt_qn) or []
+        except Exception:
+            # graph 后端挂 / stub 抛错 → 静默保留（fail-safe，不冤枉边）
+            kept.append(edge)
+            continue
+        # 剥签名 / scheme 取 qn 集合，做存在性比较
+        def _strip(k: str) -> str:
+            return k.split("://", 1)[-1].split("#", 1)[0]
+        succ_qns = {_strip(s) for s in succs}
+        pred_qns = {_strip(p) for p in preds}
+        # 两个方向任一命中即视为"CodeGraph 有支撑"
+        if tgt_qn in succ_qns or src_qn in pred_qns:
+            kept.append(edge)
+        else:
+            # CodeGraph 无该关系 → 判伪边丢弃
+            _LOG.info(
+                "[render_call_graph] mode B 丢弃 CodeGraph 无支撑的边: %s → %s",
+                src_qn, tgt_qn,
+            )
+            dropped += 1
+    return kept, dropped
+
+
+def _build_freeform_graph(
+    nodes_in: Any, edges_in: Any, graph: Any = None
+) -> dict[str, Any]:
+    """模式 B：用 agent 给的 nodes/edges 直接构造 reactflow 图（业务逻辑/架构图，不触图后端 BFS）。
+
+    边核验（2026-06-08 加）：两端都是真实方法 entity_id 但 CodeGraph 无 calls/refs/implements
+    边的视为 LLM 伪边丢弃；端点为抽象概念时保留。graph=None / 后端异常一律保留。
 
     输出与模式 A（``_build_call_chain_section_from_edges``）**同构**，前端零改动即可吃：
       - node = ``{id, label(中文业务名), method(英文代码标识), kind, [entityId]}``
@@ -96,6 +178,7 @@ def _build_freeform_graph(nodes_in: Any, edges_in: Any) -> dict[str, Any]:
 
     :param nodes_in: agent 给的节点列表，每项 ``{id, label, code?, kind?, entityId?}``
     :param edges_in: agent 给的边列表，每项 ``{source/from, target/to, label?}``
+    :param graph: 图后端（GraphProto），用于边核验；None 时跳过校验
     :return: ``{render:{kind:'call_graph', data:{nodes,edges}}, summary}``；无有效节点 → error 信号
     """
     # 节点归一化 + 截断（控图大小，与模式 A 同口径 _CALLCHAIN_MAX_NODES）
@@ -148,11 +231,24 @@ def _build_freeform_graph(nodes_in: Any, edges_in: Any) -> dict[str, Any]:
         if len(out_edges) >= _MAX_EDGES:                 # 上限保护
             break
 
+    # ── 边核验（2026-06-08）：丢弃 CodeGraph 无支撑的伪边 ──────────────────
+    # 仅在传入 graph 时启用；测试可传 None 跳过核验。
+    dropped_count = 0
+    if graph is not None:
+        out_edges, dropped_count = _filter_unsupported_edges(graph, out_nodes, out_edges)
+
     data = {"nodes": out_nodes, "edges": out_edges}
+    # summary：节点数 + 被过滤的伪边数（让 LLM 知道，必要时改文字补足说明）
+    summary = f"已渲染逻辑图（{len(out_nodes)} 节点）"
+    if dropped_count > 0:
+        summary += (
+            f"，已过滤 {dropped_count} 条 CodeGraph 无支撑的边"
+            "（异步触发 / Spring @Bean / AOP 等静态分析抓不到的关系）"
+        )
     return {
         "render": {"kind": "call_graph", "data": data},
         # 只回一句 summary（与模式 A 一致：render.data 不灌回 LLM，省 token）
-        "summary": f"已渲染逻辑图（{len(out_nodes)} 节点）",
+        "summary": summary,
     }
 
 
@@ -171,8 +267,11 @@ def build_render_call_graph_tool(
     # handler 是 async function；闭包捕获 graph / summary_lookup（Python 注入式编程惯用法）
     async def handler(input: dict[str, Any]) -> dict[str, Any]:
         # 模式 B（freeform）：agent 给了 nodes → 直接构造任意逻辑/架构图（不触图后端 BFS）
+        # 但传 graph 进去做"边核验"——丢弃 CodeGraph 无支撑的伪 calls 边（治 LLM 异步边界编边）
         if input.get("nodes"):
-            return _build_freeform_graph(input.get("nodes"), input.get("edges") or [])
+            return _build_freeform_graph(
+                input.get("nodes"), input.get("edges") or [], graph=graph,
+            )
         # 模式 A：校验 entity_id；既无 entity_id 又无 nodes → 返回错误信号（render=None，LLM 不会误以为成功）
         entity_id = input.get("entity_id")
         if not entity_id:
