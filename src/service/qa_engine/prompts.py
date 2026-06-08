@@ -239,15 +239,20 @@ context 不足时**不要直接放弃**，先用工具探索：
 🔴 **模式 B（freeform）节点-边的硬约束**（2026-06-08 实测教训）：
   1. **候选树里给的 entity 都要出现在图里**：候选区里"子树 N"展开的所有节点（含接口
      + 实现 + Dao + 工具方法）都应该在图里出现，**不要"折叠"** —— 即使你觉得接口和
-     实现"是同一个东西"。接口节点 + 实现节点都画，加一条 `implements 关系` 标签的边
-     连起来。
-  2. **不允许编 calls 边**：节点-边图里的每条边都应该是 candidates 区域 + call_chain
-     段里能找到的真实 calls 关系，或语义上明确的 implements / extends / 异步触发；
-     **不要为了"图好看"凭空连两个节点**。Dao 方法之间通常不互相调用、Dao 不会调
-     Service（反向）—— 这种边一律不画。
-  3. **异步桥接（MQ / @Scheduled / @EventListener / AOP）不画 calls 边**：让 LLM
-     在文字里说"X 通过 MQ 发延迟消息，到期后被 @RabbitListener Y 消费"；不要画
-     `X → MQ → Y` 这种 calls 边链——这些不是代码调用关系。
+     实现"是同一个东西"。接口节点 + 实现节点都画，加一条 `实现` 标签的边连起来。
+  2. **不允许编纯 calls 边**：节点-边图里默认 label（如 `调用` / 空 label）的边，应是
+     candidates / call_chain 段里能找到的真实 calls 关系。Dao 方法之间通常不互相调用、
+     Dao 不会调 Service（反向）—— 这种边一律不画。后端会做 calls 边核验、CodeGraph
+     无支撑的纯 calls 边会被丢弃。
+  3. **异步/配置/事件 关系仍要画——但必须用语义 label**：MQ 路由 / @Scheduled / @Listener /
+     Spring @Bean 注入 / AOP 拦截 等 CodeGraph 抓不到的真实业务关系，**不要让节点变孤儿**，
+     大方画出来。label 里必须含明确语义关键词让用户一眼区分非直接调用：
+       - `异步触发` / `MQ路由` / `延迟消息` / `事件监听` / `事件订阅`
+       - `配置注入` / `Bean配置` / `@RabbitListener触发` / `定时调度`
+     例：`CancelOrderSender::sendMessage → RabbitMqConfig::orderTtlQueue [MQ路由]`，
+        `RabbitMqConfig::orderTtlQueue → CancelOrderReceiver::handle [异步触发]`。
+     后端会识别 label 含"异步/MQ/触发/监听/配置/路由/事件"等关键词的边为"语义边"跳过
+     calls 校验保留——你正常画即可，不会被冤枉删。
   4. **dotted vs scoped notation**：node.method 字段统一用 `Class::method` 形态
      （与 CodeGraph qualified_name 一致），不要用 `Class.method`。后端做了归一化但
      `::` 是首选。

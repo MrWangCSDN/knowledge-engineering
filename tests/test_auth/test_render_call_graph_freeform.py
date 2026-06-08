@@ -151,6 +151,48 @@ def test_freeform_keeps_when_graph_throws():
     assert "已过滤" not in out["summary"]
 
 
+def test_freeform_semantic_labeled_edges_pass_validation():
+    """边 label 含语义关键词（异步/MQ/触发/监听/配置/路由/事件 等）→ 跳过 calls 校验保留。
+
+    2026-06-08 实测决策：逻辑图本质是业务逻辑图，MQ / @Scheduled / @Listener / 配置
+    这些异步/语义关系也是业务的一部分；不该一刀切禁画。修：边 label 明确标注语义
+    关系时 → 跳过 CodeGraph calls 校验直接保留；纯 calls 边仍严格校验。
+    """
+
+    class _Graph:
+        # 任何 source 在 CodeGraph 都无 calls 下游（模拟 MQ @Bean 无 calls 边场景）
+        def successors(self, qn):
+            return []
+        def predecessors(self, qn):
+            return []
+
+    tool = build_render_call_graph_tool(_Graph())
+    out = _run(tool.handler({
+        "nodes": [
+            {"id": "a", "label": "发送", "method": "Sender::send"},
+            {"id": "b", "label": "队列", "method": "RabbitMqConfig::orderTtlQueue"},
+            {"id": "c", "label": "消费者", "method": "Listener::handle"},
+        ],
+        "edges": [
+            # label 含 "MQ" → 语义边，保留（即使 CodeGraph 无该 calls 边）
+            {"source": "a", "target": "b", "label": "MQ 路由"},
+            # label 含 "异步触发" → 语义边，保留
+            {"source": "b", "target": "c", "label": "异步触发"},
+            # label "调用" → 纯 calls 边，CodeGraph 无支撑 → drop
+            {"source": "a", "target": "c", "label": "调用"},
+        ],
+    }))
+    data = out["render"]["data"]
+    edge_set = {(e["from"], e["to"]) for e in data["edges"]}
+    # 两条语义边保留
+    assert ("a", "b") in edge_set
+    assert ("b", "c") in edge_set
+    # 纯 calls 边 drop
+    assert ("a", "c") not in edge_set
+    # summary 提示丢了 1 条
+    assert "已过滤" in out["summary"] and "1" in out["summary"]
+
+
 def test_freeform_normalizes_dot_to_double_colon():
     """漏洞修补 2/2：agent 按 prompt 用 'Class.method' 形态时归一为 'Class::method' 后查 CodeGraph。
 
@@ -174,7 +216,9 @@ def test_freeform_normalizes_dot_to_double_colon():
             {"id": "2", "label": "队列", "method": "RabbitMqConfig.orderTtlQueue", "kind": "config"},
         ],
         "edges": [
-            {"source": "1", "target": "2", "label": "路由配置"},
+            # label "调用" 不含语义关键词 → 走纯 calls 严格校验 → 因 . 形态归一为 :: 后被识别
+            # 为真实方法 + CodeGraph 无 calls → drop
+            {"source": "1", "target": "2", "label": "调用"},
         ],
     }))
     data = out["render"]["data"]

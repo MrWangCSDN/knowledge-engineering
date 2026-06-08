@@ -153,6 +153,30 @@ def _node_qn(node: dict[str, Any]) -> Optional[str]:
     return None
 
 
+# label 含以下任一关键词 → 视为"语义边"（异步 / 配置 / 触发 / 事件 / 监听 / 路由），
+# 跳过 CodeGraph calls 校验保留（用户决策 2026-06-08：逻辑图本质是业务逻辑图，
+# 不该把 MQ / @Bean / AOP / @Scheduled 这些静态分析抓不到的真实关系一刀切禁画）。
+# 关键词清单刻意短而具体——只覆盖"明确表达非直接调用"的语义；纯 "调用"/"实现" 等仍走严格校验。
+_SEMANTIC_EDGE_KEYWORDS = (
+    "异步", "MQ", "消息", "触发", "监听", "配置", "注入", "路由",
+    "事件", "订阅", "发布", "广播", "回调", "调度", "定时",
+    "async", "queue", "message", "listener", "trigger", "event",
+)
+
+
+def _is_semantic_edge(edge: dict[str, Any]) -> bool:
+    """判断边是否是"语义边"——label 含上方 _SEMANTIC_EDGE_KEYWORDS 任一关键词。
+
+    语义边表达：异步触发 / MQ 路由 / 事件监听 / 配置注入 / 定时触发 / @RabbitListener 等
+    CodeGraph 静态分析抓不到但业务逻辑确实存在的关系。这种边跳过 calls 校验保留。
+    """
+    label = str(edge.get("label") or "")
+    if not label:
+        return False                                      # 无 label → 当纯 calls 边走严格校验
+    # 任一关键词出现即判语义边（用 in 模糊匹配，覆盖 "MQ路由" / "异步触发" 等组合）
+    return any(kw in label for kw in _SEMANTIC_EDGE_KEYWORDS)
+
+
 def _filter_unsupported_edges(
     graph: Any, out_nodes: list[dict[str, Any]], out_edges: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], int]:
@@ -164,6 +188,9 @@ def _filter_unsupported_edges(
     cancelTimeOutOrder`（@Bean 不会调 Service）。本核验把"两端都是真实方法 + CodeGraph 无边"
     判为伪边丢弃，但保留**端点是抽象概念**（如 "queue" "用户"）的边——不杀真业务流程图。
 
+    例外（2026-06-08 用户决策）：边 label 含 _SEMANTIC_EDGE_KEYWORDS（异步/MQ/触发/监听/
+    配置/路由/事件 等）→ 视为"语义边"跳过 calls 校验保留，让 LLM 能完整画异步业务流程。
+
     fail-soft：graph 后端抛错（stub / 异常 / 没连）一律保留边，不冤枉。
 
     :returns: (kept_edges, dropped_count) — 保留的边列表 + 被丢的边数
@@ -173,13 +200,18 @@ def _filter_unsupported_edges(
     kept: list[dict[str, Any]] = []
     dropped = 0
     for edge in out_edges:
+        # 语义边（label 含 异步 / MQ / 触发 / 监听 / 配置 / 路由 / 事件 等关键词）
+        # → 跳过 calls 校验保留：让业务逻辑图完整画异步桥接、配置注入、事件触发等关系
+        if _is_semantic_edge(edge):
+            kept.append(edge)
+            continue
         src_qn = qn_by_id.get(edge["from"])
         tgt_qn = qn_by_id.get(edge["to"])
         # 任一端是抽象节点（无 qn 映射）→ 不校验，保留（LLM 画业务流程图常用抽象节点）
         if not src_qn or not tgt_qn:
             kept.append(edge)
             continue
-        # 两端都看似真实方法 → 询问 graph 后端是否有真实关系
+        # 两端都看似真实方法 + 非语义边 → 询问 graph 后端是否有真实关系
         try:
             # successors/predecessors 返回 list[durable_key]（可能含 # 签名）
             succs = graph.successors(src_qn) or []
