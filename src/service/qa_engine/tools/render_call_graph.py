@@ -350,6 +350,12 @@ def build_render_call_graph_tool(
         entity_id = input.get("entity_id")
         if not entity_id:
             return {"render": None, "summary": "缺少 entity_id 或 nodes，无法渲染图", "error": "need entity_id or nodes"}
+        # 归一：剥 'method://' / 'class://' 等 scheme。
+        # prompt 指示 agent "带 method:// 前缀照搬"，本入口必须剥；不剥 → BFS 用带前缀的
+        # nid 当节点 id → section 构造 entityId = 'method://' + nid → 双 'method://' 前缀
+        # → 前端 reactflow node.id 含 '://' 渲染失败 → 降级原文（实测 sess_8e96f6f936e3）。
+        # str(...) 防御 LLM 可能传 dict / int 等异常类型
+        entity_id = str(entity_id).split("://", 1)[-1]
 
         # direction 兜底：非 'up' 一律 'down'
         direction = "up" if input.get("direction") == "up" else "down"

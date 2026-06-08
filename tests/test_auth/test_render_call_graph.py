@@ -104,6 +104,33 @@ def test_render_call_graph_factory_wires_summary_lookup_from_interpretation_stor
     assert any("支付" in l for l in labels), f"labels={labels}（中文 label 未生效）"
 
 
+def test_render_call_graph_strips_scheme_from_entity_id():
+    """mode A 入口 entity_id 含 method:// scheme 时归一为裸 qn，避免双 method:// 前缀。
+
+    实测背景（2026-06-08 sess_8e96f6f936e3）：agent 按 prompt 提示带 method:// 前缀传入，
+    handler 不剥 scheme → BFS 用 'method://Cls::m' 当 nid → section 构造 entityId =
+    'method://' + nid = 'method://method://Cls::m' 双前缀 → 前端 reactflow 节点 id
+    含 '://' 致渲染失败 → 降级原文展示。修：handler 入口剥 scheme。
+    """
+    g = _FakeGraph({"Svc::generateOrder#(P)": ["Svc::lockStock#()"]})
+    tool = build_render_call_graph_tool(g)
+    # 传带 method:// 前缀
+    out = asyncio.run(tool.handler({
+        "entity_id": "method://Svc::generateOrder#(P)",
+        "direction": "down",
+        "depth": 1,
+    }))
+    assert out["render"]["kind"] == "call_graph"
+    data = out["render"]["data"]
+    # 节点 entityId 不该有双 method:// 前缀
+    for node in data["nodes"]:
+        ent = node.get("entityId", "")
+        # 严格：method:// 不能出现 ≥2 次
+        assert ent.count("method://") <= 1, f"双前缀 entityId: {ent}"
+        # 严格：node.id 不该带 scheme（reactflow node id 含 '://' 会渲染失败）
+        assert "://" not in node["id"], f"node.id 含 scheme: {node['id']}"
+
+
 def test_render_call_graph_factory_summary_lookup_fail_soft():
     """interpretation_store.get_by_entity 抛异常 → summary_lookup 返 "" → 不传染、节点回退英文。
 
