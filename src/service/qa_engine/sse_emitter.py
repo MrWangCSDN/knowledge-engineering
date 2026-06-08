@@ -21,9 +21,40 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable
+
+
+# 实测背景（2026-06-08）：LLM 偶发 narrate-tool 退化——把 render_call_graph 工具参数
+# 当 ```render_call_graph\n entity_id: ... \n``` markdown 代码块写进答案正文，
+# 导致前端显示一段"看着像 YAML"的代码块，图根本没渲染。本正则把这种代码块整块剥掉。
+# 用 DOTALL 让 . 匹配换行（多行 YAML/JSON 内容都吃），非贪婪 .*? 防跨多个代码块。
+_RENDER_CALL_GRAPH_CODEBLOCK_RE = re.compile(
+    r"```render_call_graph[ \t]*\n.*?\n```\n?",
+    re.DOTALL,
+)
+
+
+def _strip_render_call_graph_codeblock(content: str | None) -> str | None:
+    """从答案正文里剥掉 ```render_call_graph ... ``` 形态的工具参数代码块。
+
+    防御性兜底：当 LLM 没真正调 render_call_graph tool_use、而是把参数写成 markdown 代码块时，
+    前端会显示一段无用的 YAML/JSON 文本（用户看着像"出 bug 了"）。本函数把这种代码块整块
+    清掉，让其它正文（标题、表格、java 代码块）正常显示。
+
+    fail-safe：无代码块 → 原样返；None → None。
+
+    Args:
+        content: section 的 content 字符串（可能含 markdown 代码块）
+    Returns:
+        剥掉 render_call_graph 代码块后的文本；输入 None / 无匹配时原样返
+    """
+    if not content:
+        return content
+    # sub(pattern, "", string)：把所有匹配替换成空串；多次出现都剥
+    return _RENDER_CALL_GRAPH_CODEBLOCK_RE.sub("", content)
 
 from src.service.qa_engine.react_synthesizer import ReActSynthesizer
 from src.service.qa_engine.retriever import QARetriever
@@ -376,6 +407,15 @@ async def stream_qa_answer(
     # 4.5 折叠调用图：把 agent 流式期间画的图按 at 插进 sections（call_chain 段），
     #     使 SSE 按段 dump + on_complete 持久化的 sections 都自带图、且位置正确（治跳末尾/reopen丢图）。
     answer.sections = fold_render_sections(answer.sections, rendered_graphs)
+
+    # 4.6 防 narrate-tool 退化（2026-06-08 实测）：剥 ```render_call_graph 代码块。
+    #     LLM 偶尔不真正调 tool_use，而把工具参数当 markdown 代码块写在正文里，
+    #     前端会显示一段无用的"看着像 YAML"的工具参数块。本兜底把这种代码块剥掉，
+    #     让其它正文（标题、表格、java 代码块）正常显示。配合 prompt 强约束二道防线。
+    for _s in answer.sections:
+        _content = _s.get("content")
+        if _content:
+            _s["content"] = _strip_render_call_graph_codeblock(_content)
 
     # 5. 按段 dump（v1：每段 section_start + content + section_done）
     for section in answer.sections:

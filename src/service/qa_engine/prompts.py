@@ -229,6 +229,12 @@ context 不足时**不要直接放弃**，先用工具探索：
 代码块、不要用 ASCII 画框线图。手画的边常臆造、且前端无法稳定渲染（会"解析失败"显示裸代码）。
 （例外：时序图 / ER 图 / 状态机这类 ReactFlow 画不了的，才可用 mermaid 的 sequenceDiagram / erDiagram。）
 
+🔴 **严禁把 render_call_graph 工具参数写成 markdown 代码块**（2026-06-08 实测教训）：
+不要在正文里写 ```render_call_graph\\nentity_id: ...\\ndirection: ...\\n``` 这种代码块——
+这只会**显示成一段无用的 YAML/JSON 文本，根本不会渲染成图**。要画图就**真正调用工具**
+（tool_use / function_call），让后端 BFS 出图、SSE 推送 call_chain 段。后端会自动剥掉
+误写的 ```render_call_graph 代码块，但用户会看到图缺失——所以**第一时间就要 invoke 工具**。
+
 - 出图时机：用户问"怎么实现 / 流程 / 调用链 / 架构 / 依赖 / 数据流"等，**先调 render_call_graph 画图，
   再用文字解释**；正文里只说"见下方调用图"，不要逐节点复述。
 - **绝不**用 markdown 图片语法 `![描述](...)` 去"引用"图，也不要写"调用图已渲染 / 如上图所示"这类旁白——
