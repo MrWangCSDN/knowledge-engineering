@@ -290,50 +290,20 @@ def build_user_prompt(question: str, context: dict[str, Any], free_format: bool 
     candidates = context.get("entry_candidates") or []
     # source-first grounding P1（[[业务问答-源码优先接地-P1设计]]）：候选真实源码 {entity_id: 源码}
     code_snippets = context.get("candidate_code_snippets") or {}
+    # 候选树（[[候选按调用顺序组装-设计]]）：retriever 已挂在 ctx 上；None 表示走旧扁平
+    candidate_tree = context.get("candidate_tree")
     if candidates:
         parts.append("")
-        parts.append("候选入口方法（按相关度倒序）:")
-        # 框架句：仅当至少有一个候选附了真实源码时加，重定位"代码细节以源码为准、2b 解读仅业务提示"
-        if code_snippets:
-            parts.append(
-                "  （注：以下候选凡附【真实源码片段】的，代码细节——SQL/表名/字段/存储技术/方法调用/状态码"
-                "——一律以源码为准，2b 业务说明仅作业务提示、不可当代码事实；引用仍用 entity_id。）"
-            )
-        # 取前 N 个候选渲染给 LLM（快赢 B：上限 TOP_CANDIDATES_FOR_PROMPT=10）。
-        # 渲染循环与下方模块指引守卫共用同一份切片，避免两处不同步（DRY）。
-        top_candidates = candidates[:TOP_CANDIDATES_FOR_PROMPT]
-        for i, c in enumerate(top_candidates, 1):
-            entity_id = c.get("entity_id", "?")
-            level = c.get("level", "method")
-            # 取 module 字段（可能为 None 或根本不存在）；.get() 缺失键时返回 None
-            module = c.get("module")
-            summary = c.get("summary_text") or "(无业务说明)"
-            # 截断过长的 summary 控制 token 数
-            if len(summary) > 300:
-                summary = summary[:300] + "…"
-            # 仅当 module 有值（非 None / 非空串）才拼 (模块: x)，避免 None 渲染成噪声
-            # f-string 三元表达式：`a if 条件 else b` 是 Python 内联条件表达式
-            mod_str = f"  (模块: {module})" if module else ""
-            parts.append(f"  {i}. {entity_id}  [level={level}]{mod_str}")
-            parts.append(f"     业务说明: {summary}")
-            # source-first grounding P1：该候选预读到真实源码 → 附上（代码细节以此为准）
-            snippet = code_snippets.get(entity_id)
-            if snippet:
-                parts.append("     【真实源码片段】(代码细节以此为准):")
-                parts.append("     ```")
-                # 逐行缩进对齐候选块（splitlines 按行切，不保留行尾换行）
-                for line in snippet.splitlines():
-                    parts.append(f"     {line}")
-                parts.append("     ```")
-        # 模块判断指引：仅当至少一个候选带有 module 时追加，让 LLM 按 module 判前台/后台
-        # any() 是内置函数，可迭代对象有任意一个真值即返回 True
-        if any(c.get("module") for c in top_candidates):
-            parts.append(
-                "  （模块说明：mall-portal=前台门户、mall-admin=后台管理、mall-search=搜索、"
-                "mall-auth=认证、mall-gateway=网关。判断前台/后台等归属请按上面标注的【模块】，"
-                "不要仅凭类名/方法名臆断；若要对比的另一侧模块不在候选里，"
-                "如实说\"未检索到 X 模块的相关实体\"。）"
-            )
+        # 候选树分支判断：有树 + 多于一棵子树 + 未触发 fallback → 走树形
+        # 单子树 / 无树 / fallback → 走扁平（保旧行为，零回归）
+        if (
+            candidate_tree is not None
+            and len(candidate_tree.subtrees) >= 2
+            and not candidate_tree.fallback_to_flat
+        ):
+            parts.extend(_render_tree_candidates(candidate_tree, code_snippets))
+        else:
+            parts.extend(_render_flat_candidates(candidates, code_snippets))
     else:
         parts.append("（向量库未命中任何候选实体）")
 
@@ -660,3 +630,134 @@ _MEM_EXTRACT_SYSTEM = (
     '本轮无可记则 {"memories":[]}。'
     "只输出 JSON 对象本身，不要代码块、不要解释。"
 )
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# 候选区渲染：扁平 vs 树形（设计 [[候选按调用顺序组装-设计]] §4.3）
+# 单 entry / 无树 / fallback → 走扁平（保旧行为）；多 entry → 走树形分组
+# ───────────────────────────────────────────────────────────────────────────────
+
+
+def _render_flat_candidates(candidates: list[dict], code_snippets: dict) -> list[str]:
+    """扁平候选区渲染（旧行为）。
+
+    保持与改造前文案一字不差，确保单入口 / chit-chat / fallback 路径零回归。
+    被 build_user_prompt 内"候选树分支判断为 False"的分支调用。
+    """
+    parts: list[str] = []
+    parts.append("候选入口方法（按相关度倒序）:")
+    # 框架句：仅当至少一个候选附了真实源码时加（重定位"代码细节以源码为准、2b 解读仅业务提示"）
+    if code_snippets:
+        parts.append(
+            "  （注：以下候选凡附【真实源码片段】的，代码细节——SQL/表名/字段/存储技术/方法调用/状态码"
+            "——一律以源码为准，2b 业务说明仅作业务提示、不可当代码事实；引用仍用 entity_id。）"
+        )
+    # 取前 TOP_CANDIDATES_FOR_PROMPT=10 个候选
+    top_candidates = candidates[:TOP_CANDIDATES_FOR_PROMPT]
+    for i, c in enumerate(top_candidates, 1):
+        entity_id = c.get("entity_id", "?")
+        level = c.get("level", "method")
+        module = c.get("module")
+        summary = c.get("summary_text") or "(无业务说明)"
+        if len(summary) > 300:
+            summary = summary[:300] + "…"
+        mod_str = f"  (模块: {module})" if module else ""
+        parts.append(f"  {i}. {entity_id}  [level={level}]{mod_str}")
+        parts.append(f"     业务说明: {summary}")
+        snippet = code_snippets.get(entity_id)
+        if snippet:
+            parts.append("     【真实源码片段】(代码细节以此为准):")
+            parts.append("     ```")
+            for line in snippet.splitlines():
+                parts.append(f"     {line}")
+            parts.append("     ```")
+    # 模块判断指引：至少一个候选带 module 时追加
+    if any(c.get("module") for c in top_candidates):
+        parts.append(
+            "  （模块说明：mall-portal=前台门户、mall-admin=后台管理、mall-search=搜索、"
+            "mall-auth=认证、mall-gateway=网关。判断前台/后台等归属请按上面标注的【模块】，"
+            "不要仅凭类名/方法名臆断；若要对比的另一侧模块不在候选里，"
+            "如实说\"未检索到 X 模块的相关实体\"。）"
+        )
+    return parts
+
+
+def _render_tree_candidates(tree, code_snippets: dict) -> list[str]:
+    """树形候选区渲染（[[候选按调用顺序组装-设计]] §4.3）。
+
+    输出结构：
+        候选入口方法（按调用子树分组，每个子树按调用顺序）:
+        【子树 1】入口: xxx  (模块: yyy)
+          业务说明: ...
+          ├─ child1
+          │  业务说明: ...
+          └─ child2
+             业务说明: ...
+        【子树 2】入口: ...
+        【其他相关实体（未连入主路径）】（孤儿附录）
+        【说明】... （notes 元信息：让 LLM 知道多入口异步桥接）
+    """
+    parts: list[str] = []
+    parts.append("候选入口方法（按调用子树分组，每个子树按调用顺序）:")
+    if code_snippets:
+        parts.append(
+            "  （注：以下候选凡附【真实源码片段】的，代码细节——SQL/表名/字段/存储技术/方法调用/状态码"
+            "——一律以源码为准，2b 业务说明仅作业务提示、不可当代码事实；引用仍用 entity_id。）"
+        )
+    # 渲染每棵子树
+    for i, root in enumerate(tree.subtrees, 1):
+        parts.append("")
+        mod_str = f"  (模块: {root.module})" if root.module else ""
+        parts.append(f"【子树 {i}】入口: {root.entity_id}{mod_str}")
+        if root.summary:
+            parts.append(f"  业务说明: {root.summary}")
+        # 递归渲染子节点（带树形缩进 ├─ └─）
+        _render_tree_children(parts, root.children, prefix="")
+        # 子树根的 code_snippet 单独渲染（与扁平一致的格式）
+        if root.code_snippet:
+            parts.append("  【真实源码片段】(代码细节以此为准):")
+            parts.append("  ```")
+            for line in root.code_snippet.splitlines():
+                parts.append(f"  {line}")
+            parts.append("  ```")
+    # 孤儿附录
+    if tree.orphans:
+        parts.append("")
+        parts.append("【其他相关实体（未连入主路径）】")
+        for o in tree.orphans:
+            mod_str = f"  (模块: {o.module})" if o.module else ""
+            parts.append(f"  - {o.entity_id}{mod_str}")
+            if o.summary:
+                parts.append(f"    业务说明: {o.summary}")
+    # notes（元信息：多入口异步桥接提示）
+    if tree.notes:
+        parts.append("")
+        for note in tree.notes:
+            parts.append(f"【说明】{note}")
+    return parts
+
+
+def _render_tree_children(parts: list[str], children: list, prefix: str) -> None:
+    """递归渲染子树缩进。用 ├─ / └─ 表示同层最后一个 vs 中间项。
+
+    参数：
+      parts：累积输出的字符串行列表（mutation）
+      children：当前层子节点列表
+      prefix：当前层的缩进前缀（递归传递）
+    """
+    n = len(children)
+    for i, child in enumerate(children):
+        # 是否是同层最后一个节点：决定用 └─ 还是 ├─
+        is_last = (i == n - 1)
+        branch = "└─" if is_last else "├─"
+        mod_str = f"  (模块: {child.module})" if child.module else ""
+        # 节点行：缩进 + 分支符号 + entity_id + 模块
+        parts.append(f"  {prefix}{branch} {child.entity_id}{mod_str}")
+        # 业务说明：用 │  或空格作为延续缩进
+        if child.summary:
+            # 最后一个节点用空格延续（无 │），中间项用 │ 维持竖线
+            indent = "   " if is_last else "│  "
+            parts.append(f"  {prefix}{indent}业务说明: {child.summary}")
+        # 递归子节点：新前缀 = 当前前缀 + 当前层的延续缩进
+        new_prefix = prefix + ("   " if is_last else "│  ")
+        _render_tree_children(parts, child.children, new_prefix)
