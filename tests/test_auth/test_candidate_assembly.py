@@ -223,3 +223,127 @@ def test_build_subtree_skips_non_candidate_descendants():
     assert root.children[0].entity_id == "B::m"
     # B 的下游 Y 不在候选 → 不挂
     assert root.children[0].children == []
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Task 4: build_candidate_tree —— 主编排（子树 + 孤儿 + token cap + fallback）
+# ───────────────────────────────────────────────────────────────────────────────
+from src.service.qa_engine.candidate_assembly import build_candidate_tree
+
+
+def test_build_candidate_tree_multi_entry_with_orphan():
+    """双路径主入口 + 一个孤儿（孤儿由 max_entries cap 挤出）：subtrees 长 2，orphans 长 1。
+
+    场景：3 个独立入口（路径 A 入口 + 路径 B 入口 + CancelOrderReceiver 独立监听器），
+    设 max_entries=2 → 第 3 个独立入口（CancelOrderReceiver）被挤出，进孤儿。
+    """
+    g = _FakeGraph({
+        "OrderTimeOutCancelTask::cancelTimeOutOrder": ["OmsPortalOrderService::cancelTimeOutOrder"],
+        "OmsPortalOrderService::cancelTimeOutOrder": ["OmsPortalOrderServiceImpl::cancelTimeOutOrder"],
+        "OmsPortalOrderServiceImpl::generateOrder": ["OmsPortalOrderServiceImpl::sendDelayMessageCancelOrder"],
+        # CancelOrderReceiver::handle 无下游、无上游候选 → 独立入口（但被 max_entries=2 挤到孤儿）
+    })
+    candidates = [
+        {"entity_id": "OmsPortalOrderServiceImpl::generateOrder", "summary_text": "用户下单", "module": "mall-portal", "score": 0.78},
+        {"entity_id": "OmsPortalOrderServiceImpl::sendDelayMessageCancelOrder", "summary_text": "预约取消", "module": "mall-portal", "score": 0.76},
+        {"entity_id": "OrderTimeOutCancelTask::cancelTimeOutOrder", "summary_text": "定时扫描", "module": "mall-portal", "score": 0.74},
+        {"entity_id": "OmsPortalOrderService::cancelTimeOutOrder", "summary_text": "接口", "module": "mall-portal", "score": 0.72},
+        {"entity_id": "OmsPortalOrderServiceImpl::cancelTimeOutOrder", "summary_text": "实现", "module": "mall-portal", "score": 0.70},
+        {"entity_id": "CancelOrderReceiver::handle", "summary_text": "MQ 监听器", "module": "mall-portal", "score": 0.65},
+    ]
+    # max_entries=2 → 前 2 个独立入口（按 recall 顺序）作子树，第 3 个进孤儿
+    tree = build_candidate_tree(candidates, code_snippets={}, graph=g, max_entries=2)
+    # 两棵子树：generateOrder + OrderTimeOutCancelTask（recall 分高的两个）
+    assert len(tree.subtrees) == 2
+    entries = {st.entity_id for st in tree.subtrees}
+    assert entries == {
+        "OmsPortalOrderServiceImpl::generateOrder",
+        "OrderTimeOutCancelTask::cancelTimeOutOrder",
+    }
+    # 一个孤儿：CancelOrderReceiver::handle（独立入口但被 max_entries=2 挤出）
+    assert len(tree.orphans) == 1
+    assert tree.orphans[0].entity_id == "CancelOrderReceiver::handle"
+    # 多入口 → notes 含"多入口/异步/桥接"任一关键词
+    assert any("多入口" in n or "异步" in n or "桥接" in n for n in tree.notes)
+    # 未触发 token fallback
+    assert tree.fallback_to_flat is False
+
+
+def test_build_candidate_tree_caps_entries_at_3():
+    """4 个独立入口 → 只保前 3 棵子树（按 recall 顺序，第 4 个进孤儿）。"""
+    g = _FakeGraph({})                                # 全独立 → 4 候选都是真入口
+    candidates = [
+        {"entity_id": "E1::m", "summary_text": "1", "score": 0.9},
+        {"entity_id": "E2::m", "summary_text": "2", "score": 0.85},
+        {"entity_id": "E3::m", "summary_text": "3", "score": 0.8},
+        {"entity_id": "E4::m", "summary_text": "4", "score": 0.75},
+    ]
+    tree = build_candidate_tree(candidates, code_snippets={}, graph=g, max_entries=3)
+    # 前 3 个进子树（保序）
+    assert [st.entity_id for st in tree.subtrees] == ["E1::m", "E2::m", "E3::m"]
+    # 第 4 个进孤儿
+    assert [o.entity_id for o in tree.orphans] == ["E4::m"]
+
+
+def test_build_candidate_tree_caps_orphans():
+    """孤儿超 max_orphans=3 → 截断（仅保前 3）。"""
+    g = _FakeGraph({})
+    candidates = [
+        {"entity_id": f"E{i}::m", "summary_text": str(i), "score": 1.0 - i * 0.01}
+        for i in range(8)
+    ]
+    tree = build_candidate_tree(
+        candidates, code_snippets={}, graph=g,
+        max_entries=3, max_orphans=3,
+    )
+    assert len(tree.subtrees) == 3
+    assert len(tree.orphans) == 3
+
+
+def test_build_candidate_tree_single_entry_no_notes():
+    """单入口（无并行路径）→ notes 不强调多入口（避免误导 LLM）。"""
+    g = _FakeGraph({"A::m": ["B::m"]})
+    candidates = [
+        {"entity_id": "A::m", "summary_text": "入口", "score": 0.9},
+        {"entity_id": "B::m", "summary_text": "下游", "score": 0.85},
+    ]
+    tree = build_candidate_tree(candidates, code_snippets={}, graph=g)
+    # 单子树（B 是 A 下游 → 非独立）
+    assert len(tree.subtrees) == 1
+    assert tree.subtrees[0].entity_id == "A::m"
+    # notes 不含"多入口"等
+    assert not any("多入口" in n for n in tree.notes)
+
+
+def test_build_candidate_tree_token_cap_triggers_fallback():
+    """summary 拼起来超 token_safety_cap → fallback_to_flat=True。
+
+    使用低 cap + 大 summary（无截断）让算法触发 fallback；
+    plan 原始数字（默认 cap=8000 + 300 字截断）无法触发，因此本测试用 cap=2000、
+    max_summary_chars=2000 让数值真实超阈值。
+    """
+    g = _FakeGraph({})                                # 全独立
+    big = "业" * 1500                                  # 1500 个中文字符
+    candidates = [
+        {"entity_id": f"E{i}::m", "summary_text": big, "score": 1.0 - i * 0.01}
+        for i in range(6)
+    ]
+    # 不截断 summary：6 节点 × 1500 字 ≈ 9000+ 字 / 3.5 ≈ 2571 token > 2000 → fallback
+    tree = build_candidate_tree(
+        candidates, code_snippets={}, graph=g,
+        max_entries=3, max_orphans=3,
+        max_summary_chars=2000, token_safety_cap=2000,
+    )
+    assert tree.fallback_to_flat is True
+    # 但 subtrees / orphans 仍保留供调试
+    assert len(tree.subtrees) == 3
+    assert len(tree.orphans) == 3
+
+
+def test_build_candidate_tree_empty_candidates():
+    """空候选 → 空 tree（subtrees/orphans 都空，不 fallback）。"""
+    tree = build_candidate_tree([], code_snippets={}, graph=_FakeGraph({}))
+    assert tree.subtrees == []
+    assert tree.orphans == []
+    assert tree.fallback_to_flat is False
+    assert tree.notes == []

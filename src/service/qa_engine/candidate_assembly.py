@@ -263,3 +263,181 @@ def build_subtree_for_entry(
             queue.append((succ_qn, depth + 1))
 
     return root
+
+
+# ── 主编排 ──────────────────────────────────────────────────────────────────
+
+
+def _collect_all_tree_qns(node: TreeNode) -> set[str]:
+    """递归收集 node 子树里所有节点 qn 集合（含 root 自身）。
+
+    用途：build_candidate_tree 算"哪些候选已进子树"，剩下的就是孤儿。
+    """
+    out: set[str] = {node.entity_id}
+    for c in node.children:
+        # set.update：把另一个集合的所有元素加进当前 set
+        out.update(_collect_all_tree_qns(c))
+    return out
+
+
+def _estimate_tokens_in_tree(tree: CandidateTree) -> int:
+    """粗算 tree 渲染所需 token 数。
+
+    中英混合估算：1 token ≈ 3.5 字符（与 synthesizer._estimate_tokens 同源；
+    实际 dashscope tokenizer 略有差异，本数值用于阈值判断够用）。
+
+    Args:
+        tree: CandidateTree 实例
+    Returns:
+        估算 token 数（≥ 1）
+    """
+    chars = 0
+
+    def _count(node: TreeNode) -> None:
+        """递归累加节点 entity_id / summary / code_snippet 的字符数。
+
+        nonlocal：让闭包内部可以修改外层 chars 变量（否则会被当成局部新变量）
+        """
+        nonlocal chars
+        chars += len(node.entity_id) + len(node.summary)
+        if node.code_snippet:
+            chars += len(node.code_snippet)
+        for c in node.children:
+            _count(c)
+
+    # 统计所有子树 + 孤儿
+    for st in tree.subtrees:
+        _count(st)
+    for o in tree.orphans:
+        _count(o)
+    # max(1, ...)：保证返回 ≥ 1，避免 0 token 干扰下游判断
+    return max(1, int(chars / 3.5))
+
+
+def build_candidate_tree(
+    candidates: list[dict],
+    code_snippets: dict[str, str],
+    graph,
+    *,
+    max_entries: int = 3,
+    max_depth: int = 3,
+    max_nodes_per_subtree: int = 6,
+    max_orphans: int = 3,
+    max_summary_chars: int = 300,
+    token_safety_cap: int = 8000,
+) -> CandidateTree:
+    """候选树主编排函数（设计 [[候选按调用顺序组装-设计]] §4.2 算法 ③）。
+
+    流程：
+      1. 候选 qn 提取 + summary 截断（max_summary_chars）+ code_snippet 富集
+      2. compute_independent_entries 找独立入口；取前 max_entries 作子树根
+      3. 每个根 build_subtree_for_entry → 一棵子树
+      4. 不在任何子树里的剩余候选 → 孤儿 top-max_orphans（按原 recall 顺序）
+      5. notes：多入口时加桥接提示（让 LLM 知道跨边界关系需要文字描述）
+      6. token 估算 → 超阈值 fallback_to_flat=True（保留 tree 内容供调试）
+
+    Args:
+        candidates: recall 候选 dict 列表，每项含 entity_id / summary_text / module? / score?
+        code_snippets: {entity_id: source}（source-first grounding P1 命中结果，可空）
+        graph: GraphProto-like，提供 successors
+        max_entries: 子树数量上限（默认 3）
+        max_depth: 各子树 BFS 深度上限（默认 3）
+        max_nodes_per_subtree: 单子树节点上限（默认 6）
+        max_orphans: 孤儿条目上限（默认 3）
+        max_summary_chars: summary 截断字符数（默认 300，附"…"省略号）
+        token_safety_cap: 总 token 上限；超阈值返 fallback_to_flat=True（默认 8000）
+    Returns:
+        CandidateTree（fallback_to_flat=True 时调用方应降级走扁平）
+    """
+    # 边界：无候选 → 空 tree 直接返
+    if not candidates:
+        return CandidateTree(subtrees=[], orphans=[], fallback_to_flat=False, notes=[])
+
+    # 1. 提取 qn + meta（截断 summary）+ 富集 code_snippet
+    candidate_qns: list[str] = []                    # 保 recall 顺序
+    candidate_meta: dict[str, dict] = {}             # qn → {summary, module, code_snippet}
+    for c in candidates:
+        eid = c.get("entity_id")
+        if not eid:                                  # 没 entity_id 的候选跳过（防御）
+            continue
+        qn = _strip_signature(eid)
+        if qn in candidate_meta:                     # 同 qn 重复（带/不带参形态各一）→ 留首个
+            continue
+        candidate_qns.append(qn)
+
+        # summary 截断（防过长占 token）
+        summary = c.get("summary_text") or ""
+        if len(summary) > max_summary_chars:
+            # 截到上限 + "…" 提示已截断，让 LLM 知道这里不是完整业务说明
+            summary = summary[:max_summary_chars] + "…"
+
+        candidate_meta[qn] = {
+            "summary": summary,
+            "module": c.get("module"),
+            # code_snippet：先按完整 entity_id 查（带签名），再按裸 qn 查
+            # P1 grounding 写入时多用完整 eid 作 key
+            "code_snippet": code_snippets.get(eid) or code_snippets.get(qn),
+        }
+
+    # 2. 独立入口（取前 max_entries 作子树根）
+    independent = compute_independent_entries(candidate_qns, graph, max_depth=max_depth)
+    # 列表切片：保前 N 个（保 recall 顺序）
+    subtree_roots = independent[:max_entries]
+
+    # 3. 构造每棵子树
+    # 列表推导式：每个根调 build_subtree_for_entry 得 TreeNode
+    subtrees = [
+        build_subtree_for_entry(
+            entry, candidate_meta, graph,
+            max_depth=max_depth,
+            max_nodes_per_subtree=max_nodes_per_subtree,
+        )
+        for entry in subtree_roots
+    ]
+
+    # 4. 孤儿：剩余候选（不在任何子树里）→ 按 recall 顺序取前 max_orphans
+    # set comprehension 收集所有子树里出现过的 qn
+    in_subtree_qns: set[str] = set()
+    for st in subtrees:
+        in_subtree_qns.update(_collect_all_tree_qns(st))
+    # 列表推导式：保 recall 原序的孤儿 qn 序列
+    orphan_qns = [q for q in candidate_qns if q not in in_subtree_qns]
+    # 取前 max_orphans 个孤儿，构造叶子 TreeNode（无 children）
+    orphans = [
+        TreeNode(
+            entity_id=q,
+            summary=candidate_meta[q]["summary"],
+            module=candidate_meta[q]["module"],
+            code_snippet=candidate_meta[q]["code_snippet"],
+            children=[],
+        )
+        for q in orphan_qns[:max_orphans]
+    ]
+
+    # 5. notes：多入口提示
+    notes: list[str] = []
+    if len(subtrees) >= 2:
+        # 字符串格式化：%d 数字插值；中文标点便于 LLM 阅读
+        notes.append(
+            "多入口检测：识别到 %d 个独立业务路径；路径间可能通过 MQ / Spring 配置 / AOP 异步桥接，"
+            "CodeGraph 静态分析无法连线，作答时用文字描述跨边界关系，不要编 calls 边。"
+            % len(subtrees)
+        )
+
+    tree = CandidateTree(
+        subtrees=subtrees,
+        orphans=orphans,
+        fallback_to_flat=False,
+        notes=notes,
+    )
+
+    # 6. token 估算 → 超阈值降扁平
+    # 保留 subtrees / orphans 内容供后续调试，仅置 fallback 标志让 prompt 端走扁平分支
+    if _estimate_tokens_in_tree(tree) > token_safety_cap:
+        tree = CandidateTree(
+            subtrees=tree.subtrees,
+            orphans=tree.orphans,
+            fallback_to_flat=True,
+            notes=tree.notes,
+        )
+    return tree
