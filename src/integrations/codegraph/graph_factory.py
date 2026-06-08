@@ -49,6 +49,23 @@ class NullGraphAdapter:
         """无 CodeGraph 索引 → 无调用者，返回空列表。"""
         return []
 
+    # ── IDE 化符号解析三原语（设计 [[代码查看器-IDE化导航-设计]] §4.1）──
+    # 无 CodeGraph 索引时，三原语均降级返 None/空，让上层 resolve_symbol_at 返回 null，
+    # 前端据此显示"暂无源码"，保持与原 successors/callers 同款降级契约。
+    def resolve_at_position(
+        self, file_path: str, line: int, col: int
+    ) -> Optional[str]:
+        """无 CodeGraph 索引 → 位置解析无目标，返 None。"""
+        return None
+
+    def find_by_name(self, token: str, limit: int = 10) -> list[str]:
+        """无 CodeGraph 索引 → 名字回退无候选，返空列表。"""
+        return []
+
+    def resolve_impl(self, entity_id: str) -> Optional[str]:
+        """无 CodeGraph 索引 → 接口→impl 解析无结果，返 None。"""
+        return None
+
 
 def resolve_graph_adapter(repo_local_path: Optional[str]):
     """按 repo_local_path 返回合适的图适配器（GraphProto）。

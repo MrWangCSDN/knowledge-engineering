@@ -182,6 +182,100 @@ class CodeGraphGraphAdapter:
             _LOG.warning("[codegraph] callers 失败，返回 [] (entity_id=%s): %s", entity_id, e)
             return []
 
+    def resolve_at_position(
+        self, file_path: str, line: int, col: int
+    ) -> Optional[str]:
+        """IDE 化光标位置 → 实体 durable_key（设计 §4.1 ①）；无命中/异常 → None。
+
+        Args:
+            file_path: 源文件相对路径（同 nodes.file_path）
+            line: 光标行（1-indexed）
+            col:  光标列（1-indexed）
+        Returns:
+            最近一条 calls/references/instantiates 边的 target durable_key；
+            无命中或 sqlite 异常返回 None（fail-soft，与 resolve_first 同风格）
+        """
+        try:
+            # db 层已按距离排序，取首个即"光标最近的边"的 target
+            hits = self._db.edges_at(file_path, line, col)
+            if not hits:                            # 无任何边命中 → 返 None
+                return None
+            target, _line, _col, _kind = hits[0]    # 元组解包：拿目标节点
+            return durable_key(target)              # 转持久身份返回，让上层做后续路由
+        except sqlite3.Error as e:
+            # 库缺失/锁/损坏 → 静默降级 None，留 warning 便于诊断
+            _LOG.warning(
+                "[codegraph] resolve_at_position 失败，返回 None (%s:%s:%s): %s",
+                file_path, line, col, e,
+            )
+            return None
+
+    def find_by_name(self, token: str, limit: int = 10) -> list[str]:
+        """名字回退查找：FTS 命中节点的 durable_key 列表；CamelCase 优先 class/interface。
+
+        位置解析（resolve_at_position）落空时，用光标处的 token 走全文索引兜底。
+        启发式：token 首字母大写 → 用户多半在选类型名 → 优先返回 class/interface 节点。
+
+        Args:
+            token: 用户在光标处选中的词
+            limit: 最多返回多少个 durable_key
+        Returns:
+            durable_key 列表（CamelCase 优先 class/interface；其它情况按 FTS 原序）；
+            sqlite 异常 → 空列表
+        """
+        try:
+            nodes = self._db.search_nodes_by_name(token, limit)
+            # token[:1] 切片取首字符（空串安全，得 ''），isupper() 判 CamelCase
+            # 用切片而非索引：token='' 时 token[0] 会 IndexError，token[:1] 得 '' 安全
+            if token[:1].isupper():
+                # 列表推导式：筛 kind 在偏好集合内的节点
+                preferred = [n for n in nodes if n.kind in ("class", "interface")]
+                # or 短路：偏好列表非空就用偏好；否则回退原序列（不丢候选）
+                nodes = preferred or nodes
+            return [durable_key(n) for n in nodes]
+        except sqlite3.Error as e:
+            _LOG.warning("[codegraph] find_by_name 失败，返回 [] (token=%s): %s", token, e)
+            return []
+
+    def resolve_impl(self, entity_id: str) -> Optional[str]:
+        """接口方法 → 实现方法 durable_key（设计 §4.1 ③）；非接口方法返 None（不改写）。
+
+        判定逻辑：
+          1. 剥 '://' scheme 和 '#' 签名 → 得 qualified_name（如 'ISvc::m'）
+          2. 拆 class 部分 → 在 CodeGraph 找该类节点；任一 kind='interface' 才视为接口方法
+          3. 调 db.nodes_implementing → 找该接口方法的所有实现，取首个返回
+          4. 任何异常 / 非接口 / 无实现 → None（fail-soft）
+
+        Args:
+            entity_id: 持久 key（如 'ISvc::m#()' 或带 scheme 的 'method://ISvc::m#()'）
+        Returns:
+            首个实现方法的 durable_key；非接口方法或无实现返回 None
+        """
+        try:
+            # 剥 scheme：'method://ISvc::m#()' → 'ISvc::m#()'
+            without_scheme = entity_id.split("://", 1)[-1]
+            # split('#', 1)[0]：'ISvc::m#()' → 'ISvc::m'（'#' 分隔符不会出现在 qn 内部）
+            qn = without_scheme.split("#", 1)[0]
+            # 必须含 '::' 才是 method qn；否则可能是类名等，直接返 None
+            if "::" not in qn:
+                return None
+            # rpartition 从右切首个 '::'，[0]=class 部分（如 'ISvc'）
+            class_part = qn.rpartition("::")[0]
+            # 查 class 节点：必须存在且至少一个 kind='interface'，才认为该方法是接口方法
+            class_nodes = self._db.find_nodes_by_qualified_name(class_part)
+            # any(...)：任一节点是接口即可（防御重名 / 重定义）；空列表也走 False 分支
+            if not any(n.kind == "interface" for n in class_nodes):
+                return None
+            # 走 db 层 4 表 JOIN → 实现方法 node 列表
+            impls = self._db.nodes_implementing(qn)
+            if not impls:                            # 接口无实现（罕见，但 schema 允许）
+                return None
+            # 取首个实现（多实现取首个；调用方若需全部可后续扩 list 接口）
+            return durable_key(impls[0])
+        except sqlite3.Error as e:
+            _LOG.warning("[codegraph] resolve_impl 失败 (%s): %s", entity_id, e)
+            return None
+
     def module_of(self, entity_id: str) -> Optional[str]:
         """返回 entity 所属模块（CodeGraph file_path 顶层目录，如 'mall-portal'/'mall-admin'）。
 

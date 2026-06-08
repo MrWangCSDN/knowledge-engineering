@@ -148,6 +148,119 @@ class CodeGraphDB:
             ).fetchone()   # fetchone：只取第一行；没有匹配返回 None
         return self._row_to_node(row) if row else None  # 条件表达式（三元）
 
+    def edges_at(
+        self, file_path: str, line: int, col: int
+    ) -> list[tuple[CgNode, Optional[int], Optional[int], str]]:
+        """位置→边命中：source 节点在 file_path 内的 calls/references/instantiates 边，
+        按 (|edge_line - target_line|, |edge_col - target_col|) 字典序排序，取最近若干条。
+
+        用于「IDE 化光标位置 → 实体」解析（设计 [[代码查看器-IDE化导航-设计]] §4.1 ①）。
+        kind 集合刻意只含 'calls'/'references'/'instantiates'：覆盖方法调用 + 类型引用 +
+        实例化，避免 contains/imports 干扰光标命中。
+
+        排序按 (line_dist, col_dist) 字典序：line 距离优先（同行所有 col 都优于跨行最近 col），
+        见 _walk 风格的 ORDER BY 套路。SQLite 中 NULL 在 ORDER BY 升序时排最前，所以
+        coalesce(e.line, 0) 给 NULL 一个稳定基线，避免无意义的"NULL 优先"假命中。
+
+        Args:
+            file_path: 源 node 所在文件相对路径（同 nodes.file_path）
+            line: 鼠标所在行（1-indexed）
+            col: 鼠标所在列（1-indexed；UTF-16 列约定与 Monaco 一致）
+        Returns:
+            [(target CgNode, edge.line, edge.col, edge.kind), ...]，按距离升序，最多 8 条。
+            file_path 不存在/无可命中边时返回空列表。
+        """
+        # with 语句：上下文管理器自动关闭 conn，等效 try/finally close()
+        with self._connect() as conn:
+            # 三表 JOIN：edges 起点 nodes（用于 file_path 过滤）+ edges 终点 nodes（投影目标列）
+            # edge_line/edge_col/edge_kind 起别名，避免与 nodes 表中潜在同名列冲突
+            # coalesce(x, 0)：x 为 NULL 时取 0，给距离排序一个稳定基线
+            # ORDER BY 两列：字典序自动处理"同行优先"——line 距离为 0 的行全部排在前
+            rows = conn.execute(
+                f"SELECT {self._prefixed('t')}, "
+                "e.line AS edge_line, e.col AS edge_col, e.kind AS edge_kind "
+                "FROM edges e "
+                "JOIN nodes s ON e.source = s.id "
+                "JOIN nodes t ON e.target = t.id "
+                "WHERE s.file_path = ? AND e.kind IN ('calls','references','instantiates') "
+                "ORDER BY abs(coalesce(e.line, 0) - ?), abs(coalesce(e.col, 0) - ?) "
+                "LIMIT 8",
+                (file_path, line, col),
+            ).fetchall()
+        # 列表推导式：每行转 (CgNode, edge_line, edge_col, edge_kind) 四元组
+        return [
+            (self._row_to_node(r), r["edge_line"], r["edge_col"], r["edge_kind"])
+            for r in rows
+        ]
+
+    def search_nodes_by_name(self, token: str, limit: int = 10) -> list[CgNode]:
+        """nodes_fts 全文索引按名字模糊匹配（位置解析落空时按 token 回退查找）。
+
+        Args:
+            token: 用户在光标处选中的词（如 'OmsService'、'Foo'）
+            limit: 最多返回多少个候选（防 FTS 命中爆炸）
+        Returns:
+            匹配的 CgNode 列表（顺序由 FTS5 内部排序，对调用方而言只取若干候选）
+        """
+        # 不传 token 或空串：直接返回空列表，避免 FTS5 MATCH '""' 行为异常
+        if not token:
+            return []
+        # FTS5 短语转义：用双引号包裹 token，并把 token 内的双引号自身改成 ""
+        # 避免用户输入含 '/' '"' '.' 等特殊字符时 FTS5 解析失败抛 OperationalError
+        safe = '"' + token.replace('"', '""') + '"'
+        with self._connect() as conn:
+            # 子查询 nodes_fts MATCH ? → 命中的 id 集合；外层按 _COLS 投影完整节点列
+            # LIMIT 在子查询/外层均可，放外层简单清晰
+            rows = conn.execute(
+                f"SELECT {_COLS} FROM nodes "
+                "WHERE id IN (SELECT id FROM nodes_fts WHERE nodes_fts MATCH ?) "
+                "LIMIT ?",
+                (safe, limit),
+            ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
+    def nodes_implementing(self, iface_qn: str) -> list[CgNode]:
+        """接口方法 qn → 经 implements 边找实现类，再取同名方法 node。
+
+        SQL 一次跑完 4 表 JOIN：
+          1. iface 表（接口类节点，按 qualified_name 过滤）
+          2. implements 边（target = iface.id → source = impl_class.id）
+          3. contains 边（impl_class → 其下所有方法）
+          4. m 表（contains.target → 同名方法节点）
+
+        Args:
+            iface_qn: 接口方法的 qualified_name，如 'ISvc::m'（已剥 '#' 签名后缀）
+        Returns:
+            实现该接口方法的方法节点列表；接口不存在/无实现/qn 格式异常 → 空列表
+        """
+        # rpartition：从右往左切第一个 '::'，[0]=class_part、[2]=method_name
+        # 若 iface_qn 不含 '::'，rpartition 返回 ('', '', original) → class_part 为 ''，方法名落空
+        # 这种异常输入下，下面的 WHERE qualified_name='' 自然无命中 → 返回 [] 兜底
+        class_part, sep, method_name = iface_qn.rpartition("::")
+        # 不含 '::' 或方法名空 → 直接返回 []，省一次 SQL 调用
+        if not sep or not method_name:
+            return []
+        with self._connect() as conn:
+            # 4 表 JOIN：
+            #   iface 表 → implements 边 → impl 类的 contains 边 → 实现方法节点 m
+            # 投影 m.* 的列（用 _prefixed('m') 复用列清单），供 _row_to_node 解析
+            rows = conn.execute(
+                f"SELECT {self._prefixed('m')} "
+                "FROM nodes iface "
+                "JOIN edges impl_edge "
+                "  ON impl_edge.target = iface.id AND impl_edge.kind = 'implements' "
+                "JOIN edges contains_edge "
+                "  ON contains_edge.source = impl_edge.source "
+                "  AND contains_edge.kind = 'contains' "
+                "JOIN nodes m "
+                "  ON m.id = contains_edge.target "
+                "  AND m.kind = 'method' "
+                "  AND m.name = ? "
+                "WHERE iface.qualified_name = ?",
+                (method_name, class_part),
+            ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
     def iter_method_nodes(self) -> list[CgNode]:
         """列出所有 kind='method' 的节点（重灌 CodeEntity 用）。
 
