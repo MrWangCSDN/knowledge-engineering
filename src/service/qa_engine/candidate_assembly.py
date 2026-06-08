@@ -161,3 +161,105 @@ def compute_independent_entries(
         if not is_descendant:
             independent.append(c)
     return independent
+
+
+def build_subtree_for_entry(
+    entry_qn: str,
+    candidate_meta: dict[str, dict],
+    graph,
+    *,
+    max_depth: int = 3,
+    max_nodes_per_subtree: int = 6,
+) -> TreeNode:
+    """从 entry 出发 BFS 构造一棵候选子树（候选优先入子树，非候选下游跳过）。
+
+    设计 [[候选按调用顺序组装-设计]] §4.2 算法 ②。要点：
+      - 严格只挂 candidate_meta 里的成员节点，避免子树爆出候选边界引入 LLM 未见过的 entity
+      - 候选成员优先：同层 successors 中候选排前，确保命中名额给真正召回过的 entity
+      - 节点上限：达到 max_nodes_per_subtree 即停止扩展（含 root，防单子树过大）
+      - fail-soft：graph 后端异常一律视为该节点无下游，仍返根
+
+    Args:
+        entry_qn: 入口 qualified_name（已剥签名；调用方负责归一）
+        candidate_meta: {qn: {summary, module?, code_snippet?}}；只这些会被挂进子树
+        graph: GraphProto-like，提供 successors(qn, rel_type=None) → list[durable_key]
+        max_depth: BFS 深度（默认 3 跳：root + 3 层下游）
+        max_nodes_per_subtree: 整棵子树节点上限（含根；默认 6）
+    Returns:
+        子树根 TreeNode（一定含 root；children 可能空）
+    """
+    # 候选成员 qn 集合，用于"优先入子树"判定和"非候选过滤"
+    # set(...)：O(1) 成员判断；dict.keys() 在 Python 3.7+ 保序但 set 更适合本场景
+    candidate_qns_set: set[str] = set(candidate_meta.keys())
+
+    def _make_node(qn: str) -> TreeNode:
+        """根据 qn 构造 TreeNode；从 candidate_meta 取元信息，缺则默认。
+
+        闭包：直接读外层 candidate_meta，避免每次显式传参。
+        """
+        # dict.get(key, default)：键不存在时返回 default 而非抛 KeyError
+        meta = candidate_meta.get(qn, {})
+        return TreeNode(
+            entity_id=qn,
+            summary=meta.get("summary") or "",       # None / 空串都归一为 ""
+            module=meta.get("module"),                # None 兜底
+            code_snippet=meta.get("code_snippet"),    # None 兜底
+            children=[],                              # 显式空 list（dataclass field default 也是空）
+        )
+
+    # 根节点构造（不依赖 graph，必成功）
+    root = _make_node(entry_qn)
+
+    # BFS 状态：访问集 + 节点查找表 + 队列 + 已添加节点计数
+    # visited：去环、去重（同一 qn 不重复挂）
+    visited: set[str] = {entry_qn}
+    # node_lookup：qn → TreeNode，方便给 parent.children 追加 child
+    node_lookup: dict[str, TreeNode] = {entry_qn: root}
+    # 队列：(qn, depth_from_root)；root 在深度 0
+    queue: deque[tuple[str, int]] = deque([(entry_qn, 0)])
+    # nodes_added：已挂进子树的节点总数（含 root）；达上限即停
+    nodes_added = 1
+
+    while queue and nodes_added < max_nodes_per_subtree:
+        current_qn, depth = queue.popleft()
+        # 深度限制：已达 max_depth 的节点不再扩展（其下游不进树）
+        if depth >= max_depth:
+            continue
+        # 取下游 successors；图后端异常 → 静默视为无下游
+        try:
+            succs = graph.successors(current_qn) or []
+        except Exception:
+            succs = []
+
+        # 候选优先：把 successors 按"是否在候选里"排序——候选成员排前
+        # 列表推导式 + sorted：稳定排序（key 相同时保原顺序）
+        succ_qns = [_strip_signature(s) for s in succs]
+        # 排序键：候选成员 = 0（排前），非候选 = 1（排后）
+        # lambda：匿名函数，一行表达
+        prioritized = sorted(
+            succ_qns,
+            key=lambda q: (0 if q in candidate_qns_set else 1),
+        )
+
+        for succ_qn in prioritized:
+            # 上限触发 → 停止挂新节点（剩下的 successors 都跳过）
+            if nodes_added >= max_nodes_per_subtree:
+                break
+            # 去重：同 qn 已挂过 → 跳
+            if succ_qn in visited:
+                continue
+            # 严格候选过滤：非候选成员一律不挂进子树
+            # （即便它在 successors 里，避免子树突破召回边界）
+            if succ_qn not in candidate_qns_set:
+                continue
+            # 真正挂载：构造 child 节点 + 写 visited + 加入父节点 children 列表
+            visited.add(succ_qn)
+            child = _make_node(succ_qn)
+            # 父节点查 node_lookup；append 是 list 方法、直接 mutation
+            node_lookup[current_qn].children.append(child)
+            node_lookup[succ_qn] = child
+            nodes_added += 1
+            # 入队继续 BFS（深度 + 1）
+            queue.append((succ_qn, depth + 1))
+
+    return root
