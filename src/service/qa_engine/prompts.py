@@ -235,6 +235,22 @@ context 不足时**不要直接放弃**，先用工具探索：
   图由工具**自动内联**显示在你说到的位置（不是一张图片、也不是链接）。直接自然地说"见下方调用图"即可。
 - 代码调用图（模式一）返回空（该入口无调用边）→ 改用模式二（nodes/edges）画业务逻辑图，
   或用文字/表格说明，**绝不退回手画**。
+
+🔴 **模式 B（freeform）节点-边的硬约束**（2026-06-08 实测教训）：
+  1. **候选树里给的 entity 都要出现在图里**：候选区里"子树 N"展开的所有节点（含接口
+     + 实现 + Dao + 工具方法）都应该在图里出现，**不要"折叠"** —— 即使你觉得接口和
+     实现"是同一个东西"。接口节点 + 实现节点都画，加一条 `implements 关系` 标签的边
+     连起来。
+  2. **不允许编 calls 边**：节点-边图里的每条边都应该是 candidates 区域 + call_chain
+     段里能找到的真实 calls 关系，或语义上明确的 implements / extends / 异步触发；
+     **不要为了"图好看"凭空连两个节点**。Dao 方法之间通常不互相调用、Dao 不会调
+     Service（反向）—— 这种边一律不画。
+  3. **异步桥接（MQ / @Scheduled / @EventListener / AOP）不画 calls 边**：让 LLM
+     在文字里说"X 通过 MQ 发延迟消息，到期后被 @RabbitListener Y 消费"；不要画
+     `X → MQ → Y` 这种 calls 边链——这些不是代码调用关系。
+  4. **dotted vs scoped notation**：node.method 字段统一用 `Class::method` 形态
+     （与 CodeGraph qualified_name 一致），不要用 `Class.method`。后端做了归一化但
+     `::` 是首选。
 """
 
 

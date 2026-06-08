@@ -151,6 +151,37 @@ def test_freeform_keeps_when_graph_throws():
     assert "已过滤" not in out["summary"]
 
 
+def test_freeform_normalizes_dot_to_double_colon():
+    """漏洞修补 2/2：agent 按 prompt 用 'Class.method' 形态时归一为 'Class::method' 后查 CodeGraph。
+
+    2026-06-08 mall-swarm 实测：agent 输出 method 字段用 . 分隔（如
+    'OrderTimeOutCancelTask.cancelTimeOutOrder'），原 _node_qn 看 :: 不命中 → 当抽象节点
+    跳过校验。修：识别 'Class.method' 形态，归一为 CodeGraph 的 'Class::method' qn。
+    """
+
+    class _Graph:
+        # CancelOrderSender.sendMessage → orderTtlQueue 在 CodeGraph 无 calls 边（@Bean 不被调）
+        def successors(self, qn):
+            return []
+        def predecessors(self, qn):
+            return []
+
+    tool = build_render_call_graph_tool(_Graph())
+    out = _run(tool.handler({
+        "nodes": [
+            # 用 . 分隔的实测格式（agent 按 prompt 走"code(英文 类.方法)"约定）
+            {"id": "1", "label": "发送", "method": "CancelOrderSender.sendMessage", "kind": "service"},
+            {"id": "2", "label": "队列", "method": "RabbitMqConfig.orderTtlQueue", "kind": "config"},
+        ],
+        "edges": [
+            {"source": "1", "target": "2", "label": "路由配置"},
+        ],
+    }))
+    data = out["render"]["data"]
+    assert len(data["edges"]) == 0
+    assert "已过滤" in out["summary"]
+
+
 def test_freeform_extracts_qn_from_method_or_code_field():
     """漏洞修补：agent 用中文 id + method/code 字段藏 qn 时也能校验（2026-06-08 修）。
 

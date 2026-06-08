@@ -91,35 +91,65 @@ _SCHEMA: dict[str, Any] = {
 }
 
 
+def _normalize_to_qn(s: str) -> str:
+    """归一'Class.method' / 'Class::method' / 'method://Class::method#(p)' → 'Class::method'。
+
+    设计：agent 按 prompt §画图约定的"code(英文 类.方法)"约定输出时用 . 分隔；
+    CodeGraph 的 qualified_name 用 :: 分隔。本函数做两侧归一让 graph.successors 查得到。
+
+    规则：
+      1. 剥 'method://'/'class://' 等 scheme（split('://')[-1]）
+      2. 剥 '#' 后的签名
+      3. 已含 '::' → 直接返
+      4. 含 '.' → 最右一个 . 替换为 ::（短类名+短方法形态）
+      5. 无 . 无 :: → 原样返
+
+    例：'OrderTimeOutCancelTask.cancelTimeOutOrder' → 'OrderTimeOutCancelTask::cancelTimeOutOrder'
+       'method://Cls::m#(Long)' → 'Cls::m'
+       'Cls::m' → 'Cls::m'
+       'user' → 'user'
+    """
+    # 1. 剥 scheme
+    s = s.split("://", 1)[-1]
+    # 2. 剥签名
+    s = s.split("#", 1)[0]
+    # 3. 已含 :: → 不动
+    if "::" in s:
+        return s
+    # 4. 含 . → 把最右一个 . 替换为 ::（短类名形态：'Class.method' → 'Class::method'）
+    if "." in s:
+        idx = s.rfind(".")
+        return s[:idx] + "::" + s[idx + 1:]
+    # 5. 无任何分隔符 → 原样返（抽象概念节点会走调用方的 None 判断）
+    return s
+
+
 def _node_qn(node: dict[str, Any]) -> Optional[str]:
     """从 mode B 节点 dict 抽 CodeGraph qualified_name；非真实方法节点返 None。
 
     优先级（依次尝试）：
-      1. entityId（'method://Cls::m#(p)'）→ 剥 scheme + 签名
-      2. method 字段（_build_freeform_graph 输出格式）含 '::' → 视作 qn
-      3. code 字段（agent 输入格式）含 '::' → 视作 qn
-      4. id 含 '::' → 视作 qn 直传
-      5. 都不匹配 → None（抽象概念节点，不参与边核验）
+      1. entityId（'method://Cls::m#(p)'）→ 剥 scheme + 签名 + 归一
+      2. method 字段（_build_freeform_graph 输出格式）→ 归一
+      3. code 字段（agent 输入字段）→ 归一
+      4. id 字段 → 归一
+      5. 都不像方法（无 :: 也无 .）→ None（抽象概念节点）
 
-    2026-06-08 修补漏洞：mall-swarm 实测 agent 偶尔用中文 id + method 字段藏 qn 形态
-    （如 {id: "MQ配置", method: "RabbitMqConfig::orderTtlQueue"}）→ 原 _node_qn 只看
-    entityId/id 一律返 None → 假 calls 边漏过校验。补 method/code 字段检查堵之。
+    判定"真实方法节点"：归一后含 :: 即视为真。Class.method 形态会被归一为 Class::method。
+    抽象概念（如 "user" / "queue"）归一后仍无 :: → 返 None 让调用方跳过校验。
+
+    2026-06-08 两次修补：
+      ① 加 method/code 字段提取（首次实测 agent 用中文 id + method 漏过）
+      ② 加 . → :: 归一（二次实测 agent 按 prompt "类.方法" 约定，原 :: 检查不命中）
     """
-    ent = node.get("entityId")
-    if ent:
-        # 剥 'method://' / 'class://' scheme，再剥 '#' 后的签名
-        return str(ent).split("://", 1)[-1].split("#", 1)[0]
-    # method：_build_freeform_graph 标准化后的 qn 字段（agent 输入 code → 输出 method）
-    method = node.get("method")
-    if method and "::" in str(method):
-        return str(method).split("#", 1)[0]
-    # code：agent 输入字段（prompt 文档约定的命名）；若 _build_freeform_graph 还没归一化时也能命中
-    code = node.get("code")
-    if code and "::" in str(code):
-        return str(code).split("#", 1)[0]
-    nid = str(node.get("id") or "")
-    if "::" in nid:
-        return nid.split("#", 1)[0]
+    # 依次尝试 entityId / method / code / id 四字段
+    for field_name in ("entityId", "method", "code", "id"):
+        v = node.get(field_name)
+        if not v:
+            continue
+        qn = _normalize_to_qn(str(v))
+        # 真实方法节点判定：归一后含 :: 即可（覆盖 Class::method + Class.method 两种来源）
+        if "::" in qn:
+            return qn
     return None
 
 
