@@ -43,7 +43,8 @@ passlib `CryptContext(schemes=["bcrypt"], bcrypt__rounds=12)` → `$2b$12$...`�
 ### 已知允许差异（不算违规，记录在案）
 
 1. 请求体校验失败：FastAPI 返 422 `{"detail":[{loc,msg,type}...]}`，zod-openapi 默认 400 + zod issues。前端登录表单自带客户端校验，正常流程打不到；记录为已知差异，Phase 3 前端回归时若有依赖再对齐。
-2. `created_at` 序列化：pydantic 输出 naive ISO（无 Z 无毫秒），TS Date JSON 化带 `.000Z`。前端 `new Date()` 两者都能解析；记录为已知差异。
+2. `created_at` 序列化（**执行期勘误**：本条原描述有误）：实际 drizzle string mode 返回空格分隔串 `"YYYY-MM-DD HH:MM:SS"`，TS 侧已在 toMe 归一为 `"YYYY-MM-DDTHH:MM:SS"`——**与 pydantic 输出逐字一致**，无差异（commit `5740124`）。
+2b. **镜像保留的 Python 既有弱点**（parity 优先，TS 未加重，集中记录）：① 登录计时侧信道（用户不存在走快路径无 bcrypt）；② CSRF 子串检查可被 `evil-含host域名` 绕过（`host not in origin` 同款）；③ 失败计数 read-modify-write 并发竞态（影响有界，`>=` 阈值仍会锁定）。未来若强化须 Python/TS 同步改。
 3. MySQL `datetime` 全程 **naive UTC**（Python 用 `now.replace(tzinfo=None)` 比较）。TS 侧统一用「UTC naive 字符串」读写比较（见 Task 1 helper）。
 
 ---
