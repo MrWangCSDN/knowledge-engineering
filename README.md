@@ -1,5 +1,12 @@
 # 代码知识工程（knowledge-engineering）
 
+> [!IMPORTANT]
+> **🧊 本仓库已功能冻结（2026-06-11）**：只接受线上 bug 修复，不再新增功能。
+> 后端正在重写为 TypeScript（新仓 `ke-server`），新功能一律在 TS 侧实现。
+> 移植基线 = tag `py-final-baseline`（树 = release-0513 生产代码）；
+> 移植对照物见 `docs/porting/`；总体路线 spec 见 Obsidian
+> `01 Engineering/knowledge-engineering/TS重构-总体路线-设计.md`。
+
 一个面向"代码仓库 → 结构事实 → 语义增强 → 知识图谱 →（可选）解读 → 可检索/可解释 API"的端到端工程。
 
 工程以 **流水线（pipeline）** 为核心，通过 **FastAPI** 对外提供检索、影响分析、子图查询等能力；前端在独立仓 `knowledge-engineering-web` 中维护（前后端分离）。后端单一交付物是 API 服务，消费同一套底层产物：知识图谱（memory/Neo4j）与向量/解读库（memory/Weaviate）。
