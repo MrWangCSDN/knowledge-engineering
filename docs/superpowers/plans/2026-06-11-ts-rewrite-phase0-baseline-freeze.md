@@ -22,6 +22,8 @@
 
 策略说明：用「`-s ours` 反向合并」让 main 的树**逐字节等于** release-0513 的树。main 独有的 3 个 call_chain commit（6 段式路径，决策 #6 不迁）保留在历史里但内容不进基线——直接正向 merge 会在 synthesizer/prompts 上撞大量无意义冲突（这些文件在 release-0513 已重构 424 commits）。
 
+⚠️ 副作用（已安排恢复）：本计划文件本身（commit `4071c39`，只在 main 树上）也会被合并覆盖掉——这是预期的，Task 2 Step 4 会在打完 tag 后从 `4071c39` 恢复它再继续执行。执行器在 Task 1-2 期间请以本文件的当前内存副本/transcript 为准。
+
 - [ ] **Step 1: 核验分支差异恰为预期的 3 个 commit**
 
 ```bash
@@ -112,9 +114,18 @@ git tag -a py-final-baseline -m "Python 后端最终基线（TS 重构移植对�
 git push origin main py-final-baseline
 ```
 
-预期：push 成功，`git tag -l py-final-baseline` 有输出。
+预期：push 成功，`git tag -l py-final-baseline` 有输出。注意：tag 必须打在恢复计划文件**之前**——保证 tag 树 == release-0513 树逐字节一致。
 
-- [ ] **Step 4: README 顶部加冻结横幅**
+- [ ] **Step 4: 恢复被合并覆盖的 Phase 0 计划文件**
+
+```bash
+git checkout 4071c39 -- docs/superpowers/plans/2026-06-11-ts-rewrite-phase0-baseline-freeze.md
+git commit -m "docs(plan): 恢复 Phase 0 计划文件（Task 1 合并取 release-0513 树时被覆盖，预期内）
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+- [ ] **Step 5: README 顶部加冻结横幅**
 
 在 `README.md` 第一个标题**之后**插入：
 
@@ -127,7 +138,7 @@ git push origin main py-final-baseline
 > `01 Engineering/knowledge-engineering/TS重构-总体路线-设计.md`。
 ```
 
-- [ ] **Step 5: Commit + push**
+- [ ] **Step 6: Commit + push**
 
 ```bash
 git add README.md
@@ -561,7 +572,7 @@ cd /Users/java/obsidian && git add -A "01 Engineering/knowledge-engineering/" &&
 cd /Users/java/knowledge-engineering
 git tag -l py-final-baseline                  # ① tag 在
 ls docs/porting/                              # ② 四件套在：routes-*.{json,md} / agent-tools-schema.json / sse-protocol.md / eval/ / no-port-list.md
-git diff main release-0513 --stat | head -1   # ③ 空 = 树一致
+git diff py-final-baseline main --name-only   # ③ 只允许出现 Phase 0 产物：README.md / docs/porting/* / docs/superpowers/plans/2026-06-11-* / scripts/export_*（以及 Task 2 Step 2 若做过回归修复的文件）
 git log origin/main..main --oneline | head -1 # ④ 空 = 全部已推送
 ```
 
@@ -583,3 +594,4 @@ cd /Users/java/knowledge-engineering-auth && git fetch origin && cd /Users/java/
 2. **占位符**：Task 5/6/7 的文档骨架均标注「填实测内容，不许留模板字样」；无 TBD。
 3. **一致性**：tag 名 `py-final-baseline` 全文统一；工具数 13 = registry 12 + render 单装，与 Task 4 脚本断言一致；路径统一 `docs/porting/`。
 4. **已知不确定点（执行时按步内 fallback 处理）**：① `release-0513..main` 是否恰 3 commit（Task 1 Step 1 显式核验）；② `list_tools()` 实际方法名（Task 4 Step 2 fallback）；③ 51 题题集能否完整恢复（Task 6 Step 5 用户决策）。
+5. **时序坑（已修复进计划）**：本计划文件 commit 在合并**之前**的 main 上，`-s ours` 合并会把它从树上冲掉 → Task 2 Step 4 在打完 tag 后从 `4071c39` 恢复；tag 因此保持与 release-0513 树逐字节一致；Task 9 ③ 验收命令相应改为「diff 基线只允许 Phase 0 产物」。
