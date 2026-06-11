@@ -1,0 +1,4891 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "代码知识工程 API",
+    "description": "检索、影响分析、图谱可视化数据",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Login",
+        "description": "密码登录 → 签 access_token + 设 refresh_token cookie。",
+        "operationId": "login_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Refresh",
+        "description": "用 cookie 中的 refresh_token 换新 access_token。CSRF 防御：校验 Origin。",
+        "operationId": "refresh_auth_refresh_post",
+        "parameters": [
+          {
+            "name": "refresh_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Refresh Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Me",
+        "operationId": "me_auth_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/auth/me/model": {
+      "patch": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Update Preferred Model",
+        "description": "更新当前用户的偏好 LLM 模型。\n\n校验：model_id 必须在 llm_factory.SUPPORTED_MODELS 白名单内，否则返 400；\n防御未知 model 写入 DB（前端 dropdown 已限制，但后端必须独立校验）。",
+        "operationId": "update_preferred_model_auth_me_model_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePreferredModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Logout",
+        "description": "清 refresh cookie；前端同时清内存 access_token。",
+        "operationId": "logout_auth_logout_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user/archived-sessions": {
+      "get": {
+        "tags": [
+          "user-archived"
+        ],
+        "summary": "List Archived Sessions",
+        "description": "列出当前用户所有工程的归档 session，按工程分组。\n设计：[[会话归档-设计]] §5.5。",
+        "operationId": "list_archived_sessions_user_archived_sessions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchivedListResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/projects": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "List Projects",
+        "description": "列出当前用户可访问的工程。\n\nv2：admin 看全部；普通用户按 user_project_access 表过滤 — 与 qa_router\n既有 `Depends(require_project_role)` 的 RBAC 语义对齐（前端 dropdown 列出\n的工程都能用，不会出现\"列了但点了 403\"的 UX 错配）。",
+        "operationId": "list_projects_projects_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectListResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Create Project",
+        "description": "admin only。v1 主要给 CLI 工具用；前端 v2 暴露表单。",
+        "operationId": "create_project_projects_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/projects/{project_id}": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Get Project",
+        "operationId": "get_project_projects__project_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/qa/explain": {
+      "post": {
+        "tags": [
+          "qa"
+        ],
+        "summary": "Explain",
+        "description": "流式问答。\n\n错误：\n  404 工程不存在\n  409 工程正在索引（暂不可问答）\n  422 question 为空（Pydantic 校验）",
+        "operationId": "explain_projects__project_id__qa_explain_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplainRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/qa/sessions": {
+      "get": {
+        "tags": [
+          "qa"
+        ],
+        "summary": "List Sessions",
+        "description": "列出当前用户在该工程下的会话（按 updated_at 倒序）。",
+        "operationId": "list_sessions_projects__project_id__qa_sessions_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Sessions Projects  Project Id  Qa Sessions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/qa/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "qa"
+        ],
+        "summary": "Get Session Detail",
+        "description": "会话详情 + 消息（按 created_at 顺序）。\n\n设计上其他人的会话也返回 404（不暴露存在性）。",
+        "operationId": "get_session_detail_projects__project_id__qa_sessions__session_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Session Detail Projects  Project Id  Qa Sessions  Session Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "qa"
+        ],
+        "summary": "Delete Session",
+        "description": "删除会话：从 DB 删 qa_sessions 行 + fs 级联清理 session 目录。\n\n设计：[[文件式记忆重构-设计]] §8.3（S7 修 S6 §7.11 #2 orphan 累积）。\nDB delete 先（业务核心 / 事务一致性）；fs.rm recursive 后（best-effort，\n失败 debug 静默，不影响 DB delete 主业务，与 §6.5/§7.7 三层防御一致）。\n清理范围：ke://u/{uid}/session/{sid}/ 整目录（含 summary.md / messages/）。",
+        "operationId": "delete_session_projects__project_id__qa_sessions__session_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "qa"
+        ],
+        "summary": "Rename Session",
+        "description": "重命名会话。置位 title_custom=True，异步总结将永不覆盖。\n\n设计：[[会话标题-重命名与智能总结-设计]] §3.1",
+        "operationId": "rename_session_projects__project_id__qa_sessions__session_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameSessionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/qa/sessions/{session_id}/archive": {
+      "post": {
+        "tags": [
+          "qa"
+        ],
+        "summary": "Archive Session",
+        "description": "把 session 设为归档状态。幂等：已归档再调不更新时间戳。\n设计：[[会话归档-设计]] §5.1, §5.4。",
+        "operationId": "archive_session_projects__project_id__qa_sessions__session_id__archive_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/qa/sessions/{session_id}/unarchive": {
+      "post": {
+        "tags": [
+          "qa"
+        ],
+        "summary": "Unarchive Session",
+        "description": "把归档 session 恢复为活动状态。幂等：本来就是活动的直接返回 null。\n设计：[[会话归档-设计]] §5.1, §5.4。",
+        "operationId": "unarchive_session_projects__project_id__qa_sessions__session_id__unarchive_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/qa/sessions/{session_id}/messages/{message_id}/feedback": {
+      "post": {
+        "tags": [
+          "qa"
+        ],
+        "summary": "Post Feedback",
+        "description": "对一条 assistant 消息打反馈（覆盖式 upsert）。S7 改造：fs sibling file。\n\n设计：[[文件式记忆重构-设计]] §8.4（修 S6 §7.11 #1 broken stub）。\n路径：ke://u/{uid}/session/{sid}/messages/{msg_id}.feedback.md（与 message 同目录）。\n覆盖式更新（同 msg_id 后续 POST 覆盖前次）；vote=None 表示取消反馈。\n\n失败语义（§8.5）：fs.write 抛 → 抛 500（不静默 — 用户主动投票需明确反馈，\n与 compact/recall 那种 best-effort 元数据不同）。",
+        "operationId": "post_feedback_projects__project_id__qa_sessions__session_id__messages__message_id__feedback_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/qa/sessions/{session_id}/messages/{message_id}/export": {
+      "get": {
+        "tags": [
+          "qa"
+        ],
+        "summary": "Export Message",
+        "description": "导出 assistant 消息为 Word 文档。\n\n错误：\n  400 format 不在支持列表里\n  404 消息 / 会话 / 工程不存在\n  403 用户不是会话所有者（其它人的对话不能下载）",
+        "operationId": "export_message_projects__project_id__qa_sessions__session_id__messages__message_id__export_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "导出格式；当前仅支持 docx",
+              "default": "docx",
+              "title": "Format"
+            },
+            "description": "导出格式；当前仅支持 docx"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/code-snippet": {
+      "get": {
+        "tags": [
+          "code"
+        ],
+        "summary": "Get Code Snippet",
+        "description": "按 entity_id 返回代码片段 + callees（带调用点 line/col）+ callers。\n\n404 三态：\n  1. 工程不存在（由 require_project_role dependency 返回，路由函数体不执行）\n  2. 工程未配置源码路径（repo_local_path is None）\n  3. 该实体无可用源码（entity 未入图 / file_path 越界）\n\n403：用户无 reporter+ 权限（由 require_project_role dependency 返回）\n\n设计约束（见 [[代码片段查看器-设计]] §4.3）：\n  - 不挂 require_infra_healthy：infra 不健康也能看代码\n  - 纯 CodeGraph + 本地文件读取，无网络依赖",
+        "operationId": "get_code_snippet_projects__project_id__code_snippet_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "entity_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "实体持久 key，如 OmsXxx::m#(Long)",
+              "title": "Entity Id"
+            },
+            "description": "实体持久 key，如 OmsXxx::m#(Long)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Code Snippet Projects  Project Id  Code Snippet Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/code/resolve-symbol": {
+      "post": {
+        "tags": [
+          "code"
+        ],
+        "summary": "Resolve Symbol",
+        "description": "光标位置 / token → 实体解析（三级；fail-soft 全落空返 null）。\n\n响应：\n  - 200 + {entity_id, has_source, kind, ...}：任一级命中\n  - 200 + null：三级全落空（前端据此静默或显示\"暂无源码\"）\n  - 404：工程不存在 / 未配源码路径\n  - 422：必填字段缺失（file_path/line/col）\n  - 403：用户无 reporter+ 权限\n  - 401：未登录\n\n设计约束：\n  - 不挂 require_infra_healthy：只读 CodeGraph + 本地文件，infra 不健康也能工作\n  - want_doc=True 时尝试取 composite store 的 interpretation_text 首句作 summary；\n    interp_store 缺失时静默回退（summary=None）",
+        "operationId": "resolve_symbol_projects__project_id__code_resolve_symbol_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveSymbolRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Resolve Symbol Projects  Project Id  Code Resolve Symbol Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/credentials": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List Credentials",
+        "description": "列出所有凭证（审计视角）。\n\nInstance Admin 专用：可看到全部用户的凭证列表。\n出于安全，响应体中永远不含 encrypted_token / token 原文，仅含末 4 位 hint。\n\nArgs:\n    db: 当前请求的异步数据库 session。\n    _user: require_admin 守卫注入，确认调用方是 admin（不直接使用）。\n\nReturns:\n    CredentialListResponse：所有凭证的元数据列表。",
+        "operationId": "list_credentials_admin_credentials_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialListResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/admin/credentials/{credential_id}": {
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Delete Credential",
+        "description": "强删凭证（admin 操作，带审计日志）。\n\n可删除任意用户的凭证（不受 owner_user_id 限制）。\nprojects.git_credential_id 设了 ON DELETE SET NULL，\n所以关联工程会变成\"没凭证\"状态，不级联删工程。\n\nArgs:\n    credential_id: 路径参数，目标凭证 ID。\n    request: FastAPI Request，用于提取客户端 IP 写审计日志。\n    db: 当前请求的异步数据库 session。\n    user: require_admin 守卫注入的 admin 用户（用于写审计 actor_user_id）。",
+        "operationId": "delete_credential_admin_credentials__credential_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "credential_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Credential Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/projects/test-connection": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Test Connection",
+        "description": "git ls-remote 测试 URL+凭证有效性。不写库（含 last_used_at）。",
+        "operationId": "test_connection_admin_projects_test_connection_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/admin/projects": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List Admin Projects",
+        "description": "admin 视角的工程列表（含 git 配置字段）。",
+        "operationId": "list_admin_projects_admin_projects_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminProjectListResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Create Admin Project",
+        "description": "创建工程（含 git 配置）。\n\nv1.0 不实际 clone 也不跑 pipeline；仅保存元信息。\nstatus 默认 'configured'，等 v1.1 接通 pipeline 后会切到 indexing→ready。",
+        "operationId": "create_admin_project_admin_projects_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminProjectCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminProjectResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/admin/projects/{project_id}": {
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Update Admin Project",
+        "description": "部分更新工程字段。只更新非 None 的字段。",
+        "operationId": "update_admin_project_admin_projects__project_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminProjectUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminProjectResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Delete Admin Project",
+        "description": "删除工程（含级联：sessions / messages / feedback）。\n\ngit_credentials 不级联删（FK ON DELETE SET NULL，凭证可复用给其他工程）。",
+        "operationId": "delete_admin_project_admin_projects__project_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/credentials": {
+      "get": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "List My Credentials",
+        "description": "列出当前用户自己的所有凭证。\n\n普通用户只能看到自己的凭证（owner_user_id == 当前用户 id）。\n如需查看所有用户的凭证，请使用 GET /admin/credentials（需 admin 权限）。\n\nArgs:\n    user: 当前登录用户（由 JWT 解析得到）。\n    db: 当前请求的异步数据库 session。\n\nReturns:\n    当前用户持有的凭证列表（不含 token 原文）。",
+        "operationId": "list_my_credentials_credentials_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/src__service__credentials_router__CredentialResponse"
+                  },
+                  "type": "array",
+                  "title": "Response List My Credentials Credentials Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Create My Credential",
+        "description": "新建一条属于当前用户的凭证。\n\nPAT 明文用 Fernet 对称加密后存库（AES-128-CBC + HMAC-SHA256）。\n返回的 token_hint 是末 4 位加掩码，原文永远不出库。\n\nArgs:\n    body: 请求体（name / token / type）。\n    request: FastAPI Request，用于提取客户端 IP 写审计日志。\n    user: 当前登录用户。\n    db: 当前请求的异步数据库 session。\n\nReturns:\n    新建凭证的元数据（不含 token 原文）。",
+        "operationId": "create_my_credential_credentials_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/src__service__credentials_router__CredentialResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/credentials/{cred_id}": {
+      "delete": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Delete My Credential",
+        "description": "删除当前用户自己的某条凭证。\n\n- 凭证不存在 → 404\n- 凭证属于其他用户 → 403（不能删别人的）\n- 成功 → 204 No Content\n\nArgs:\n    cred_id: 路径参数，目标凭证 ID（如 'cred_abc123'）。\n    request: FastAPI Request，用于提取客户端 IP 写审计日志。\n    user: 当前登录用户。\n    db: 当前请求的异步数据库 session。",
+        "operationId": "delete_my_credential_credentials__cred_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cred_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Cred Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/groups": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "List Visible Groups",
+        "description": "列出当前用户能看到的所有 group（含通过继承能看到的子孙 group）。\n\n规则：\n  - Instance Admin：看到所有 group\n  - 普通用户：看到自己有成员关系（含继承）的所有 group\n\nArgs:\n    user: 当前登录用户。\n    db: 当前请求的异步 DB session。\n\nReturns:\n    GroupResponse 列表（可能为空）。",
+        "operationId": "list_visible_groups_groups_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/GroupResponse"
+                  },
+                  "type": "array",
+                  "title": "Response List Visible Groups Groups Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Create Group",
+        "description": "建 group。\n\n权限规则：\n  - 建根 group（parent_group_id=None）：仅 Instance Admin（is_admin=True）\n  - 建子 group（parent_group_id=X）：父组 Owner（或 Instance Admin）\n\n创建后：\n  - 创建者自动成为该 group 的 owner（group_members 表插一行）\n  - 操作写审计日志\n\nArgs:\n    body: 请求体（id / name / description / parent_group_id）。\n    request: FastAPI Request 对象，用于提取客户端 IP 写审计。\n    user: 当前登录用户（由 JWT 解析）。\n    db: 当前请求的异步 DB session。\n\nReturns:\n    GroupResponse：新建 group 的元数据。\n\nRaises:\n    HTTPException(403): 权限不足（非 admin 建根组，或非父组 owner 建子组）。\n    HTTPException(404): 父组不存在。\n    HTTPException(409): Group ID 已存在（重复）。\n    HTTPException(422): 嵌套深度超过 MAX_GROUP_DEPTH。",
+        "operationId": "create_group_groups_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/groups/{group_id}": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Get Group",
+        "description": "查看单个 group 详情（需 reporter+ 权限）。\n\nArgs:\n    group_id: 路径参数，group 的业务 ID。\n    db: 异步 DB session。\n\nReturns:\n    GroupResponse：group 详情。\n\nRaises:\n    HTTPException(404): group 不存在。\n    HTTPException(403): 无权限（reporter 以下）。",
+        "operationId": "get_group_groups__group_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Update Group",
+        "description": "改 group 的名称或描述（需 maintainer+ 权限）。\n\n只改有传入值的字段（None 的字段不做更新）。\n有实际改动时写审计日志；无改动时跳过审计。\n\nArgs:\n    group_id: 路径参数，目标 group 的业务 ID。\n    body: 请求体（name / description，都可选）。\n    request: FastAPI Request，用于提取客户端 IP。\n    user: 当前登录用户。\n    db: 异步 DB session。\n\nReturns:\n    GroupResponse：更新后的 group 详情。\n\nRaises:\n    HTTPException(404): group 不存在。\n    HTTPException(403): 权限不足（reporter 角色）。",
+        "operationId": "update_group_groups__group_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Delete Group",
+        "description": "删 group（需 owner 权限 + 无子组 + 无工程）。\n\n规则：\n  - group 不存在 → 404\n  - 有子组 → 403（\"先删子组\"）\n  - 有关联工程 → 403（\"先迁移工程\"）\n  - 成功 → 204 No Content\n\nArgs:\n    group_id: 路径参数，目标 group 的业务 ID。\n    request: FastAPI Request，用于提取客户端 IP。\n    user: 当前登录用户（must be owner）。\n    db: 异步 DB session。\n\nRaises:\n    HTTPException(404): group 不存在。\n    HTTPException(403): 有子组 / 有工程 / 权限不足（由 require_group_role 处理）。",
+        "operationId": "delete_group_groups__group_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/groups/{group_id}/members": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "List Group Members",
+        "description": "列出 group 的所有成员（需 reporter+ 权限）。\n\nArgs:\n    group_id: 路径参数，目标 group 的业务 ID。\n    db:       异步 DB session。\n\nReturns:\n    MemberResponse 列表（可能为空）。\n\nRaises:\n    HTTPException(404): group 不存在（由 require_group_role dependency 处理）。\n    HTTPException(403): 权限不足。",
+        "operationId": "list_group_members_groups__group_id__members_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MemberResponse"
+                  },
+                  "title": "Response List Group Members Groups  Group Id  Members Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Add Group Member",
+        "description": "往 group 加一个成员（需 owner 权限）。\n\n规则：\n  - target user 必须存在（v2.0 Q6：用户必须先注册）\n  - 不能重复加（已存在成员 → 409）\n  - role 必须是合法值（Pydantic 校验，非法 → 422）\n  - 写审计日志 GROUP_MEMBER_ADD\n\nArgs:\n    group_id: 路径参数，目标 group 的业务 ID。\n    body:     请求体（user_id + role）。\n    request:  FastAPI Request，用于提取客户端 IP。\n    user:     当前登录用户（操作者）。\n    db:       异步 DB session。\n\nReturns:\n    MemberResponse：新加成员的信息。\n\nRaises:\n    HTTPException(404): 目标用户不存在。\n    HTTPException(409): 用户已经是成员。",
+        "operationId": "add_group_member_groups__group_id__members_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__service__group_router__MemberAddRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/groups/{group_id}/members/{user_id}": {
+      "patch": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Update Member Role",
+        "description": "改 group 成员的 role（需 owner 权限）。\n\n保护规则：\n  - 如果被改的成员是 group 的唯一 owner，且新 role 不是 owner（即降级），\n    返回 422 \"组必须至少 1 个 owner\"\n\nArgs:\n    group_id: 路径参数，目标 group 的业务 ID。\n    user_id:  路径参数，目标成员的用户 ID（整数）。\n    body:     请求体（role）。\n    request:  FastAPI Request，用于提取客户端 IP。\n    user:     当前登录用户（操作者）。\n    db:       异步 DB session。\n\nReturns:\n    MemberResponse：更新后的成员信息。\n\nRaises:\n    HTTPException(404): 成员不存在。\n    HTTPException(422): 降级唯一 owner 被拒绝。",
+        "operationId": "update_member_role_groups__group_id__members__user_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__service__group_router__MemberRoleUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Remove Group Member",
+        "description": "从 group 删除一个成员（需 owner 权限）。\n\n保护规则：\n  - 如果被删的是 group 的唯一 owner，返回 422 \"组必须至少 1 个 owner\"\n  - group 必须始终至少有一个 owner\n\nArgs:\n    group_id: 路径参数，目标 group 的业务 ID。\n    user_id:  路径参数，要删除的成员用户 ID（整数）。\n    request:  FastAPI Request，用于提取客户端 IP。\n    user:     当前登录用户（操作者）。\n    db:       异步 DB session。\n\nRaises:\n    HTTPException(404): 成员不存在。\n    HTTPException(422): 尝试删除 group 的唯一 owner。",
+        "operationId": "remove_group_member_groups__group_id__members__user_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/members": {
+      "get": {
+        "tags": [
+          "project-members"
+        ],
+        "summary": "List Project Members",
+        "description": "列出 project 的所有成员，分 direct 和 inherited 两组（需 reporter+ 权限）。\n\ndirect：直接在 user_project_access 表里有记录的用户。\ninherited：通过 project.group_id 向上祖先 group 继承来的成员。\n\n同一用户如果既是 direct 也是 inherited，只出现在 direct 列表里（后端去重）。\n\nArgs:\n    project_id: 路径参数，目标工程 ID。\n    db:         异步 DB session。\n\nReturns:\n    ProjectMembersResponse：{direct: [...], inherited: [...]}\n\nRaises:\n    HTTPException(404): 工程不存在（由 require_project_role dependency 处理）。\n    HTTPException(403): 权限不足。",
+        "operationId": "list_project_members_projects__project_id__members_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMembersResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "project-members"
+        ],
+        "summary": "Add Project Member",
+        "description": "往 project 加一个直接成员（需 owner 权限）。\n\n规则：\n  - target user 必须存在\n  - 不能重复加（已存在直接成员 → 409）\n  - role 必须是合法值（Pydantic 已校验，非法 → 422）\n  - 写审计日志 PROJECT_MEMBER_ADD\n\nArgs:\n    project_id: 路径参数，目标工程 ID。\n    body:       请求体（user_id + role）。\n    request:    FastAPI Request，用于提取客户端 IP。\n    user:       当前登录用户（操作者）。\n    db:         异步 DB session。\n\nReturns:\n    DirectMemberResponse：新加成员的信息。\n\nRaises:\n    HTTPException(404): 目标用户不存在。\n    HTTPException(409): 用户已经是直接成员。",
+        "operationId": "add_project_member_projects__project_id__members_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__service__project_member_router__MemberAddRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectMemberResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/members/{user_id}": {
+      "patch": {
+        "tags": [
+          "project-members"
+        ],
+        "summary": "Update Member Role",
+        "description": "改 project 直接成员的 role（需 owner 权限）。\n\n保护规则（Last-owner 保护，仅限 direct owner）：\n  - 如果被改的成员是 project 唯一的 direct owner，且新 role 不是 owner（降级），\n    返回 422 \"项目必须至少 1 个直接 owner\"\n\nArgs:\n    project_id: 路径参数，目标工程 ID。\n    user_id:    路径参数，目标成员用户 ID（整数）。\n    body:       请求体（role）。\n    request:    FastAPI Request，用于提取客户端 IP。\n    user:       当前登录用户（操作者）。\n    db:         异步 DB session。\n\nReturns:\n    DirectMemberResponse：更新后的成员信息。\n\nRaises:\n    HTTPException(404): 成员不存在（非直接成员）。\n    HTTPException(422): 降级唯一 direct owner 被拒绝。",
+        "operationId": "update_member_role_projects__project_id__members__user_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__service__project_member_router__MemberRoleUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectMemberResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "project-members"
+        ],
+        "summary": "Remove Project Member",
+        "description": "从 project 删除一个直接成员（需 owner 权限）。\n\n保护规则（Last-owner 保护，仅限 direct owner）：\n  - 如果被删的是 project 唯一的 direct owner，返回 422\n  - 即使 group 继承链里有 owner，也不影响 direct owner 的保护\n    （因为继承不可删除单个项目层面的成员）\n\nArgs:\n    project_id: 路径参数，目标工程 ID。\n    user_id:    路径参数，要删除的成员用户 ID（整数）。\n    request:    FastAPI Request，用于提取客户端 IP。\n    user:       当前登录用户（操作者）。\n    db:         异步 DB session。\n\nRaises:\n    HTTPException(404): 成员不存在（非直接成员）。\n    HTTPException(422): 尝试删除 project 的唯一 direct owner。",
+        "operationId": "remove_project_member_projects__project_id__members__user_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/users": {
+      "get": {
+        "tags": [
+          "admin-users"
+        ],
+        "summary": "List Users",
+        "description": "列出所有用户，支持 filter（仅 Instance Admin 可访问）。\n\n支持过滤参数：\n  - username：模糊匹配（LIKE %xxx%）\n  - is_admin：精确匹配\n  - is_active：精确匹配\n\nArgs:\n    username: 可选，按用户名模糊过滤。\n    is_admin: 可选，按 admin 状态过滤。\n    is_active: 可选，按激活状态过滤。\n    _admin:   Instance Admin 依赖（只做权限校验，不使用其值）。\n    db:       异步 DB session。\n\nReturns:\n    UserResponse 列表（按创建时间升序，可能为空）。",
+        "operationId": "list_users_admin_users_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "username",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "按用户名模糊过滤（contains）",
+              "title": "Username"
+            },
+            "description": "按用户名模糊过滤（contains）"
+          },
+          {
+            "name": "is_admin",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "按 is_admin 过滤",
+              "title": "Is Admin"
+            },
+            "description": "按 is_admin 过滤"
+          },
+          {
+            "name": "is_active",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "按 is_active 过滤",
+              "title": "Is Active"
+            },
+            "description": "按 is_active 过滤"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserResponse"
+                  },
+                  "title": "Response List Users Admin Users Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin-users"
+        ],
+        "summary": "Create User",
+        "description": "创建新用户（仅 Instance Admin 可操作）。\n\n规则：\n  - email 必须全局唯一（重复 → 409）\n  - username 必须全局唯一（重复 → 409）\n  - is_admin 默认 False，可选传 True 直接创建 admin 用户\n  - 密码用 bcrypt hash 存库（明文不落盘）\n  - 写审计日志 USER_CREATE（+ USER_SET_ADMIN 如果 is_admin=True）\n\nArgs:\n    body:    请求体（email / username / password / is_admin）。\n    request: FastAPI Request，用于提取客户端 IP 写审计。\n    admin:   当前 Instance Admin 用户（操作者）。\n    db:      异步 DB session。\n\nReturns:\n    UserResponse：新建用户的信息（不含密码 hash）。\n\nRaises:\n    HTTPException(409): email 或 username 已被占用。",
+        "operationId": "create_user_admin_users_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/users/{uid}": {
+      "patch": {
+        "tags": [
+          "admin-users"
+        ],
+        "summary": "Update User",
+        "description": "修改用户属性（仅 Instance Admin 可操作）。\n\n可修改字段：\n  - is_admin：授予或撤销 Instance Admin 权限\n    约束：不能降级最后 1 个 Instance Admin → 422\n  - is_active：激活或停用用户账号\n  - password：修改密码（bcrypt hash 后存库）\n\n每类修改各写一条细粒度审计日志。\n\nArgs:\n    uid:     路径参数，目标用户的整数 ID。\n    body:    请求体（is_admin / is_active / password，都可选）。\n    request: FastAPI Request，用于提取客户端 IP。\n    admin:   当前 Instance Admin 用户（操作者）。\n    db:      异步 DB session。\n\nReturns:\n    UserResponse：更新后的用户信息。\n\nRaises:\n    HTTPException(404): 用户不存在。\n    HTTPException(422): 降级最后一个 Instance Admin 被拒绝。",
+        "operationId": "update_user_admin_users__uid__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Uid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin-users"
+        ],
+        "summary": "Delete User",
+        "description": "删除用户（仅 Instance Admin 可操作）。\n\n删除前检查：\n  1. 用户是 group owner → 422 \"用户是 N 个组的 owner，先转让\"\n  2. 用户是 project owner（user_project_access）→ 422 \"用户是 N 个工程的 owner，先转让\"\n  3. 用户有凭证 → SET NULL FK 自动处理，不阻塞（凭证数据保留）\n\n成功删除后：\n  - 写审计日志 USER_DELETE\n  - 返回 204 No Content\n\nArgs:\n    uid:     路径参数，目标用户的整数 ID。\n    request: FastAPI Request，用于提取客户端 IP。\n    admin:   当前 Instance Admin 用户（操作者）。\n    db:      异步 DB session。\n\nRaises:\n    HTTPException(404): 用户不存在。\n    HTTPException(422): 用户是组 / 工程的 owner，先转让。",
+        "operationId": "delete_user_admin_users__uid__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Uid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/audit-logs": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "List Admin Audit Logs",
+        "description": "查询全局审计日志（Instance Admin only）。\n\n支持按操作人、资源类型、动作前缀、时间范围过滤，结果按 created_at DESC 排序。\n同时返回满足条件的总数，供前端分页控件使用。\n\nArgs:\n    actor:          操作人用户名模糊匹配（LIKE）。\n    actor_user_id:  操作人 user ID 精确匹配。\n    resource_type:  资源类型精确匹配。\n    resource_id:    资源 ID 精确匹配。\n    action_prefix:  动作前缀（LIKE 'prefix%'）。\n    from_time:      时间范围起点（含）。\n    to_time:        时间范围终点（含）。\n    page:           页码（从 1 开始）。\n    limit:          每页条目数（上限 200）。\n    _admin:         require_admin dependency 注入的 admin 用户（仅用于权限守卫）。\n    db:             异步数据库 session。\n\nReturns:\n    AuditLogResponse：当前页日志条目列表 + 总数 + 分页信息。",
+        "operationId": "list_admin_audit_logs_admin_audit_logs_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "actor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "模糊匹配操作人用户名（LIKE '%actor%'）",
+              "title": "Actor"
+            },
+            "description": "模糊匹配操作人用户名（LIKE '%actor%'）"
+          },
+          {
+            "name": "actor_user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "精确匹配操作人 user ID",
+              "title": "Actor User Id"
+            },
+            "description": "精确匹配操作人 user ID"
+          },
+          {
+            "name": "resource_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "资源类型：project / group / ...",
+              "title": "Resource Type"
+            },
+            "description": "资源类型：project / group / ..."
+          },
+          {
+            "name": "resource_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "精确匹配资源 ID",
+              "title": "Resource Id"
+            },
+            "description": "精确匹配资源 ID"
+          },
+          {
+            "name": "action_prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "动作前缀（如 'project.' 匹配所有 project 操作）",
+              "title": "Action Prefix"
+            },
+            "description": "动作前缀（如 'project.' 匹配所有 project 操作）"
+          },
+          {
+            "name": "from_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "时间范围起点（ISO8601，含）",
+              "title": "From Time"
+            },
+            "description": "时间范围起点（ISO8601，含）"
+          },
+          {
+            "name": "to_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "时间范围终点（ISO8601，含）",
+              "title": "To Time"
+            },
+            "description": "时间范围终点（ISO8601，含）"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "页码，从 1 开始",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "页码，从 1 开始"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "description": "每页条目数，[1, 200]",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "每页条目数，[1, 200]"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLogResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/groups/{group_id}/audit-logs": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "List Group Audit Logs",
+        "description": "查询 group 相关审计日志（Group Owner only）。\n\n范围：\n  - resource_type='group'  AND resource_id IN (gid + 子孙 group ids)\n  - OR resource_type='project' AND resource_id IN (这些 group 下的所有 project id)\n  - OR resource_type='group_member' AND resource_id IN (gid + 子孙)\n  - OR resource_type='project_member' AND resource_id IN (相关项目 id)\n\n按 created_at DESC 排序 + 分页。\n\nArgs:\n    group_id:  路径参数，目标 group 的业务 ID。\n    page:      页码（从 1 开始）。\n    limit:     每页条目数（上限 200）。\n    _role:     require_group_role(\"owner\") dependency 注入的角色字符串（仅权限守卫用）。\n    db:        异步数据库 session。\n\nReturns:\n    AuditLogResponse：当前页日志条目列表 + 总数 + 分页信息。",
+        "operationId": "list_group_audit_logs_groups__group_id__audit_logs_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "页码，从 1 开始",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "页码，从 1 开始"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "description": "每页条目数，[1, 200]",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "每页条目数，[1, 200]"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLogResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "description": "主动重新 ping 5 个 critical 依赖，更新 app.state.infra_status 并返回。\n\n设计：[[基础设施健康检查与产品不可用-设计]] §3.2.3\n\nResponse schema:\n  - 未登录 / 普通用户：{\"healthy\": bool, \"ts\": iso}\n  - Admin            ：{\"healthy\": bool, \"ts\": iso, \"deps\": {...}}\n\n本端点本身不附 require_infra_healthy（决策 #5：健康检查不能自我熔断）。\n用户权限通过 Authorization header 解析；缺 header → 视作匿名（不暴露 deps）。",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search": {
+      "get": {
+        "summary": "Search",
+        "description": "检索：按名称或按语义相似度。",
+        "operationId": "search_search_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "名称或关键词",
+              "title": "Q"
+            },
+            "description": "名称或关键词"
+          },
+          {
+            "name": "entity_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "筛选实体类型: class, method, Service, BusinessDomain 等",
+              "title": "Entity Type"
+            },
+            "description": "筛选实体类型: class, method, Service, BusinessDomain 等"
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "name=按名称模糊检索, semantic=按语义相似检索（需启用向量库）",
+              "default": "name",
+              "title": "Mode"
+            },
+            "description": "name=按名称模糊检索, semantic=按语义相似检索（需启用向量库）"
+          },
+          {
+            "name": "top_k",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Top K"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Search Search Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/impact": {
+      "get": {
+        "summary": "Impact",
+        "description": "影响分析：返回从该实体出发的依赖/被依赖闭包。",
+        "operationId": "impact_impact_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entity_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "实体 ID，如 class://xxx 或 method://xxx",
+              "title": "Entity Id"
+            },
+            "description": "实体 ID，如 class://xxx 或 method://xxx"
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "down=被谁调用/依赖, up=依赖了谁",
+              "default": "down",
+              "title": "Direction"
+            },
+            "description": "down=被谁调用/依赖, up=依赖了谁"
+          },
+          {
+            "name": "max_depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Max Depth"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Impact Impact Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/subgraph/service/{service_id}": {
+      "get": {
+        "summary": "Subgraph Service",
+        "description": "按服务/模块获取子图（用于前端图谱可视化）。",
+        "operationId": "subgraph_service_subgraph_service__service_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Subgraph Service Subgraph Service  Service Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stats": {
+      "get": {
+        "summary": "Stats",
+        "description": "图谱统计。",
+        "operationId": "stats_stats_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Stats Stats Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/calls/callees": {
+      "get": {
+        "summary": "Get Callees",
+        "description": "给定类名+方法名，从 Neo4j 查询该方法直接调用的其他方法列表。每项含 class_name、method_name。",
+        "operationId": "get_callees_calls_callees_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "class_name",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "类名",
+              "title": "Class Name"
+            },
+            "description": "类名"
+          },
+          {
+            "name": "method_name",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "方法名",
+              "title": "Method Name"
+            },
+            "description": "方法名"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Callees Calls Callees Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calls/callers": {
+      "get": {
+        "summary": "Get Callers",
+        "description": "给定类名+方法名，从 Neo4j 查询所有直接调用该方法的其他方法列表。每项含 class_name、method_name。",
+        "operationId": "get_callers_calls_callers_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "class_name",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "类名",
+              "title": "Class Name"
+            },
+            "description": "类名"
+          },
+          {
+            "name": "method_name",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "方法名",
+              "title": "Method Name"
+            },
+            "description": "方法名"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Callers Calls Callers Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/knowledge/load_snapshot": {
+      "post": {
+        "summary": "Load Snapshot",
+        "description": "从磁盘加载知识图谱快照，替换当前图。",
+        "operationId": "load_snapshot_knowledge_load_snapshot_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "snapshot_dir",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "快照目录路径",
+              "title": "Snapshot Dir"
+            },
+            "description": "快照目录路径"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Load Snapshot Knowledge Load Snapshot Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/qa": {
+      "get": {
+        "summary": "Qa",
+        "description": "问答：基于图谱检索返回相关实体与关系，作为结构化答案。\n可选后续对接大模型做自然语言生成，当前为「检索即答案」。",
+        "operationId": "qa_qa_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "自然语言问题",
+              "title": "Q"
+            },
+            "description": "自然语言问题"
+          },
+          {
+            "name": "top_k",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 50,
+              "minimum": 1,
+              "description": "返回检索条数",
+              "default": 10,
+              "title": "Top K"
+            },
+            "description": "返回检索条数"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Qa Qa Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/doc/service/{service_id}": {
+      "get": {
+        "summary": "Doc Service",
+        "description": "生成单个服务/模块的说明文档（名称、包含的类/方法数、关联业务域）。",
+        "operationId": "doc_service_doc_service__service_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Doc Service Doc Service  Service Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/doc/domain/{domain_id}": {
+      "get": {
+        "summary": "Doc Domain",
+        "description": "生成单个业务域的说明文档（名称、关联能力与术语、涉及的服务）。",
+        "operationId": "doc_domain_doc_domain__domain_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "domain_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Domain Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Doc Domain Doc Domain  Domain Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/doc/generate": {
+      "get": {
+        "summary": "Doc Generate",
+        "description": "生成模块/服务/业务域级别的文档列表（用于批量导出）。",
+        "operationId": "doc_generate_doc_generate_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "all | service | domain",
+              "default": "all",
+              "title": "Scope"
+            },
+            "description": "all | service | domain"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Doc Generate Doc Generate Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AdminProjectCreateRequest": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$",
+            "title": "Id",
+            "description": "工程 ID（如 'deposit-system'）"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain",
+            "description": "所属域，如 'deposit'"
+          },
+          "git_url": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 4,
+            "title": "Git Url"
+          },
+          "git_branch": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Git Branch",
+            "default": "main"
+          },
+          "credential_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential Id",
+            "description": "git_credentials.id"
+          },
+          "language": {
+            "type": "string",
+            "title": "Language",
+            "default": "java"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "git_url"
+        ],
+        "title": "AdminProjectCreateRequest",
+        "description": "POST /admin/projects body — admin 创建工程并关联 Git。"
+      },
+      "AdminProjectListResponse": {
+        "properties": {
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/AdminProjectResponse"
+            },
+            "type": "array",
+            "title": "Projects"
+          }
+        },
+        "type": "object",
+        "required": [
+          "projects"
+        ],
+        "title": "AdminProjectListResponse"
+      },
+      "AdminProjectResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "git_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Url"
+          },
+          "git_branch": {
+            "type": "string",
+            "title": "Git Branch"
+          },
+          "credential_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential Id"
+          },
+          "last_synced_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced At"
+          },
+          "last_synced_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced Commit"
+          },
+          "sync_schedule": {
+            "type": "string",
+            "title": "Sync Schedule"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "status",
+          "git_url",
+          "git_branch",
+          "credential_id",
+          "last_synced_at",
+          "last_synced_commit",
+          "sync_schedule",
+          "created_at",
+          "created_by"
+        ],
+        "title": "AdminProjectResponse",
+        "description": "admin 视角的工程详情（含 git 配置）。"
+      },
+      "AdminProjectUpdateRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "git_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512,
+                "minLength": 4
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Url"
+          },
+          "git_branch": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Branch"
+          },
+          "credential_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential Id"
+          }
+        },
+        "type": "object",
+        "title": "AdminProjectUpdateRequest",
+        "description": "PATCH /admin/projects/{id} body — 部分更新。"
+      },
+      "ArchiveResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "archived_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "ArchiveResponse",
+        "description": "archive / unarchive 响应：仅返回 id + archived_at（恢复时为 null）。"
+      },
+      "ArchivedListResponse": {
+        "properties": {
+          "by_project": {
+            "items": {
+              "$ref": "#/components/schemas/_ProjectGroupDTO"
+            },
+            "type": "array",
+            "title": "By Project"
+          }
+        },
+        "type": "object",
+        "required": [
+          "by_project"
+        ],
+        "title": "ArchivedListResponse",
+        "description": "GET /api/user/archived-sessions 响应。"
+      },
+      "AuditLogEntry": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "actor_user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor User Id"
+          },
+          "actor_username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Username"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "resource_type": {
+            "type": "string",
+            "title": "Resource Type"
+          },
+          "resource_id": {
+            "type": "string",
+            "title": "Resource Id"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "ip_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip Address"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "actor_user_id",
+          "actor_username",
+          "action",
+          "resource_type",
+          "resource_id",
+          "metadata",
+          "ip_address",
+          "created_at"
+        ],
+        "title": "AuditLogEntry",
+        "description": "单条审计日志的响应体。\n\n字段与 audit_logs 表列一一对应，metadata_json 已反序列化为 dict。\n\nAttributes:\n    id:             审计日志自增整数 ID。\n    actor_user_id:  操作人用户 ID（用户注销后为 None）。\n    actor_username: 操作人用户名（JOIN users 得到；用户注销后为 None）。\n    action:         操作动作字符串，如 'project.create'。\n    resource_type:  资源类型，如 'project' / 'group'。\n    resource_id:    资源 ID 字符串。\n    metadata:       操作上下文 dict（原 metadata_json 反序列化）。\n    ip_address:     客户端 IP（可为 None）。\n    created_at:     操作时间，ISO8601 字符串。"
+      },
+      "AuditLogResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/AuditLogEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries",
+          "total",
+          "page",
+          "limit"
+        ],
+        "title": "AuditLogResponse",
+        "description": "审计日志分页查询响应体。\n\nAttributes:\n    entries: 当前页的日志条目列表。\n    total:   满足过滤条件的日志总数（用于前端分页控件）。\n    page:    当前页码（从 1 开始）。\n    limit:   每页条目数上限。"
+      },
+      "CredentialCreateRequest": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "token": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 8,
+            "title": "Token"
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Type",
+            "default": "pat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "token"
+        ],
+        "title": "CredentialCreateRequest",
+        "description": "POST /credentials 请求体。\n\nAttributes:\n    name: 凭证的人类可读名称，如 'My GitLab PAT'。长度 1~128。\n    token: 明文 PAT；后端会用 Fernet 加密存储，前端永远拿不到原文。长度 8~512。\n    type: 凭证类型，默认 'pat'；v2 预留扩展（未来支持 ssh_key）。"
+      },
+      "CredentialListResponse": {
+        "properties": {
+          "credentials": {
+            "items": {
+              "$ref": "#/components/schemas/src__service__admin_models__CredentialResponse"
+            },
+            "type": "array",
+            "title": "Credentials"
+          }
+        },
+        "type": "object",
+        "required": [
+          "credentials"
+        ],
+        "title": "CredentialListResponse"
+      },
+      "DirectMemberResponse": {
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "title": "User Id"
+          },
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "project_id",
+          "role"
+        ],
+        "title": "DirectMemberResponse",
+        "description": "直接成员响应体（来自 user_project_access 表）。\n\nAttributes:\n    user_id:    成员的用户整数 ID。\n    project_id: 所属工程 ID（字符串）。\n    role:       当前角色。"
+      },
+      "ExplainRequest": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "history": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "History"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "title": "ExplainRequest",
+        "description": "POST /qa/explain body。"
+      },
+      "FeedbackRequest": {
+        "properties": {
+          "vote": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down"
+            ],
+            "title": "Vote"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          }
+        },
+        "type": "object",
+        "required": [
+          "vote"
+        ],
+        "title": "FeedbackRequest",
+        "description": "POST /sessions/{sid}/messages/{mid}/feedback body。"
+      },
+      "GroupCreateRequest": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 2,
+            "pattern": "^[a-z][a-z0-9/\\-]*[a-z0-9]$",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "parent_group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Group Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "GroupCreateRequest",
+        "description": "POST /groups 请求体。\n\nAttributes:\n    id: 业务可读 group ID，格式 path-like（如 'retail-bank' 或 'retail-bank/credit-card'）。\n        正则约束：^[a-z][a-z0-9/\\-]*[a-z0-9]$\n        - 以小写字母开头\n        - 中间可含小写字母、数字、斜杠（/）、连字符（-）\n        - 以小写字母或数字结尾\n    name: 人类可读的显示名，1~128 字符。\n    description: 可选描述，最长 512 字符。\n    parent_group_id: 父组 ID；None 表示建根 group。"
+      },
+      "GroupResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "parent_group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Group Id"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "parent_group_id",
+          "created_at"
+        ],
+        "title": "GroupResponse",
+        "description": "GET/POST/PATCH /groups/* 响应体。\n\nAttributes:\n    id: group 的业务 ID。\n    name: 显示名。\n    description: 描述（可能为 None）。\n    parent_group_id: 父组 ID（根 group 为 None）。\n    created_at: 创建时间，ISO8601 字符串（如 '2026-05-12T08:00:00'）。"
+      },
+      "GroupUpdateRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "title": "GroupUpdateRequest",
+        "description": "PATCH /groups/{gid} 请求体。\n\n所有字段都是可选的（Optional），只传需要改的字段。\n如果字段值为 None，表示不改该字段（不是清空）。\n\nAttributes:\n    name: 新名称，最长 128 字符。\n    description: 新描述，最长 512 字符。"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "IndexingProgress": {
+        "properties": {
+          "phase": {
+            "type": "string",
+            "title": "Phase",
+            "description": "parsing/embedding/interpreting 等"
+          },
+          "percent": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Percent"
+          },
+          "eta_seconds": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Eta Seconds",
+            "description": "预计还需多少秒",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "phase",
+          "percent"
+        ],
+        "title": "IndexingProgress",
+        "description": "索引进度 — 仅 status='indexing' 时存在。"
+      },
+      "InheritedMemberResponse": {
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "title": "User Id"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "inherited_from_group_id": {
+            "type": "string",
+            "title": "Inherited From Group Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "username",
+          "role",
+          "inherited_from_group_id"
+        ],
+        "title": "InheritedMemberResponse",
+        "description": "继承成员响应体（来自祖先 group 的 GroupMember）。\n\nAttributes:\n    user_id:                 成员用户 ID。\n    username:                用户名（方便前端显示，避免再查一次）。\n    role:                    从 group 继承来的 role（多组取最高）。\n    inherited_from_group_id: 贡献此 role 的最近 group ID。"
+      },
+      "LoginRequest": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 3,
+            "title": "Username",
+            "description": "邮箱或用户名"
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 8,
+            "title": "Password"
+          },
+          "remember_me": {
+            "type": "boolean",
+            "title": "Remember Me",
+            "description": "勾选后 refresh_token TTL=7 天",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "description": "POST /auth/login body."
+      },
+      "LoginResponse": {
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "title": "Access Token"
+          },
+          "token_type": {
+            "type": "string",
+            "title": "Token Type",
+            "default": "bearer"
+          },
+          "expires_in": {
+            "type": "integer",
+            "title": "Expires In",
+            "description": "access_token 过期秒数"
+          }
+        },
+        "type": "object",
+        "required": [
+          "access_token",
+          "expires_in"
+        ],
+        "title": "LoginResponse"
+      },
+      "LogoutResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "LogoutResponse"
+      },
+      "MeResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "title": "Is Admin"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "preferred_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferred Model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "username",
+          "is_admin",
+          "created_at"
+        ],
+        "title": "MeResponse",
+        "description": "GET /auth/me 返回当前用户。"
+      },
+      "MemberResponse": {
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "title": "User Id"
+          },
+          "group_id": {
+            "type": "string",
+            "title": "Group Id"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "added_at": {
+            "type": "string",
+            "title": "Added At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "group_id",
+          "role",
+          "added_at"
+        ],
+        "title": "MemberResponse",
+        "description": "GET/POST/PATCH /groups/{gid}/members/* 单个成员的响应体。\n\nAttributes:\n    user_id:  成员的用户整数 ID。\n    group_id: 所属 group 的字符串 ID。\n    role:     当前角色。\n    added_at: 加入时间（ISO8601 字符串）。"
+      },
+      "Project": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "indexing",
+              "partial",
+              "failed"
+            ],
+            "title": "Status",
+            "default": "indexing"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/ProjectStats"
+          },
+          "pipeline_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline At"
+          },
+          "indexing_progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IndexingProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "stats"
+        ],
+        "title": "Project",
+        "description": "工程对象 — GET /api/projects 列表项 + GET /api/projects/{id}。"
+      },
+      "ProjectCreateRequest": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$",
+            "title": "Id",
+            "description": "工程 ID（如 'deposit-system'）"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "repo_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Url"
+          },
+          "language": {
+            "type": "string",
+            "title": "Language",
+            "description": "主语言；目前只支持 java",
+            "default": "java"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "ProjectCreateRequest",
+        "description": "POST /api/projects body — admin 才能调用。\n\nv1 主要给 CLI 工具用（ke_admin_create_project.py），前端不暴露。"
+      },
+      "ProjectListResponse": {
+        "properties": {
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/Project"
+            },
+            "type": "array",
+            "title": "Projects"
+          }
+        },
+        "type": "object",
+        "required": [
+          "projects"
+        ],
+        "title": "ProjectListResponse",
+        "description": "GET /api/projects 响应包装。"
+      },
+      "ProjectMembersResponse": {
+        "properties": {
+          "direct": {
+            "items": {
+              "$ref": "#/components/schemas/DirectMemberResponse"
+            },
+            "type": "array",
+            "title": "Direct"
+          },
+          "inherited": {
+            "items": {
+              "$ref": "#/components/schemas/InheritedMemberResponse"
+            },
+            "type": "array",
+            "title": "Inherited"
+          }
+        },
+        "type": "object",
+        "required": [
+          "direct",
+          "inherited"
+        ],
+        "title": "ProjectMembersResponse",
+        "description": "GET /projects/{pid}/members 响应体。\n\n结构：{direct: [...], inherited: [...]}\n\nAttributes:\n    direct:    直接成员列表（来自 user_project_access 表）。\n    inherited: 继承成员列表（来自祖先 group，不含已出现在 direct 里的用户）。"
+      },
+      "ProjectStats": {
+        "properties": {
+          "methods_count": {
+            "type": "integer",
+            "title": "Methods Count",
+            "default": 0
+          },
+          "classes_count": {
+            "type": "integer",
+            "title": "Classes Count",
+            "default": 0
+          },
+          "interpretation_progress": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Interpretation Progress",
+            "description": "解读完成百分比",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "ProjectStats",
+        "description": "工程统计 — 在选择器下拉里展示。"
+      },
+      "RefreshResponse": {
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "title": "Access Token"
+          },
+          "expires_in": {
+            "type": "integer",
+            "title": "Expires In"
+          }
+        },
+        "type": "object",
+        "required": [
+          "access_token",
+          "expires_in"
+        ],
+        "title": "RefreshResponse"
+      },
+      "RenameSessionBody": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "RenameSessionBody",
+        "description": "PATCH /sessions/{sid} body：仅含新标题。"
+      },
+      "ResolveSymbolRequest": {
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "title": "File Path",
+            "description": "源文件相对路径（同 nodes.file_path）"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Line",
+            "description": "光标行（1-indexed）"
+          },
+          "col": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Col",
+            "description": "光标列（0-indexed，UTF-16 与 Monaco 一致）"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token",
+            "description": "光标处词（位置级落空时按名回退）"
+          },
+          "context_entity_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Entity Id",
+            "description": "当前查看实体 id（预留：未来用于精确位置匹配）"
+          },
+          "want_doc": {
+            "type": "boolean",
+            "title": "Want Doc",
+            "description": "True 时附 signature + summary（hover 路径）",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "file_path",
+          "line",
+          "col"
+        ],
+        "title": "ResolveSymbolRequest",
+        "description": "光标解析请求体。\n\nfile_path/line/col 必填（前端 onMouseDown/onHover 一定能拿到）；\ntoken + context_entity_id + want_doc 可选，对应名字回退/上下文/hover 路径。"
+      },
+      "TestConnectionRequest": {
+        "properties": {
+          "git_url": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 4,
+            "title": "Git Url"
+          },
+          "credential_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential Id",
+            "description": "可选；公开仓不用凭证"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch",
+            "description": "留空走 HEAD（默认分支）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "git_url"
+        ],
+        "title": "TestConnectionRequest",
+        "description": "POST /admin/projects/test-connection body。\n\n用于添加仓库前先验证 URL + 凭证是否有效。不写库。"
+      },
+      "TestConnectionResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "default_branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Branch"
+          },
+          "last_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Commit"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "TestConnectionResponse"
+      },
+      "UpdatePreferredModelRequest": {
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Model Id",
+            "description": "模型 id，如 qwen-plus / MiniMax-M2"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model_id"
+        ],
+        "title": "UpdatePreferredModelRequest",
+        "description": "PATCH /auth/me/model body。"
+      },
+      "UserCreateRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email"
+          },
+          "username": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Username"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 8,
+            "title": "Password"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "title": "Is Admin",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "email",
+          "username",
+          "password"
+        ],
+        "title": "UserCreateRequest",
+        "description": "POST /admin/users 请求体。\n\nAttributes:\n    email:    用户邮箱，全局唯一。\n    username: 登录用户名，全局唯一，1~100 字符。\n    password: 明文密码，至少 8 字符（后端存 bcrypt hash）。\n    is_admin: 是否为 Instance Admin，默认 False。"
+      },
+      "UserResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "title": "Is Admin"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "username",
+          "is_active",
+          "is_admin",
+          "created_at"
+        ],
+        "title": "UserResponse",
+        "description": "GET/POST/PATCH /admin/users/* 响应体。\n\n不返回 hashed_password（安全原则：密码 hash 永不出 API）。\n\nAttributes:\n    id:         用户整数 ID。\n    email:      用户邮箱。\n    username:   登录用户名。\n    is_active:  是否激活。\n    is_admin:   是否为 Instance Admin。\n    created_at: 创建时间，ISO8601 字符串。"
+      },
+      "UserUpdateRequest": {
+        "properties": {
+          "is_admin": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Admin"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 8
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "title": "UserUpdateRequest",
+        "description": "PATCH /admin/users/{uid} 请求体。\n\n所有字段都是可选的（Optional），只传需要改的字段。\nNone 表示不改该字段（不是清空）。\n\nAttributes:\n    is_admin:  是否为 Instance Admin；降级最后 admin 时报 422。\n    is_active: 是否激活；False = 停用（禁止登录但不删除）。\n    password:  新明文密码，传入后后端 hash 再存库。"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "_ArchivedSessionDTO": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "archived_at": {
+            "type": "string",
+            "title": "Archived At"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "message_count": {
+            "type": "integer",
+            "title": "Message Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "archived_at",
+          "created_at",
+          "updated_at",
+          "message_count"
+        ],
+        "title": "_ArchivedSessionDTO",
+        "description": "归档列表行：仅返回 metadata 字段。"
+      },
+      "_ProjectGroupDTO": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id"
+          },
+          "project_name": {
+            "type": "string",
+            "title": "Project Name"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/_ArchivedSessionDTO"
+            },
+            "type": "array",
+            "title": "Sessions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_id",
+          "project_name",
+          "sessions"
+        ],
+        "title": "_ProjectGroupDTO",
+        "description": "归档列表按 project 分组。"
+      },
+      "src__service__admin_models__CredentialResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "token_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Hint"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "token_hint",
+          "created_by",
+          "created_at",
+          "last_used_at"
+        ],
+        "title": "CredentialResponse",
+        "description": "API 返回的凭证（永远不含 encrypted_token）。"
+      },
+      "src__service__credentials_router__CredentialResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "token_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Hint"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "token_hint",
+          "created_at"
+        ],
+        "title": "CredentialResponse",
+        "description": "GET/POST /credentials 返回体。\n\n注意：永远不含 encrypted_token / 原始 token，\n前端只能看 token_hint（末 4 位加掩码，如 '****abc'）。\n\nAttributes:\n    id: 凭证唯一 ID，如 'cred_abc123defg'。\n    name: 凭证名称。\n    type: 凭证类型（pat / ssh_key 等）。\n    token_hint: 末 4 位掩码，仅 UI 展示用。\n    created_at: 创建时间，ISO8601 字符串。"
+      },
+      "src__service__group_router__MemberAddRequest": {
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "title": "User Id"
+          },
+          "role": {
+            "type": "string",
+            "pattern": "^(reporter|maintainer|owner)$",
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "role"
+        ],
+        "title": "MemberAddRequest",
+        "description": "POST /groups/{gid}/members 请求体。\n\nAttributes:\n    user_id: 要加入的用户整数 ID（必填）。\n    role:    赋予的角色，必须是 reporter / maintainer / owner 之一。"
+      },
+      "src__service__group_router__MemberRoleUpdateRequest": {
+        "properties": {
+          "role": {
+            "type": "string",
+            "pattern": "^(reporter|maintainer|owner)$",
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "title": "MemberRoleUpdateRequest",
+        "description": "PATCH /groups/{gid}/members/{user_id} 请求体。\n\nAttributes:\n    role: 新 role，必须是三个合法值之一。"
+      },
+      "src__service__project_member_router__MemberAddRequest": {
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "title": "User Id"
+          },
+          "role": {
+            "type": "string",
+            "pattern": "^(reporter|maintainer|owner)$",
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "role"
+        ],
+        "title": "MemberAddRequest",
+        "description": "POST /projects/{pid}/members 请求体。\n\nAttributes:\n    user_id: 要加入的用户整数 ID（必填）。\n    role:    赋予的角色，必须是 reporter / maintainer / owner 之一。"
+      },
+      "src__service__project_member_router__MemberRoleUpdateRequest": {
+        "properties": {
+          "role": {
+            "type": "string",
+            "pattern": "^(reporter|maintainer|owner)$",
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "title": "MemberRoleUpdateRequest",
+        "description": "PATCH /projects/{pid}/members/{uid} 请求体。\n\nAttributes:\n    role: 新 role，必须是三个合法值之一。"
+      }
+    },
+    "securitySchemes": {
+      "OAuth2PasswordBearer": {
+        "type": "oauth2",
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "auth/login"
+          }
+        }
+      }
+    }
+  }
+}
