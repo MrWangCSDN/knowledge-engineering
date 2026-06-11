@@ -11,7 +11,8 @@ import sys
 from pathlib import Path
 
 # 将项目根目录加入 sys.path，使 `from src.xxx` 形式的导入在脚本直接跑时也能找到模块
-# （pytest 由 pyproject.toml pythonpath=["src"] 处理，脚本需手动处理）
+# （pytest 由根目录 conftest.py 把项目根插入 sys.path 来支持 `from src.xxx`；脚本直接跑时
+#   没有 pytest 介入，需在这里手动插入，效果与 conftest.py 的 sys.path.insert 等价）
 _ROOT = Path(__file__).resolve().parent.parent   # scripts/ → 项目根
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -23,7 +24,15 @@ from src.service.api import app  # noqa: E402
 
 
 def main() -> None:
-    out_dir = Path("docs/porting")
+    """导出 FastAPI 全量路由为两份产物：
+
+    - docs/porting/routes-openapi.json  全量 OpenAPI schema（JSON）
+    - docs/porting/routes-summary.md    人读路由摘要表（Markdown 表格）
+
+    无参数，无返回值。产物路径锚定项目根，重复运行内容确定性，git diff 为空。
+    """
+    # 锚定项目根，确保无论在哪个目录执行脚本，产物路径都一致
+    out_dir = _ROOT / "docs" / "porting"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     schema = app.openapi()
