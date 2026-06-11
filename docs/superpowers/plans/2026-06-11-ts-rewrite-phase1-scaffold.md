@@ -26,6 +26,13 @@
 | project.yaml | 老仓 `config/project.yaml`（208 行；**含内联 LLM key，fixture 必须脱敏**）；TS 强类型解析 repo / knowledge.graph / knowledge.vectordb-* / semantic_embedding，其余 `.passthrough()` |
 | MySQL 表（基线） | users / projects / groups / group_members / user_project_access / git_credentials / audit_logs / qa_sessions（+ alembic_version；以 introspect 实测为准） |
 
+## ⚠️ 执行期勘误（执行中由 code review 发现，以本节为准覆盖正文模板）
+
+1. **Task 3/4 的 Promise.race 哨兵模板有缺陷**（正文 mysql.ts / neo4j.ts 代码块）：① race 输家的 setTimeout 不清理会吊住短命进程；② mysql `connectTimeout + race` 双计费最坏 10s；③ 失败路径 `conn.end()` 在「握手成功但查询装死」的服务器下**永久挂死**。已修正实现（commit `da80321`）：@ke/shared 新增 `withTimeout`（finally clearTimeout）做单一预算，mysql 失败路径改 `conn.destroy()`，成功路径保留 `end()`。**Phase 2 及以后不要再复制正文模板的 race 写法**——拿不到取消句柄才用 `withTimeout`，fetch/AI SDK 一律 `AbortSignal`。
+2. **Task 4 neo4j 模板漏了 password 短路**：Python 基线 `_ping_neo4j` 对空 password 直接短路返回「未配置」；已补（`packages/codegraph/src/neo4j.ts`）。
+3. **Task 6 模板的 dashscope 装配是错的**：正文 `pingDashScope(env.DASHSCOPE_API_KEY, env.DASHSCOPE_BASE_URL)` 会把 compatible-mode 路径当 baseHost 拼出不存在的 ping URL。正确写法 = **`pingDashScope(env.DASHSCOPE_API_KEY)`**（ping 用自己的原生 host 默认值；DASHSCOPE_BASE_URL 只给 createDashScope 用）。另：Python 真实探活是 POST 原生 embeddings 端点而非 GET /models，@ke/llm 已按真实逻辑实现。
+4. Task 6 正文「单个 ping 自带超时…不会互相拖累」的假设依赖上述第 1 条修复成立，现已成立。
+
 通用约束：
 - **不改老仓与 obsidian 的任何源码**（收口任务的状态更新除外）
 - 所有 commit 尾行：`Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
