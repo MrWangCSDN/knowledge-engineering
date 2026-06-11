@@ -1,0 +1,315 @@
+{
+  "version": "py-final-baseline",
+  "source": "transcript: ~/.claude/projects/-Users-java-knowledge-engineering/fd2d311f-42dc-4073-bfcf-ba1b870d825d.jsonl (L11829 eval driver /tmp/_eval50.py 的 QUESTIONS 数组逐字; P1 复跑 L12045 题集一致)",
+  "recovered": "full",
+  "scoring": "7 个并行子代理按业务域分工，逐题读 mall-swarm 真实源码核对答案 → 准确/部分/错误 三档",
+  "note": "eval 实跑 KE_QA_USE_REACT=1（agent 自由输出/ReActSynthesizer 路径），并发 3，限 mall-portal 已解读模块；每题 anchor_method 为出题时锚定的真实 public 方法（判准用，TS 版重跑非必须复用）。domain 取自 eval driver 的域字段（权威）：订单12/支付5/购物车8/会员8/营销5/内容8/互动5。",
+  "questions": [
+    {
+      "id": 1,
+      "domain": "订单",
+      "question": "用户提交订单后系统怎么生成订单？",
+      "anchor_method": "generateOrder"
+    },
+    {
+      "id": 2,
+      "domain": "订单",
+      "question": "进入订单确认页时后端怎么准备确认单数据？",
+      "anchor_method": "generateConfirmOrder"
+    },
+    {
+      "id": 3,
+      "domain": "订单",
+      "question": "支付成功后订单状态和库存怎么更新？",
+      "anchor_method": "paySuccess"
+    },
+    {
+      "id": 4,
+      "domain": "订单",
+      "question": "用户主动取消订单后库存和优惠券怎么处理？",
+      "anchor_method": "cancelOrder"
+    },
+    {
+      "id": 5,
+      "domain": "订单",
+      "question": "超时未支付的订单怎么自动取消？",
+      "anchor_method": "cancelTimeOutOrder"
+    },
+    {
+      "id": 6,
+      "domain": "订单",
+      "question": "确认收货是怎么实现的？",
+      "anchor_method": "confirmReceiveOrder"
+    },
+    {
+      "id": 7,
+      "domain": "订单",
+      "question": "用户怎么删除已完成或已取消的订单？",
+      "anchor_method": "deleteOrder"
+    },
+    {
+      "id": 8,
+      "domain": "订单",
+      "question": "会员订单列表怎么按状态分页查询？",
+      "anchor_method": "list"
+    },
+    {
+      "id": 9,
+      "domain": "订单",
+      "question": "订单详情页的数据怎么组装？",
+      "anchor_method": "detail"
+    },
+    {
+      "id": 10,
+      "domain": "订单",
+      "question": "用户提交退货申请怎么实现？",
+      "anchor_method": "create"
+    },
+    {
+      "id": 11,
+      "domain": "订单",
+      "question": "下单时怎么校验库存防止超卖？",
+      "anchor_method": "hasStock"
+    },
+    {
+      "id": 12,
+      "domain": "订单",
+      "question": "支付宝回调按订单号更新支付状态怎么走？",
+      "anchor_method": "paySuccessByOrderSn"
+    },
+    {
+      "id": 13,
+      "domain": "支付",
+      "question": "用支付宝电脑网站支付怎么对接？",
+      "anchor_method": "pay"
+    },
+    {
+      "id": 14,
+      "domain": "支付",
+      "question": "支付宝手机网站支付怎么生成支付页面？",
+      "anchor_method": "webPay"
+    },
+    {
+      "id": 15,
+      "domain": "支付",
+      "question": "支付宝异步回调怎么验签和处理？",
+      "anchor_method": "notify"
+    },
+    {
+      "id": 16,
+      "domain": "支付",
+      "question": "怎么查询支付宝订单的交易状态？",
+      "anchor_method": "query"
+    },
+    {
+      "id": 17,
+      "domain": "支付",
+      "question": "生成支付宝支付时 bizContent 都填哪些参数？",
+      "anchor_method": "pay"
+    },
+    {
+      "id": 18,
+      "domain": "购物车",
+      "question": "加入购物车时同商品同规格怎么合并？",
+      "anchor_method": "add"
+    },
+    {
+      "id": 19,
+      "domain": "购物车",
+      "question": "购物车列表怎么带上促销和优惠的计算？",
+      "anchor_method": "listPromotion"
+    },
+    {
+      "id": 20,
+      "domain": "购物车",
+      "question": "修改购物车商品数量怎么做？",
+      "anchor_method": "updateQuantity"
+    },
+    {
+      "id": 21,
+      "domain": "购物车",
+      "question": "删除购物车里某个商品怎么实现？",
+      "anchor_method": "delete"
+    },
+    {
+      "id": 22,
+      "domain": "购物车",
+      "question": "清空购物车怎么实现？",
+      "anchor_method": "clear"
+    },
+    {
+      "id": 23,
+      "domain": "购物车",
+      "question": "修改购物车商品规格 SKU 怎么做？",
+      "anchor_method": "updateAttr"
+    },
+    {
+      "id": 24,
+      "domain": "购物车",
+      "question": "购物车里某商品的可选规格怎么查？",
+      "anchor_method": "getCartProduct"
+    },
+    {
+      "id": 25,
+      "domain": "购物车",
+      "question": "购物车的满减/打折/单品促销金额怎么算？",
+      "anchor_method": "calcCartPromotion"
+    },
+    {
+      "id": 26,
+      "domain": "会员",
+      "question": "会员注册流程怎么走？",
+      "anchor_method": "register"
+    },
+    {
+      "id": 27,
+      "domain": "会员",
+      "question": "注册短信验证码怎么生成？",
+      "anchor_method": "generateAuthCode"
+    },
+    {
+      "id": 28,
+      "domain": "会员",
+      "question": "注册时短信验证码怎么校验？",
+      "anchor_method": "verifyAuthCode"
+    },
+    {
+      "id": 29,
+      "domain": "会员",
+      "question": "会员修改密码怎么实现？",
+      "anchor_method": "updatePassword"
+    },
+    {
+      "id": 30,
+      "domain": "会员",
+      "question": "怎么获取当前登录会员的信息？",
+      "anchor_method": "getCurrentMember"
+    },
+    {
+      "id": 31,
+      "domain": "会员",
+      "question": "新增收货地址怎么实现？",
+      "anchor_method": "add"
+    },
+    {
+      "id": 32,
+      "domain": "会员",
+      "question": "修改收货地址时默认地址互斥怎么处理？",
+      "anchor_method": "update"
+    },
+    {
+      "id": 33,
+      "domain": "会员",
+      "question": "查询会员的收货地址列表怎么做？",
+      "anchor_method": "list"
+    },
+    {
+      "id": 34,
+      "domain": "营销",
+      "question": "用户领取优惠券怎么实现（含限领校验）？",
+      "anchor_method": "add"
+    },
+    {
+      "id": 35,
+      "domain": "营销",
+      "question": "怎么查当前购物车能用哪些优惠券？",
+      "anchor_method": "listCart"
+    },
+    {
+      "id": 36,
+      "domain": "营销",
+      "question": "按使用状态查会员的优惠券怎么做？",
+      "anchor_method": "list"
+    },
+    {
+      "id": 37,
+      "domain": "营销",
+      "question": "查某个商品可用的优惠券怎么实现？",
+      "anchor_method": "listByProduct"
+    },
+    {
+      "id": 38,
+      "domain": "营销",
+      "question": "会员优惠券的领取历史怎么查？",
+      "anchor_method": "listHistory"
+    },
+    {
+      "id": 39,
+      "domain": "内容",
+      "question": "首页内容（轮播/推荐/品牌/秒杀）怎么组装？",
+      "anchor_method": "content"
+    },
+    {
+      "id": 40,
+      "domain": "内容",
+      "question": "首页人气推荐商品怎么来的？",
+      "anchor_method": "recommendProductList"
+    },
+    {
+      "id": 41,
+      "domain": "内容",
+      "question": "首页商品分类怎么获取？",
+      "anchor_method": "getProductCateList"
+    },
+    {
+      "id": 42,
+      "domain": "内容",
+      "question": "首页专题列表怎么查？",
+      "anchor_method": "getSubjectList"
+    },
+    {
+      "id": 43,
+      "domain": "内容",
+      "question": "首页新品/人气商品怎么查？",
+      "anchor_method": "hotProductList"
+    },
+    {
+      "id": 44,
+      "domain": "内容",
+      "question": "商品详情页数据怎么组装？",
+      "anchor_method": "detail"
+    },
+    {
+      "id": 45,
+      "domain": "内容",
+      "question": "前台商品搜索（关键词/分类/品牌）怎么实现？",
+      "anchor_method": "search"
+    },
+    {
+      "id": 46,
+      "domain": "内容",
+      "question": "商品分类树怎么查？",
+      "anchor_method": "categoryTreeList"
+    },
+    {
+      "id": 47,
+      "domain": "互动",
+      "question": "用户收藏商品怎么实现（去重）？",
+      "anchor_method": "add"
+    },
+    {
+      "id": 48,
+      "domain": "互动",
+      "question": "商品浏览历史怎么记录？",
+      "anchor_method": "create"
+    },
+    {
+      "id": 49,
+      "domain": "互动",
+      "question": "关注品牌怎么实现？",
+      "anchor_method": "add"
+    },
+    {
+      "id": 50,
+      "domain": "互动",
+      "question": "用户的收藏列表怎么查？",
+      "anchor_method": "list"
+    },
+    {
+      "id": 51,
+      "domain": "互动",
+      "question": "怎么清空商品浏览历史？",
+      "anchor_method": "clear"
+    }
+  ]
+}

@@ -1,0 +1,249 @@
+{
+  "version": "py-final-baseline",
+  "source": "transcript: ~/.claude/projects/-Users-java-knowledge-engineering/fd2d311f-42dc-4073-bfcf-ba1b870d825d.jsonl (L14628 eval driver /tmp/_rv2eval.py 的 QUESTIONS 数组逐字; 逐题结果 L14658)",
+  "recovered": "full",
+  "scoring": "出图四指标（agent 路径 KE_QA_USE_REACT=1，逐题核验）：① 出图率(agent 调 render_call_graph 出图) ② 折叠成 call_chain 段(持久化+有序) ③ freeform 模式B 使用次数 ④ 正文残留手画 mermaid/reactflow(目标0)",
+  "note": "每题附实跑结果：render_mode (A=entity_id 真实调用图 / B=freeform nodes-edges 逻辑图)、render_count (该题 agent 调画图工具次数)、residual_handdrawn_mermaid (是否多手画一张 mermaid，前端无条件 strip 不显示)。模式B 出现在 #6/#8/#20 主图 + #17 第三次 render → 设计文档计「模式B 用了 4 次」。残留手画 mermaid: #18/#26/#30。",
+  "questions": [
+    {
+      "id": 1,
+      "domain": "购物车",
+      "question": "用户把商品加入购物车时系统怎么处理？已有相同SKU会合并吗？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 2,
+      "domain": "购物车",
+      "question": "购物车列表怎么算出每件商品当前可享的促销/满减？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 3,
+      "domain": "购物车",
+      "question": "修改购物车商品数量、规格时系统做了什么校验？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 4,
+      "domain": "订单",
+      "question": "用户提交订单后，系统是怎么一步步生成订单的？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 5,
+      "domain": "订单",
+      "question": "进入订单确认页时系统聚合了哪些数据？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 6,
+      "domain": "订单",
+      "question": "订单超时未支付是怎么被自动取消的？库存怎么释放？",
+      "render_count": 1,
+      "render_mode": "B",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 7,
+      "domain": "订单",
+      "question": "用户点确认收货后系统怎么处理订单状态流转？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 8,
+      "domain": "支付",
+      "question": "用户用支付宝付款一笔订单的完整流程是怎样的？",
+      "render_count": 1,
+      "render_mode": "B",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 9,
+      "domain": "支付",
+      "question": "支付宝异步回调通知到达后，系统怎么确认支付成功并更新订单？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 10,
+      "domain": "支付",
+      "question": "支付成功那一刻，订单状态、库存、销量分别发生什么变化？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 11,
+      "domain": "会员",
+      "question": "新用户注册的流程是怎样的？密码用什么方式存储？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 12,
+      "domain": "会员",
+      "question": "会员登录是怎么做身份认证的？返回了什么凭证？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 13,
+      "domain": "会员",
+      "question": "用户用手机验证码改密码的流程？验证码怎么生成校验？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 14,
+      "domain": "优惠券",
+      "question": "用户领取优惠券时，系统怎么判断能不能领、领几张？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 15,
+      "domain": "优惠券",
+      "question": "下单时系统怎么筛选出当前订单可用的优惠券？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 16,
+      "domain": "优惠券",
+      "question": "后台创建一张优惠券要配置哪些规则？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 17,
+      "domain": "秒杀",
+      "question": "后台怎么配置一场秒杀活动（活动/场次/商品/秒杀价）？",
+      "render_count": 3,
+      "render_mode": "AAB",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 18,
+      "domain": "秒杀",
+      "question": "用户下单时秒杀商品的价格是怎么被识别并应用的？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": true
+    },
+    {
+      "id": 19,
+      "domain": "商品",
+      "question": "后台新增一个商品时，要联动写入哪些数据？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 20,
+      "domain": "商品",
+      "question": "商品的上下架/推荐/审核状态怎么批量更新的？",
+      "render_count": 1,
+      "render_mode": "B",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 21,
+      "domain": "商品",
+      "question": "后台调整商品库存和SKU是怎么处理的？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 22,
+      "domain": "浏览",
+      "question": "用户打开商品详情页，系统聚合了哪些信息？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 23,
+      "domain": "搜索",
+      "question": "前台商品搜索是怎么实现的？走数据库还是ES？",
+      "render_count": 3,
+      "render_mode": "AAA",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 24,
+      "domain": "搜索",
+      "question": "基于ES的相关商品推荐是按什么维度算的？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 25,
+      "domain": "地址",
+      "question": "用户新增收货地址时系统怎么处理？怎么和会员绑定？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 26,
+      "domain": "地址",
+      "question": "查询收货地址列表时怎么保证只返回当前用户自己的？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": true
+    },
+    {
+      "id": 27,
+      "domain": "权限",
+      "question": "后台管理员登录鉴权的流程是怎样的？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 28,
+      "domain": "权限",
+      "question": "给一个角色分配菜单和资源权限是怎么落库生效的？",
+      "render_count": 2,
+      "render_mode": "AA",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 29,
+      "domain": "首页",
+      "question": "App首页内容是怎么一次性聚合出来的？",
+      "render_count": 1,
+      "render_mode": "A",
+      "residual_handdrawn_mermaid": false
+    },
+    {
+      "id": 30,
+      "domain": "首页",
+      "question": "首页的人气推荐/新品推荐商品列表数据从哪来？",
+      "render_count": 2,
+      "render_mode": "AA",
+      "residual_handdrawn_mermaid": true
+    }
+  ]
+}
