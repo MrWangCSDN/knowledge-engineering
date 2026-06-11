@@ -11,13 +11,15 @@ MagicMock 是 Python unittest.mock 提供的"万能代理对象"：任意属性�
 
 产物：
     docs/porting/agent-tools-schema.json   13 个工具的元数据（name/description/input_schema）
+
+注意：render_call_graph 已在 build_default_registry() 内注册（见 build_default_registry 内对
+render_call_graph 的注册）。本脚本是冻结基线的契约生成器——若该工具未来被移出 registry，
+count 检查会响亮失败，而不是静默补回一个与生产不符的条目。
 """
 from __future__ import annotations
 
 # sys：手动操控 Python 的模块搜索路径列表（sys.path）
 import sys
-# inspect：内省函数签名（Signature / Parameter），用来动态探知必填参数
-import inspect
 # json：把 Python 数据结构序列化为 JSON 字符串落盘
 import json
 # Path：面向对象路径操作，比字符串拼接更安全（自动处理分隔符）
@@ -33,12 +35,8 @@ if str(_ROOT) not in sys.path:
     # insert(0, ...) 优先级最高：确保 src.xxx 找到项目内版本，而非全局安装的同名包
     sys.path.insert(0, str(_ROOT))
 
-# 工具注册表工厂（装 12 个工具，含 render_call_graph）
+# 工具注册表工厂：build_default_registry 已含全部 13 个工具，包括 render_call_graph
 from src.service.qa_engine.tools import build_default_registry           # noqa: E402
-# render_call_graph 单独工厂（用于检验是否已在 registry；若未装入则补装）
-from src.service.qa_engine.tools.render_call_graph import (              # noqa: E402
-    build_render_call_graph_tool,
-)
 
 
 def main() -> None:
@@ -49,10 +47,10 @@ def main() -> None:
 
     执行流程：
     1. 用 MagicMock 占位所有后端依赖，调用 build_default_registry() 构建注册表
-    2. 确认 render_call_graph 已在注册表内（v1.4 已合入 build_default_registry）
-       若因某次重构被移出，则用 inspect.signature 自动补装，保证健壮性
-    3. 按 name 排序后断言恰好 13 个工具
-    4. 序列化写入 JSON
+       render_call_graph 已在 build_default_registry 内注册，无需额外处理
+    2. 按 name 排序后断言恰好 13 个工具（count 不符则响亮失败，拒绝产出错误契约）
+    3. 序列化写入 JSON，并检查产物中不含 "MagicMock"（防止 builder 把 mock 对象
+       意外 f-string 进 description 的静默污染）
     """
     # MagicMock(name=...) 的 name 只是调试标签，不影响任何行为
     # graph / interpretation_store / code_store / method_interp_store 全为 MagicMock：
@@ -69,26 +67,6 @@ def main() -> None:
     # list_tools() 返回注册表中所有 Tool 的列表（按注册顺序）
     tools = list(reg.list_tools())
 
-    # render_call_graph 在 v1.4 已并入 build_default_registry（见 __init__.py 第 112 行）
-    # 此处做防御性检查：若未来重构把它移出 registry，自动补装，保证脚本健壮
-    if "render_call_graph" not in {t.name for t in tools}:
-        # inspect.signature 获取函数签名对象（包含所有参数的名称、默认值、类型注解）
-        # 等效于：手动查函数定义，但这里用代码自动探知，避免硬编码参数名
-        sig = inspect.signature(build_render_call_graph_tool)
-
-        # 字典推导式：筛选"必填参数"（无默认值 + 非 *args/**kwargs 类型）
-        # p.default is inspect.Parameter.empty 表示该参数没有默认值（即必填）
-        # p.kind in (...) 过滤掉 *args（VAR_POSITIONAL）/ **kwargs（VAR_KEYWORD）
-        kwargs = {
-            p.name: MagicMock(name=p.name)
-            for p in sig.parameters.values()
-            if p.default is inspect.Parameter.empty
-            and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
-        }
-
-        # ** 解包字典为关键字参数（等效于 build_render_call_graph_tool(graph=MagicMock(...))）
-        tools.append(build_render_call_graph_tool(**kwargs))
-
     # 生成器表达式 + sorted：把每个 Tool 对象映射为只含三个字段的 dict，
     # 再按 name 字母序排列 → 产物顺序确定，git diff 稳定
     payload = sorted(
@@ -103,12 +81,16 @@ def main() -> None:
         key=lambda d: d["name"],   # lambda：匿名函数，这里取 dict 的 "name" 字段做排序键
     )
 
-    # 仅提取名字用于断言消息和打印
+    # 仅提取名字用于失败诊断和打印
     names = [d["name"] for d in payload]
 
-    # assert：运行时断言（不满足则 AssertionError 中止并打印诊断信息）
+    # 用显式 raise 替代 assert：assert 在 python -O（优化模式）下会被编译器剥除，
+    # 导致哨兵失效；raise SystemExit 则任何模式下都必然执行。
     # 若 count != 13，说明有工具被意外添加/删除，脚本强制失败而非静默产出错误产物
-    assert len(payload) == 13, f"期望 13 个工具，实际 {len(payload)}: {names}"
+    if len(payload) != 13:
+        raise SystemExit(
+            f"期望 13 个工具，实际 {len(payload)}: {names}"
+        )
 
     # 锚定项目根，确保无论在哪个目录执行脚本，产物路径都一致
     out = _ROOT / "docs" / "porting" / "agent-tools-schema.json"
@@ -117,7 +99,18 @@ def main() -> None:
 
     # ensure_ascii=False：中文字符直接写 UTF-8，不转义为 \uXXXX
     # indent=2：缩进 2 格，产物人读友好
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+
+    # MagicMock 污染哨兵：若任意 builder 把 mock 对象意外 f-string 进 description，
+    # 产物里会出现 "<MagicMock …>" 字样，这里提前拦截，而非让错误契约静默写盘。
+    # 用 raise SystemExit 而非 assert，理由同上（-O 模式安全）。
+    if "MagicMock" in text:
+        raise SystemExit(
+            "产物中发现 'MagicMock' 字样，某个 builder 把 mock 对象混入了 description/schema，"
+            "请检查各工具工厂函数。"
+        )
+
+    out.write_text(text, encoding="utf-8")
     print(f"✅ 13 tools → {out}")
     print(names)
 
