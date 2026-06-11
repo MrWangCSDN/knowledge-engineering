@@ -215,6 +215,8 @@ done
 
 仅当 `on_title` 回调返回非空：新会话 && `title_custom == False` && LLM 总结成功（qa_router.py:691-727）。标题先 UPDATE+commit DB 再 emit（DB 是真相源，emit 失败无妨）。标题处理链：`strip_think` → strip 引号/「」 → 截 30 字。失败/非新会话静默无事件。
 
+> **TS 实现注意**：`session_title` 与 `route` 均**不在** `types/chat.ts` 的 `SSEEventType` 枚举（chat.ts:227-238，共 10 项）里；`chat.ts` 的 switch 直接匹配原始字符串 `msg.event` 而非枚举值，因此二者均可正常工作。**不要把 `SSEEventType` 枚举当作事件全集的权威来源**，它仅覆盖前端主动消费的子集。
+
 #### `error`
 
 `{code, message, recoverable}`。仅两个产生点：
@@ -243,7 +245,9 @@ error 后生成器 `return`：无 sections dump、无持久化、无 done。前�
 }
 ```
 
-agent 自由输出的解析（`QASynthesizer._parse_sections`，synthesizer.py:334-420）：尝试 ```json fence → 严格 `json.loads` → `json_repair` 兜底 → 全失败则包成单段 `{type:"overview", title:"回答", content:raw, references:[]}`。**agent 路径正常情况就是这个单段兜底**（自由 markdown 非 JSON），随后被 fold 切开。
+agent 自由输出的解析（`QASynthesizer._parse_sections`，synthesizer.py:334-420）：尝试 ```json fence → 严格 `json.loads` → `json_repair` 兜底 → 全失败则包成单段 `{type:"overview", title:"回答", content:_fix_gfm_table_cells(raw), references:[]}`。**agent 路径正常情况就是这个单段兜底**（自由 markdown 非 JSON），随后被 fold 切开。
+
+> **勘误**：兜底段的 `content` 不是裸 `raw`，而是先经过 `_fix_gfm_table_cells(raw)`（synthesizer.py:417）包装——该函数把 GFM 表格 cell 内的换行替换为 `<br>`，属无损修复。门禁要求 TS 版与 Python 版逐字段一致，因此 TS 实现的兜底分支**必须同等处理 GFM 表格 cell**，不可直接传裸字符串。
 
 ### 3.2 at 偏移含义
 
@@ -346,6 +350,8 @@ reopen 读取（`GET …/sessions/{sid}`，qa_router.py:594-642）响应 message
 `{id: null, session_id, role, content, sections, metadata, created_at}` —— 注意 `id` 恒 null（fs 文件名即 msg_id 但响应不回填）、键名是 `metadata`（不是 msg_metadata）。前端 `loadSession` 全量替换 `messagesBySession[sid]`（chat.ts:188-243）。
 
 不在持久化里的流内信息（reopen 必然丢，属预期）：`thinking`、`todos`、`tool_calls`（含调查过程卡片）、`raw_stream`、done 的工具轨迹 cited_entities、route、step、context_usage。
+
+> **前端本地字段（非 SSE 字段）**：前端在处理 `done` 事件时会向消息的 `metadata` 本地注入 `interpretation_freshness`（chat.ts:597，值为当前时间戳）。这是**纯前端行为**，不来自后端 SSE 流；TS 版后端**不需要在 `done` payload 或持久化里发送此字段**，此处列出仅防 TS 实现者误以为它是后端应输出的 SSE 字段。
 
 ---
 
