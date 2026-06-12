@@ -1,0 +1,367 @@
+{
+ "tally": {
+  "准确": 29,
+  "部分": 17,
+  "错误": 5
+ },
+ "total": 51,
+ "errors": [
+  {
+   "id": 17,
+   "verdict": "错误",
+   "reason": "核心断言与源码相悖：答案表格把 notify_url、return_url 列为 bizContent 内字段（✅是），并在总结里列为 bizContent 核心必填字段。源码 AlipayServiceImpl.pay()/webPay() 中 notifyUrl/returnUrl 是经 request.setNotifyUrl()/setReturnUrl() 设到外层请求参数，bizContent JSONObject 只放 out_trade_no/total_amount/subject/product_code 四项。把外层参数坐实为 bizContent 内容属实质错误（另字段名误用 getOrderNo()，实为 getOutTradeNo()）。",
+   "domain": "支付"
+  },
+  {
+   "id": 40,
+   "verdict": "错误",
+   "reason": "锚定方法 recommendProductList 实为 TODO『暂时默认推荐所有商品』：HomeServiceImpl L59-67 仅 productMapper.selectByExample（deleteStatus=0 AND publishStatus=1），不调 HomeDao、不 JOIN sms_home_recommend_product、无 r.sort 排序。答案核心断言（查询逻辑在 HomeDao::getHotProductList、INNER JOIN sms_home_recommend_product、ORDER BY r.sort DESC）与该方法体相悖，属编造调用链与 SQL。",
+   "domain": "内容"
+  },
+  {
+   "id": 43,
+   "verdict": "错误",
+   "reason": "HomeDao.xml getHotProductList 真实 SQL 为 FROM sms_home_recommend_product hp LEFT JOIN pms_product p WHERE hp.recommend_status=1 AND p.publish_status=1 ORDER BY hp.sort DESC（同理 getNewProductList join sms_home_new_product）。答案明确坐实『仅查 pms_product 不 join 配置表』并给出伪造 SQL（WHERE publish_status=1 AND delete_status=0 ORDER BY sort DESC,id DESC），与 Mapper XML 直接相悖——典型把 join 配置表的来源讲错。",
+   "domain": "内容"
+  },
+  {
+   "id": 45,
+   "verdict": "错误",
+   "reason": "锚定 PmsPortalProductController::search → PmsPortalProductServiceImpl.search L44-70 为单入口纯 MySQL：PmsProductExample + andNameLike(\"%kw%\")/brandId/productCategoryId 过滤 + sort 排序 + productMapper.selectByExample，mall-portal 全模块无任何 EsProduct/elasticsearch 引用（grep 确认）。答案核心框架『两个入口统一接入、服务层分流至 ES 或 MySQL 路径』及 multi_match/convertProductRelatedInfo/keywords 均属把独立 mall-search 模块的能力错挂到该锚点上，编造分流流程。",
+   "domain": "内容"
+  },
+  {
+   "id": 46,
+   "verdict": "错误",
+   "reason": "锚定 categoryTreeList 实为 PmsPortalProductController（mall-portal）→ PmsPortalProductServiceImpl.categoryTreeList L72-80：一次性 selectByExample 取全部分类，再用 covert() 在 Java 中递归建树（支持无限层级）。答案主流程（步骤1-4）写成 mall-admin 的 PmsProductCategoryController::listWithChildren（DAO 自连接 LEFT JOIN，仅两级），入口/模块/算法全错；且给出的 listWithChildren SQL 还臆造了 status=1 与 ORDER BY sort（真实 PmsProductCategoryDao.xml 只有 where c1.parent_id=0，无 status/排序）。",
+   "domain": "内容"
+  }
+ ],
+ "partials": [
+  4,
+  6,
+  7,
+  9,
+  12,
+  14,
+  15,
+  24,
+  26,
+  29,
+  33,
+  34,
+  38,
+  39,
+  47,
+  50,
+  51
+ ],
+ "all": [
+  {
+   "id": 1,
+   "verdict": "准确",
+   "reason": "OmsPortalOrderServiceImpl.generateOrder (lines 94-250) 实测：校验收货地址→getCurrentMember+listPromotion→构建orderItem→hasStock→优惠券/积分计算→lockStock→金额计算→generateOrderSn→orderMapper.insert+orderItemDao.insertList→updateCouponStatus→updateIntegration→deleteCartItemList→sendDelayMessageCancelOrder。答案一句话总结列举的全部动作（地址/库存校验、优惠匹配、金额计算、库存锁定、订单号、主子表落库、积分券更新、购物车清理、返回订单号）均与源码一致。",
+   "domain": "订单"
+  },
+  {
+   "id": 2,
+   "verdict": "准确",
+   "reason": "核心组装流程与 generateConfirmOrder (lines 70-91) 一致：setCartPromotionItemList、setMemberReceiveAddressList、可用券 listCart、setMemberIntegration、calcCartAmount，两个 setter 上游调用关系核实无误，且只读不改状态判断正确。表格部分作者明确标注为'推测/未给 table_access'的 hedge；其中券表 sms_coupon_history/sms_coupon 猜对，但积分余额来源应为 ums_member.integration（非 ums_integration_change_history）、积分规则来源应为 ums_integration_consume_setting（非 oms_order_setting）——属已声明的推断且不误导核心理解，按基线口径不降档。",
+   "domain": "订单"
+  },
+  {
+   "id": 3,
+   "verdict": "准确",
+   "reason": "paySuccess (lines 252-265) 实测：orderMapper.updateByPrimaryKeySelective 改 oms_order(status=1, paymentTime, payType)，再 portalOrderDao.updateSkuStock 批量更新 pms_sku_stock（XML line 50-68：stock=stock-qty, lock_stock=lock_stock-qty）。答案的表/SQL、'纯同步无MQ'、跨域直连 pms_sku_stock 的判断全部与源码吻合。",
+   "domain": "订单"
+  },
+  {
+   "id": 4,
+   "verdict": "部分",
+   "reason": "主链 cancelOrder (lines 297-325) 正确：仅取 status=0 未付款单→status=4→releaseSkuStockLock→updateCouponStatus→返还积分。但补充说明把超时取消的MQ路径写错：称延迟消息入口 CancelOrderReceiver.handle 触发 cancelTimeOutOrder(扫描)，实测 handle (CancelOrderReceiver.java line 22) 调的是 cancelOrder(单订单)，cancelTimeOutOrder 是另一条批量扫描路径，二者被混为一谈。核心不误导，补充段有断言错误。",
+   "domain": "订单"
+  },
+  {
+   "id": 5,
+   "verdict": "准确",
+   "reason": "cancelTimeOutOrder (lines 267-294) 实测：selectByPrimaryKey(1L) 取 orderSetting→getTimeOutOrders(normalOrderOvertime)（XML line 29-48：status=0 AND create_time<NOW-#{minute}分钟）→updateOrderStatus(ids,4)→逐单 releaseSkuStockLock+updateCouponStatus+返还积分。答案所列三表 oms_order/oms_order_item/oms_order_setting 及 normal_order_overtime 字段均与源码/XML一致。",
+   "domain": "订单"
+  },
+  {
+   "id": 6,
+   "verdict": "部分",
+   "reason": "confirmReceiveOrder (lines 336-350) 机制方向对（校验归属人、必须已发货、置收货状态+receiveTime、updateByPrimaryKey 改 oms_order），但状态码坐实错：源码是 getStatus()!=2 才发货、setStatus(3) 表示收货，即 2->3；答案却写'已发货status=3 -> 已收货status=4'并称 status=4。另漏了 setConfirmStatus(1)、且编造 modify_time=NOW()。关键状态值与源码相悖，但未到整体误导，定部分。",
+   "domain": "订单"
+  },
+  {
+   "id": 7,
+   "verdict": "部分",
+   "reason": "deleteOrder (lines 407-420) 机制正确：校验归属人→仅 status==3||4 时 setDeleteStatus(1)+updateByPrimaryKey（逻辑删），admin OmsOrderServiceImpl.delete (line 81-87) 批量 deleteStatus=1/无业务校验也核实无误。但答案状态码错：可删集应为{3,4}（3=已完成,4=已关闭），答案写成{4,5}并把 status=4 标注为'已取消'（源码及 controller 注解里 4=已关闭）。机制对、状态码错，定部分。",
+   "domain": "订单"
+  },
+  {
+   "id": 8,
+   "verdict": "准确",
+   "reason": "list (lines 352-393) 实测：status==-1 置 null，getCurrentMember 自动绑定，criteria andDeleteStatusEqualTo(0).andMemberIdEqualTo()，可选 andStatusEqualTo，create_time desc，PageHelper 分页，再批量查 OmsOrderItem 按 orderId 聚合成 OmsOrderDetail。答案四步流程、过滤 delete_status=0、当前会员隔离、明细聚合、涉及 oms_order/oms_order_item 全部与源码一致。",
+   "domain": "订单"
+  },
+  {
+   "id": 9,
+   "verdict": "部分",
+   "reason": "前台 detail (lines 396-405) = oms_order(selectByPrimaryKey) + oms_order_item，方向对。但对比表两处不准：①称前台 detail SQL 隐含 member_id=? 过滤——源码 detail 无会员过滤（仅按主键查）；②后台 OmsOrderServiceImpl.detail 实为 orderDao.getDetail，仅 join oms_order+oms_order_item+oms_order_operate_history（操作日志确实有 historyList，物流是 oms_order 自身列），答案夸大为'物流轨迹+售后记录'独立维度。核心组装对，比较表有过度断言与错误。",
+   "domain": "订单"
+  },
+  {
+   "id": 10,
+   "verdict": "准确",
+   "reason": "OmsPortalOrderReturnApplyServiceImpl.create (lines 21-28) 实测：BeanUtils.copyProperties(param,realApply)→setCreateTime(now)→setStatus(0)→returnApplyMapper.insert。controller create 收 OmsOrderReturnApplyParam、count>0 返回 success。答案的初始化状态/时间、映射、insert 写 oms_order_return_apply 全部与源码一致。",
+   "domain": "订单"
+  },
+  {
+   "id": 11,
+   "verdict": "准确",
+   "reason": "hasStock (lines 738-748) 为纯内存校验 cartPromotionItem.getRealStock()（空/<=0/<下单量则失败），realStock 在 OmsPromotionServiceImpl 由 skuStock.getStock()-getLockStock() 计算；lockStock (727-733) selectByPrimaryKey 后 updateByPrimaryKeySelective 写 pms_sku_stock.lock_stock。答案'内存校验realStock + DB锁定lock_stock、以 pms_sku_stock 为准'三层库存说明与源码一致。",
+   "domain": "订单"
+  },
+  {
+   "id": 12,
+   "verdict": "部分",
+   "reason": "调用链正确：AlipayController.notify→AlipayServiceImpl.notify(验签+TRADE_SUCCESS)→paySuccessByOrderSn(outTradeNo,1)（lines 423-434：按 order_sn+status=0 查到后 paySuccess(order.getId(),payType)）。但数据表多处坐实错：①称 PortalOrderDao.updateOrderStatus 执行 UPDATE...WHERE order_sn IN——实际 paySuccess 根本不调 updateOrderStatus，且该XML(line 69-76)用 WHERE id IN；②称 status=1 是常量 OrderStatus.PAYED.getCode()——源码是字面量 order.setStatus(1)；③称扣减 pms_sku/pms_product——实际是 pms_sku_stock(updateSkuStock)。主链对但数据层断言与源码相悖，定部分。",
+   "domain": "订单"
+  },
+  {
+   "id": 13,
+   "verdict": "准确",
+   "reason": "核对 AlipayServiceImpl.pay()：链路 Controller→Service→Impl、读 notifyUrl/returnUrl、AlipayTradePagePayRequest、bizContent={out_trade_no,total_amount,subject,product_code=FAST_INSTANT_TRADE_PAY}、pageExecute().getBody() 返回 HTML、不写库——全部与源码一致。notify→paySuccessByOrderSn 闭环也对。瑕疵：代码示例误用 getOrderNo()/getAmount()（实为 getOutTradeNo()/getTotalAmount()），且闭环表错称 notify 调 query 查最终状态（实为直接读 params 的 trade_status）、误引 OmsPortalOrderController::paySuccess。均为次要细节，核心准确。",
+   "domain": "支付"
+  },
+  {
+   "id": 14,
+   "verdict": "部分",
+   "reason": "webPay 主链路正确：AlipayTradeWapPayRequest、bizContent 字段、product_code=QUICK_WAP_WAY、pageExecute().getBody()。但对比表编造电脑端 pay 的 product_code 为 PRODUCT_EXPRESS_ORDER_PAY——源码实为 FAST_INSTANT_TRADE_PAY，是具体错误断言；又称返回 AlipayTradeWapPayResponse（源码用通用 pageExecute）。主方法对，旁证断言错，故部分。",
+   "domain": "支付"
+  },
+  {
+   "id": 15,
+   "verdict": "部分",
+   "reason": "核对 AlipayServiceImpl.notify(Map)：rsaCheckV1(params,publicKey,charset,signType) 验签、TRADE_SUCCESS→paySuccessByOrderSn(outTradeNo,1)、验签失败返回 failure 字符串、Controller 收集 parameterMap——均一致。但答案称 TRADE_SUCCESS 或 TRADE_FINISHED 才触发（源码仅处理 TRADE_SUCCESS，其余只 log）；并编造 pms_sku_stock/pms_product 扣库存与 @Transactional 包裹（notify 中均无）。核心验签分发对，附加断言失实，部分。",
+   "domain": "支付"
+  },
+  {
+   "id": 16,
+   "verdict": "准确",
+   "reason": "核对 AlipayServiceImpl.query()/Controller.query()：返回 CommonResult<String>、outTradeNo/tradeNo 至少传一个、AlipayTradeQueryRequest+query_options=trade_settle_info、alipayClient.execute、返回 response.getTradeStatus()、TRADE_SUCCESS→paySuccessByOrderSn——全部与源码一致。'查询本身不写库、由 paySuccessByOrderSn 驱动 oms_order' 表述正确。pay_info 表以'如有'标注为推测，不误导。",
+   "domain": "支付"
+  },
+  {
+   "id": 17,
+   "verdict": "错误",
+   "reason": "核心断言与源码相悖：答案表格把 notify_url、return_url 列为 bizContent 内字段（✅是），并在总结里列为 bizContent 核心必填字段。源码 AlipayServiceImpl.pay()/webPay() 中 notifyUrl/returnUrl 是经 request.setNotifyUrl()/setReturnUrl() 设到外层请求参数，bizContent JSONObject 只放 out_trade_no/total_amount/subject/product_code 四项。把外层参数坐实为 bizContent 内容属实质错误（另字段名误用 getOrderNo()，实为 getOutTradeNo()）。",
+   "domain": "支付"
+  },
+  {
+   "id": 18,
+   "verdict": "准确",
+   "reason": "核对 OmsCartItemServiceImpl.add/getCartItem：去重确实按 memberId+productId+productSkuId+deleteStatus=0 判定，命中则 existCartItem 累加 quantity 后 updateByPrimaryKey，否则 insert；并正确区分 groupCartItemBySpu 仅为结算期 SPU 归组、不改购物车数据。唯一瑕疵：add 方法上无 @Transactional，答案『单次数据库事务』为轻微过度断言，不误导整体。",
+   "domain": "购物车"
+  },
+  {
+   "id": 19,
+   "verdict": "准确",
+   "reason": "核对 listPromotion→calcCartPromotion 及 OmsPortalOrderServiceImpl.generateConfirmOrder：CartPromotionItem 确与每个购物车项一对一绑定、含 reduceAmount/promotionMessage/realStock；确认页确实并行 setCartPromotionItemList + memberCouponService.listCart + calcCartAmount。列出的表（oms_cart_item/pms_product_ladder/pms_product_full_reduction/ums_member_coupon）均真实。瑕疵：CartPromotionItem 赠分字段实为 integration 而非 giftPoint，且伪代码方法名/返回类型略有出入，属细节不影响理解。",
+   "domain": "购物车"
+  },
+  {
+   "id": 20,
+   "verdict": "准确",
+   "reason": "核对 OmsCartItemController.updateQuantity→Service.updateQuantity→cartItemMapper.updateByExampleSelective：WHERE 条件确为 id + member_id + delete_status=0，memberId 由 getCurrentMember 服务端获取（防越权）。SQL 描述与影响行数语义一致，分层职责准确。",
+   "domain": "购物车"
+  },
+  {
+   "id": 21,
+   "verdict": "准确",
+   "reason": "核对 OmsCartItemServiceImpl.delete：确为逻辑删除 setDeleteStatus(1) + WHERE id IN(ids) AND member_id（updateByExampleSelective），且 OmsPortalOrderServiceImpl.deleteCartItemList 收集 CartPromotionItem.getId() 复用同一 delete。答案附带的 ums_member 表仅为 getCurrentMember 辅助，不影响核心删除流程判定。",
+   "domain": "购物车"
+  },
+  {
+   "id": 22,
+   "verdict": "准确",
+   "reason": "核对 OmsCartItemServiceImpl.clear：确为 setDeleteStatus(1) + WHERE member_id 的 updateByExampleSelective 批量逻辑删除，一次 UPDATE 不先 SELECT，描述与源码一致。瑕疵：clear 上并无 @Transactional 注解，答案『包裹在 @Transactional』为轻微臆测；字段名 deleted/delete_status 已自行 hedge。",
+   "domain": "购物车"
+  },
+  {
+   "id": 23,
+   "verdict": "准确",
+   "reason": "核对 OmsCartItemServiceImpl.updateAttr：确为『软删除原项 setDeleteStatus(1)+updateByPrimaryKeySelective，再 setId(null) 调 add 新建对应 SKU』，且全程在 mall-portal 内、不写 mall-admin。getCartProduct 作为规格数据来源的旁述也成立。",
+   "domain": "购物车"
+  },
+  {
+   "id": 24,
+   "verdict": "部分",
+   "reason": "核心方向正确：getCartProduct 经 PortalProductDao.getCartProduct（JOIN pms_product+pms_product_attribute(pa.type=0)+pms_sku_stock）拉取销售属性及 SKU 价格/库存/图片。但答案虚构了 CartProduct 的 Java 结构（productAttrs/ProductAttr.attrName/attrValues、顶层 quantity/productSkuCode），真实类型是 CartProduct extends PmsProduct，仅有 productAttributeList(List<PmsProductAttribute>) 与 skuStockList(List<PmsSkuStock>)，编造的字段/嵌套类与源码不符。",
+   "domain": "购物车"
+  },
+  {
+   "id": 25,
+   "verdict": "准确",
+   "reason": "核对 OmsPromotionServiceImpl.calcCartPromotion（promotionType 1 单品/3 打折阶梯/4 满减按原价占比分摊，输出 CartPromotionItem.reduceAmount）与 UmsMemberCouponServiceImpl.calcTotalAmount* 三方法：公式确为 realPrice=price-reduceAmount，total+=realPrice*quantity，三者仅过滤条件不同（全量/按类目 productCategoryId/按 productId）。两层协作描述与源码一致。瑕疵：calcTotalAmount* 实为 private 方法（非接口 public），属细节。",
+   "domain": "购物车"
+  },
+  {
+   "id": 26,
+   "verdict": "部分",
+   "reason": "register 主流程（verifyAuthCode→selectByExample 查重 username OR phone→BCrypt 加密+status=1+createTime→insert ums_member）与 UmsMemberServiceImpl.register 一致。但答案两次断言『未访问 ums_member_level 表 / memberLevelId 写死=1』，与源码相悖：register 显式 new UmsMemberLevelExample().andDefaultStatusEqualTo(1) 调 memberLevelMapper.selectByExample 取默认等级并 setMemberLevelId。该错误断言下调为部分。",
+   "domain": "会员"
+  },
+  {
+   "id": 27,
+   "verdict": "准确",
+   "reason": "与 UmsMemberServiceImpl.generateAuthCode 一致：循环 6 次 random.nextInt(10) 生成 6 位数字串，调 memberCacheService.setAuthCode(telephone,code)→RedisService.set 带 authCode 过期时间。Redis 存储、覆盖旧值、register 内二次校验等说明均成立。key 字面量 member:authcode:{telephone} 为配置占位符（实际 ${redis.database}:${redis.key.authCode}:{telephone}），不影响核心结论。",
+   "domain": "会员"
+  },
+  {
+   "id": 28,
+   "verdict": "准确",
+   "reason": "与 UmsMemberServiceImpl.verifyAuthCode 一致：从 Redis 经 memberCacheService.getAuthCode(telephone) 读真实码，authCode.equals(realAuthCode) 比对，全程不查 MySQL；校验嵌在 register() 内部、非独立 API，先发码后校验均符合源码。唯一小瑕疵：verifyAuthCode 实为 private 方法（答案当作服务方法引用），不影响理解。",
+   "domain": "会员"
+  },
+  {
+   "id": 29,
+   "verdict": "部分",
+   "reason": "会员域『会员修改密码』锚定 UmsMemberServiceImpl.updatePassword（telephone+authCode+BCrypt→updateByPrimaryKeySelective→delMember 清缓存，SMS 验证、无旧密码）。但本题 answerText 几乎为空，仅一句图注『管理员改密主链』，指向 mall-admin 的 UmsAdminServiceImpl.updatePassword（username+oldPassword 校验，与会员流程不同）。框定主体错位、无会员流程实质内容；因未编造表/方法且渲染了真实存在的 updatePassword 链，记部分。",
+   "domain": "会员"
+  },
+  {
+   "id": 30,
+   "verdict": "准确",
+   "reason": "与 UmsMemberServiceImpl.getCurrentMember 一致：从 StpMemberUtil.getSession 取 UserDto→memberCacheService.getMember 查 Redis→miss 则 getById 查 ums_member 并 setMember 回写。StpMemberUtil.getLoginId/getLoginIdAsLong/getLoginIdAsInt/getTokenInfo 方法均存在。小瑕疵：getCurrentMember 实际用的是 mall-portal 的 StpMemberUtil（com.macro.mall.portal.util），答案称其位于 mall-gateway 略有出入，不影响核心。",
+   "domain": "会员"
+  },
+  {
+   "id": 31,
+   "verdict": "准确",
+   "reason": "与 UmsMemberReceiveAddressServiceImpl.add 一致：memberService.getCurrentMember()→address.setMemberId(currentMember.getId()) 绑定归属→addressMapper.insert 写 ums_member_receive_address；Controller add 按 count>0 包装 CommonResult 也对。小瑕疵：表字段答案列了 create_time（实际无此列）、写成 phone（实际列名 phone_number），属细节遗漏。",
+   "domain": "会员"
+  },
+  {
+   "id": 32,
+   "verdict": "准确",
+   "reason": "与 UmsMemberReceiveAddressServiceImpl.update 默认互斥逻辑一致：当 address.getDefaultStatus()==1 时，先 updateByExampleSelective 将 member_id 下 default_status=1 的记录置 0，再更新目标地址，确保每会员至多一个默认地址；OmsOrderServiceImpl.updateReceiverInfo / ConfirmOrderResult 不参与互斥的旁路说明也成立。答案给的 SQL 是示意（实际 WHERE 还含 default_status=1），方向无误。",
+   "domain": "会员"
+  },
+  {
+   "id": 33,
+   "verdict": "部分",
+   "reason": "主链对：Controller.list→Service.list→getCurrentMember 取会员 ID→addressMapper.selectByExample(member_id=?)。但答案给出的 SQL 含 `delete_status = 0` 过滤与 `ORDER BY default_status DESC, create_time DESC` 均不成立——ums_member_receive_address 无 delete_status/create_time 列（仅 id/member_id/name/phone_number/default_status/post_code/province/city/region/detail_address），且 list() 的 Example 未设 orderByClause；接口路径也写成 /ums/member/receive/address/list（实际 /member/address/list）。这些编造列/排序属实质性误导，下调为部分。",
+   "domain": "会员"
+  },
+  {
+   "id": 34,
+   "verdict": "部分",
+   "reason": "核心流程对：入口 UmsMemberCouponController.add → UmsMemberCouponServiceImpl.add，限领用 couponHistoryMapper.countByExample(coupon_id+member_id) 比 perLimit，先 insert sms_coupon_history 再 updateByPrimaryKey 扣 sms_coupon 库存，均与源码 L42-80 一致。但有两处臆造：(1) 券码示例 COUPON_20240615_10001 错，实际是 16 位纯数字(时间戳8+随机4+memberId4)；(2) 称限领校验排除 use_status=2 过期券——源码 COUNT 根本不过滤 use_status，且时间校验是 now.before(enableTime) 而非 endTime 区间。细节误导但主流程正确。",
+   "domain": "营销"
+  },
+  {
+   "id": 35,
+   "verdict": "准确",
+   "reason": "与 listCart(L114-170) 一致：经 getDetailList 取用户全部券后按 useType(0全场/1分类/2商品)在内存判可用，type=1 返 enableList。返回 JSON 字段(usable/discountAmount)为示意性虚构、且写成 /coupon/listCart（实际 /member/coupon/list/cart/{type}）属次要瑕疵，方向与机制正确。",
+   "domain": "营销"
+  },
+  {
+   "id": 36,
+   "verdict": "准确",
+   "reason": "完全核对一致：list(L209-212) 取当前会员 id 调 SmsCouponHistoryDao.getCouponList(memberId,useStatus)，XML(L37-52)证实 useStatus∈{0,1} 走 use_status=#{useStatus} 且 NOW() 在 start/end 之间、useStatus==2 走 NOW()>end_time；sms_coupon_history JOIN sms_coupon 取券面。分支逻辑、表、分层入口均对。",
+   "domain": "营销"
+  },
+  {
+   "id": 37,
+   "verdict": "准确",
+   "reason": "与 listByProduct(L172-206)一致：按 productId 查 sms_coupon_product_relation、用 pms_product 反查分类再查 sms_coupon_product_category_relation，最后 sms_coupon(useType=0 OR useType!=0 AND id IN 集合，均 start<now<end)。4 张表完全吻合，交叉引用 getAvailableCouponList、SmsCouponController.getItem 真实存在。仅“三路并行 UNION + count>used_count 过滤”是表述润色（实为顺序 selectByExample+Java 合并、无 count 过滤），不影响结论。",
+   "domain": "营销"
+  },
+  {
+   "id": 38,
+   "verdict": "部分",
+   "reason": "主断言对：listHistory(L102-112)用 SmsCouponHistoryExample(member_id+可选 use_status)调 selectByExample 查 sms_coupon_history，答案“100% 确认查 sms_coupon_history、用 createCriteria”正确；admin 旁路 SmsCouponHistoryService.list(couponId/useStatus/orderSn/分页)与 ConfirmOrderResult.getCouponHistoryDetailList 均真实存在。但答案称“关联 sms_coupon 补充券信息”为错——该方法仅单表 selectByExample 返回 List<SmsCouponHistory>，无 JOIN sms_coupon。单条断言错但不误导核心。",
+   "domain": "营销"
+  },
+  {
+   "id": 39,
+   "verdict": "部分",
+   "reason": "首页组装流程正确：HomeServiceImpl.content() 同步聚合 6 模块（广告/品牌/秒杀/新品/人气/专题），秒杀三表（sms_flash_promotion/_session/_product_relation）描述准确。但表断言有错：轮播广告实际来自 sms_home_advertise（type=1,status=1，见 HomeServiceImpl.getHomeAdvertiseList + SmsHomeAdvertiseMapper.xml），答案臆造为 cms_advertise/cms_prefrence_area；推荐品牌的 recommend_status 在 join 表 sms_home_brand 而非 pms_brand（HomeDao.xml getRecommendBrandList）。流程不误导，但多处表错。",
+   "domain": "内容"
+  },
+  {
+   "id": 40,
+   "verdict": "错误",
+   "reason": "锚定方法 recommendProductList 实为 TODO『暂时默认推荐所有商品』：HomeServiceImpl L59-67 仅 productMapper.selectByExample（deleteStatus=0 AND publishStatus=1），不调 HomeDao、不 JOIN sms_home_recommend_product、无 r.sort 排序。答案核心断言（查询逻辑在 HomeDao::getHotProductList、INNER JOIN sms_home_recommend_product、ORDER BY r.sort DESC）与该方法体相悖，属编造调用链与 SQL。",
+   "domain": "内容"
+  },
+  {
+   "id": 41,
+   "verdict": "准确",
+   "reason": "HomeServiceImpl.getProductCateList(Long) L69-77 实为 andShowStatusEqualTo(1)+andParentIdEqualTo(parentId)，setOrderByClause(\"sort desc\")，selectByExample 返回 List<PmsProductCategory>。答案『启用状态过滤+排序+直系子类查询』与源码一致；字段是 show_status（答案写 status，语义无误），level+1 与 cms 等为无害补充。",
+   "domain": "内容"
+  },
+  {
+   "id": 42,
+   "verdict": "准确",
+   "reason": "HomeServiceImpl.getSubjectList L79-89 实为 PageHelper 分页 + andShowStatusEqualTo(1) + cateId!=null 时 andCategoryIdEqualTo(cateId)，经 CmsSubjectMapper.selectByExample 查询。答案核心（已上架过滤+可选分类+分页+不依赖推荐配置表）与源码一致。瑕疵：SQL 示例的 ORDER BY sort/create_time 源码并无（答案标注『典型』已对冲），cms_subject_category 为次要补充表，不影响整体。",
+   "domain": "内容"
+  },
+  {
+   "id": 43,
+   "verdict": "错误",
+   "reason": "HomeDao.xml getHotProductList 真实 SQL 为 FROM sms_home_recommend_product hp LEFT JOIN pms_product p WHERE hp.recommend_status=1 AND p.publish_status=1 ORDER BY hp.sort DESC（同理 getNewProductList join sms_home_new_product）。答案明确坐实『仅查 pms_product 不 join 配置表』并给出伪造 SQL（WHERE publish_status=1 AND delete_status=0 ORDER BY sort DESC,id DESC），与 Mapper XML 直接相悖——典型把 join 配置表的来源讲错。",
+   "domain": "内容"
+  },
+  {
+   "id": 44,
+   "verdict": "准确",
+   "reason": "PmsPortalProductServiceImpl.detail(Long) L82-127 组装：product 主表、brand、商品属性 PmsProductAttribute、属性值、SKU 库存、阶梯价（promotionType==3）、满减（promotionType==4）、可用优惠券（portalProductDao.getAvailableCouponList）。答案表述『商品+品牌+规格+库存+促销+优惠券+参数』及与购物车/订单详情的边界区分均与源码一致。",
+   "domain": "内容"
+  },
+  {
+   "id": 45,
+   "verdict": "错误",
+   "reason": "锚定 PmsPortalProductController::search → PmsPortalProductServiceImpl.search L44-70 为单入口纯 MySQL：PmsProductExample + andNameLike(\"%kw%\")/brandId/productCategoryId 过滤 + sort 排序 + productMapper.selectByExample，mall-portal 全模块无任何 EsProduct/elasticsearch 引用（grep 确认）。答案核心框架『两个入口统一接入、服务层分流至 ES 或 MySQL 路径』及 multi_match/convertProductRelatedInfo/keywords 均属把独立 mall-search 模块的能力错挂到该锚点上，编造分流流程。",
+   "domain": "内容"
+  },
+  {
+   "id": 46,
+   "verdict": "错误",
+   "reason": "锚定 categoryTreeList 实为 PmsPortalProductController（mall-portal）→ PmsPortalProductServiceImpl.categoryTreeList L72-80：一次性 selectByExample 取全部分类，再用 covert() 在 Java 中递归建树（支持无限层级）。答案主流程（步骤1-4）写成 mall-admin 的 PmsProductCategoryController::listWithChildren（DAO 自连接 LEFT JOIN，仅两级），入口/模块/算法全错；且给出的 listWithChildren SQL 还臆造了 status=1 与 ORDER BY sort（真实 PmsProductCategoryDao.xml 只有 where c1.parent_id=0，无 status/排序）。",
+   "domain": "内容"
+  },
+  {
+   "id": 47,
+   "verdict": "部分",
+   "reason": "去重流程准确：MemberCollectionServiceImpl.add() 确实 getCurrentMember→set memberId/nickname/icon→findByMemberIdAndProductId 为 null 才 save，count=1（源码逐行吻合）。但存储坐实错——MemberProductCollectionRepository extends MongoRepository<...,String>（MongoDB，_id 为 String），答案却给出 MySQL BIGINT DDL、UNIQUE KEY uk_member_product、外键到 ums_member/pms_product，并称去重靠 DB 唯一索引/MyBatis 惯用实践，均为臆造且存储引擎错。去重实际纯应用层查询，无 DB 唯一约束。",
+   "domain": "互动"
+  },
+  {
+   "id": 48,
+   "verdict": "准确",
+   "reason": "明确且正确指出 extends MongoRepository<MemberReadHistory,String>→MongoDB、_id 为 String；create() 流程逐行吻合：set memberId/nickname/icon、setId(null)、setCreateTime(new Date())、save()，集合名 member_read_history、字段全对。唯一瑕疵：路由实为 /member/readHistory/create 而非 /member/read/history/create（无伤大雅）。这是存储地雷的标准正解。",
+   "domain": "互动"
+  },
+  {
+   "id": 49,
+   "verdict": "准确",
+   "reason": "与源码一致：MemberAttentionController.add 路由 POST /member/attention/add（已核对 controller），service.add 通过 findByMemberIdAndBrandId 去重、为 null 才 save、返回 success(count)/failed，detail() 查关注状态。落地字段含 memberId/brandId/brandName/createTime 吻合。未坐实错误存储技术（只泛称‘插入 member_brand_attention 表’）。末尾‘Mapper XML/联合表’的延伸提示略偏（实为 Mongo），但属可选 follow-up，不影响主体判断。",
+   "domain": "互动"
+  },
+  {
+   "id": 50,
+   "verdict": "部分",
+   "reason": "主流程对：Controller list→list(pageNum,pageSize)→getCurrentMember→PageRequest.of(pageNum-1,pageSize)→findByMemberId(memberId,pageable)。但两处实质错误：①坐实 SQL/MyBatis/JPA，实为 MongoRepository（findByMemberId）无 SQL；②编造‘ORDER BY create_time DESC 倒序’，该方法名是 findByMemberId 无 OrderBy（对比 read-history 才有 findByMemberIdOrderByCreateTimeDesc），故收藏列表实际未排序，排序断言为臆造。",
+   "domain": "互动"
+  },
+  {
+   "id": 51,
+   "verdict": "部分",
+   "reason": "行为洞察正确：delete(List<String> ids) 确实只按 id 构造实体 deleteAll、不校验 member_id（越权风险属实）；clear() 走 getCurrentMember→deleteAllByMemberId。但存储坐实错——MemberReadHistoryRepository extends MongoRepository，clear/delete 是 Spring Data MongoDB 的 deleteAllByMemberId/deleteAll(list)，答案却写成 SQL DELETE FROM member_read_history WHERE member_id=? / WHERE id IN(...) 并提示查 MyBatis Mapper XML，正是 MongoRepository 被臆造成 SQL DELETE 的已知坑。",
+   "domain": "互动"
+  }
+ ]
+}
