@@ -17,6 +17,16 @@ def test_agent_system_prompt_is_free_format():
     assert AGENT_SYSTEM_PROMPT != SYSTEM_PROMPT
 
 
+def test_agent_prompt_forbids_markdown_link_entity_ref():
+    """显式禁止 agent 把实体引用写成 markdown 圆括号链接 [显示文本](entity_id)。
+
+    线上真实复现：agent 偶尔写 `[文本](method://Cls::m)` 而非规范 `[method://Cls::m|文本]`，
+    前端转换接不住 → 死链 about:blank#blocked。prompt 要明确禁止圆括号形式。"""
+    # 禁止形式的示例串必须出现在 prompt 里（作为反例警示）
+    assert "[显示文本](entity_id)" in AGENT_SYSTEM_PROMPT
+    assert "严禁" in AGENT_SYSTEM_PROMPT
+
+
 def test_build_user_prompt_free_format_drops_json_instruction():
     """free_format=True 时尾部任务块不再要求 6 段 / JSON。"""
     ctx = {"entry_candidates": [{"entity_id": "method//A", "summary_text": "x", "level": "api"}]}
