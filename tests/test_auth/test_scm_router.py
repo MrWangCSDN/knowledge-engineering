@@ -72,3 +72,19 @@ async def test_callback_creates_connection(maker):
         assert conn.auth_type == "github_app"
         assert conn.account_login == "macrozheng"
         assert conn.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_list_and_delete_connections(maker):
+    from fastapi.testclient import TestClient
+    from src.service.db_models_homepage import ScmConnection
+    async with maker() as s:
+        s.add(ScmConnection(id="c1", provider="github", auth_type="github_app",
+                            github_installation_id=1, account_login="o", status="active", created_by="alice"))
+        await s.commit()
+    c = TestClient(_app_db(maker, _FakeProvider()))
+    r = c.get("/scm/connections")
+    assert r.status_code == 200
+    assert any(x["id"] == "c1" for x in r.json()["connections"])
+    assert c.delete("/scm/connections/c1").status_code == 204
+    assert all(x["id"] != "c1" for x in c.get("/scm/connections").json()["connections"])

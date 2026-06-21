@@ -6,7 +6,8 @@ import secrets
 import uuid
 from typing import Callable, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import select
 
 from src.service.db_models_homepage import ScmConnection
 
@@ -40,5 +41,28 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
         db.add(conn)
         await db.commit()
         return {"connection_id": conn.id, "account_login": login}
+
+    @router.get("/connections")
+    async def list_connections(user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        """列出当前用户的所有 SCM 连接。"""
+        rows = (await db.execute(
+            select(ScmConnection).where(ScmConnection.created_by == getattr(user, "username", None))
+        )).scalars().all()
+        return {"connections": [
+            {"id": r.id, "provider": r.provider, "auth_type": r.auth_type,
+             "account_login": r.account_login, "status": r.status} for r in rows
+        ]}
+
+    @router.delete("/connections/{connection_id}", status_code=204)
+    async def delete_connection(connection_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+        """删除指定 SCM 连接（仅创建者或管理员可操作）。"""
+        conn = await db.get(ScmConnection, connection_id)
+        if conn is None:
+            raise HTTPException(status_code=404, detail="连接不存在")
+        if conn.created_by != getattr(user, "username", None) and not getattr(user, "is_admin", False):
+            raise HTTPException(status_code=403, detail="无权删除该连接")
+        await db.delete(conn)
+        await db.commit()
+        return Response(status_code=204)
 
     return router
