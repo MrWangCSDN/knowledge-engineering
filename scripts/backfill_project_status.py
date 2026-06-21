@@ -22,6 +22,11 @@ from datetime import datetime, timezone
 # select：SQLAlchemy 2.x 推荐的查询构造器，等效于 SELECT * FROM ...
 from sqlalchemy import select
 
+# flag_modified：显式告知 SQLAlchemy「JSON 列已被修改」
+# 当对 JSON/JSONB 列做 dict 内部修改（而非整体替换）时，SQLAlchemy 的脏检测
+# 可能检测不到变化，导致 commit 不落库。flag_modified 强制标记列为"脏"，确保写库。
+from sqlalchemy.orm.attributes import flag_modified
+
 # get_session_maker 返回 async_sessionmaker[AsyncSession]，创建数据库 session
 from src.service.db import get_session_maker
 
@@ -98,11 +103,13 @@ def _progress_for(project: Project) -> dict[str, dict[str, int]]:
 
 # ─── 主流程（async，需 asyncio.run 驱动）──────────────────────────────────────
 
-async def main(apply: bool) -> None:
+async def main(apply: bool, force_multi: bool = False) -> None:
     """遍历所有工程，按 Weaviate 实际进度决策 status，dry-run 打印或 apply 落库。
 
     Args:
-        apply: True=落库提交；False=只打印，不写 DB（dry-run 安全模式）。
+        apply:       True=落库提交；False=只打印，不写 DB（dry-run 安全模式）。
+        force_multi: True=多工程时强制 apply（需先确保 _progress_for 已按工程解析 config）。
+                     缺省 False；多工程 apply 时若未设此 flag，程序会中止以防脚雷。
     """
     # 取 async sessionmaker（工厂函数，每次 async with 创建一个 session）
     SM = get_session_maker()
@@ -111,6 +118,26 @@ async def main(apply: bool) -> None:
     async with SM() as s:
         # select(Project) → SELECT * FROM projects；await 异步执行
         projects = (await s.execute(select(Project))).scalars().all()
+
+        # ─── 多工程护栏（防脚雷） ───────────────────────────────────────────────
+        # _progress_for 当前硬编码 config/project.yaml（单工程占位）。
+        # 若数据库里存在多个工程，对非首个工程拿到的 Weaviate 进度数据不可靠，
+        # apply 时会把错误数据写进其他工程的记录，造成难以回溯的数据污染。
+        if len(projects) > 1:
+            # 无论 apply/dry-run 都打印警告，方便审计日志
+            print(
+                "⚠️  警告：检测到多个工程，但 _progress_for 当前用单一 "
+                "config/project.yaml 占位，对非首个工程数据不可靠。"
+            )
+            # apply 且未显式 --force-multi-project → 中止，拒绝写库
+            if apply and not force_multi:
+                print(
+                    "❌  中止：多工程 apply 存在数据污染风险。\n"
+                    "    请先实现 per-project config 解析，或使用 "
+                    "--force-multi-project 显式确认后再重跑。"
+                )
+                # 直接 return，不进循环，不写 DB
+                return
 
         # 遍历每个工程，计算应有 status
         for p in projects:
@@ -137,6 +164,9 @@ async def main(apply: bool) -> None:
                 merged["interpretation_progress"] = pct   # 解读百分比
                 merged["methods_count"] = methods          # 方法总数
                 p.indexing_progress = merged               # 赋回触发 SQLAlchemy 脏检测
+                # flag_modified 显式标记 indexing_progress 列为"已修改"
+                # 与 BE2 保持一致，防止 SQLAlchemy 因 JSON dict 引用未变而跳过写库
+                flag_modified(p, "indexing_progress")
 
                 # ready 时记录 pipeline 完成时间（UTC）
                 if status == "ready":
@@ -159,7 +189,15 @@ if __name__ == "__main__":
     )
     # store_true：--apply 出现时 args.apply=True，不出现时 False（dry-run）
     ap.add_argument("--apply", action="store_true", help="落库；缺省仅 dry-run 打印")
+    # --force-multi-project：多工程环境下强制执行 apply，需确保 _progress_for 已按工程解析 config
+    # 不传此 flag 时，多工程 apply 会被护栏中止，避免因单一 config 污染其他工程数据
+    ap.add_argument(
+        "--force-multi-project",
+        action="store_true",
+        dest="force_multi",
+        help="多工程下强制 apply，需先确保 _progress_for 已按工程解析 config；否则 apply 会被中止",
+    )
     args = ap.parse_args()
 
     # asyncio.run：创建事件循环、驱动协程、结束后关闭循环（Python 3.7+ 标准用法）
-    asyncio.run(main(args.apply))
+    asyncio.run(main(args.apply, args.force_multi))
