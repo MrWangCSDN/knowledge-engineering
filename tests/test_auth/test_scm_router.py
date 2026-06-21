@@ -1,7 +1,11 @@
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import select
 from src.service.scm_router import create_scm_routes
+from src.service.db_models_homepage import Base, ScmConnection
 
 
 class _User:
@@ -26,3 +30,45 @@ def test_install_url():
     body = r.json()
     assert "github.com/apps/ke-test-app/installations/new" in body["install_url"]
     assert body["state"]
+
+
+@pytest_asyncio.fixture
+async def maker():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as c:
+        await c.run_sync(Base.metadata.create_all)
+    return async_sessionmaker(engine, expire_on_commit=False)
+
+
+class _FakeProvider:
+    async def get_account_login(self, installation_id):
+        return "macrozheng"
+
+
+def _app_db(maker, provider):
+    from fastapi import FastAPI
+    app = FastAPI()
+    async def _get_db():
+        async with maker() as s:
+            yield s
+    app.include_router(create_scm_routes(
+        get_current_user=lambda: _User(), get_db=_get_db,
+        get_provider=lambda: provider, app_slug="ke-test-app",
+    ))
+    return app
+
+
+@pytest.mark.asyncio
+async def test_callback_creates_connection(maker):
+    from fastapi.testclient import TestClient
+    c = TestClient(_app_db(maker, _FakeProvider()))
+    r = c.get("/scm/github/callback", params={"installation_id": 12345, "state": "s1"})
+    assert r.status_code == 200
+    cid = r.json()["connection_id"]
+    async with maker() as s:
+        conn = (await s.execute(select(ScmConnection).where(ScmConnection.id == cid))).scalar_one()
+        assert conn.github_installation_id == 12345
+        assert conn.provider == "github"
+        assert conn.auth_type == "github_app"
+        assert conn.account_login == "macrozheng"
+        assert conn.status == "active"

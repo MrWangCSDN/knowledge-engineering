@@ -101,6 +101,18 @@ class GitHubAppProvider:
             page += 1
         return BranchList(default_branch=default_branch, branches=branches)
 
+    async def get_account_login(self, installation_id: int) -> str:
+        """取该安装的账号 login（org/user 名）。GET /app/installations/{id} 需 App JWT。"""
+        headers = {
+            "Authorization": f"Bearer {self._app_jwt()}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"{_API}/app/installations/{installation_id}", headers=headers)
+            resp.raise_for_status()
+        return resp.json().get("account", {}).get("login", "")
+
     async def clone(self, installation_id: int, full_name: str, ref: str,
                     subpath: Optional[str], dest: str) -> str:
         """浅克隆指定仓库分支到 dest，返回 HEAD commit sha（40 hex）。"""

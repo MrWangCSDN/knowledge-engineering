@@ -96,3 +96,13 @@ async def test_list_branches(provider, httpx_mock):
     bl = await provider.list_branches(12345, "macrozheng/mall-swarm")
     assert bl.default_branch == "master"
     assert set(bl.branches) == {"master", "dev"}
+
+
+@pytest.mark.asyncio
+async def test_get_account_login(provider, httpx_mock):
+    httpx_mock.add_response(
+        url="https://api.github.com/app/installations/777",
+        json={"account": {"login": "macrozheng"}},
+    )
+    login = await provider.get_account_login(777)
+    assert login == "macrozheng"
