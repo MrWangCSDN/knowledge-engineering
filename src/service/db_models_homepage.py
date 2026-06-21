@@ -118,6 +118,16 @@ class Project(Base):
         nullable=True,  # 允许工程不归属任何 group（存量数据兼容）
     )
 
+    # ── SCM 绑定（P3，设计 §5.2）；保留上方 git_* 旧列向后兼容 ──
+    scm_connection_id: Mapped[Optional[str]] = mapped_column(
+        String(64), ForeignKey("scm_connections.id", ondelete="SET NULL"), nullable=True
+    )
+    repo_external_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    repo_full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ref: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ref_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    subpath: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+
     __table_args__ = (
         Index("idx_projects_status", "status"),
     )
