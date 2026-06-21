@@ -146,8 +146,11 @@ async def gc_expired(session: AsyncSession) -> int:
         实际删除的行数
     """
     # DELETE WHERE expires_at < 当前时间：清理所有已过期但未被消费的行（如用户放弃授权流程）
+    # synchronize_session=False：跳过 ORM 内存对象评估（SQLite 返回的 naive datetime
+    # 与 timezone.utc aware datetime 比较会抛 TypeError），直接交给 DB 执行
     res = await session.execute(
-        delete(OAuthState).where(OAuthState.expires_at < datetime.now(timezone.utc))
+        delete(OAuthState).where(OAuthState.expires_at < datetime.now(timezone.utc)),
+        execution_options={"synchronize_session": False},
     )
     # rowcount：被影响的行数；若为 None（驱动不支持）则回退到 0
     return res.rowcount or 0
