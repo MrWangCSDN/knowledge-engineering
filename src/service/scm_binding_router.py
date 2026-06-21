@@ -14,6 +14,7 @@ from src.service.indexing.queue import enqueue_index_job
 
 
 class BindRequest(BaseModel):
+    """工程绑定请求体：把某个 SCM 连接下的某仓某分支绑定到工程。"""
     connection_id: str
     repo_external_id: int
     repo_full_name: str
@@ -48,6 +49,9 @@ def create_scm_binding_routes(*, get_current_user: Callable, get_db: Callable) -
         p = await db.get(Project, project_id)
         if p is None:
             raise HTTPException(status_code=404, detail="工程不存在")
+        # 未绑定 SCM 的工程无法重新索引，排队只会让 worker 失败——直接拒绝。
+        if not p.scm_connection_id:
+            raise HTTPException(status_code=422, detail="工程尚未绑定 SCM 仓库，请先调用 /bind")
         job = await enqueue_index_job(db, project_id=project_id, type_="reindex", trigger="manual")
         await db.commit()
         return {"job_id": job.id}

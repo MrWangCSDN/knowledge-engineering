@@ -67,3 +67,25 @@ async def test_index_status(maker):
            "repo_full_name": "o/r", "ref": "master", "ref_type": "branch", "subpath": None})
     st = c.get("/projects/p1/index-status").json()
     assert st["status"] in ("queued", "cloning")
+
+
+@pytest.mark.asyncio
+async def test_reindex_unbound_returns_422(maker):
+    async with maker() as s:
+        s.add(Project(id="p1", name="P1")); await s.commit()   # 未绑定
+    c = TestClient(_app(maker))
+    r = c.post("/projects/p1/reindex")
+    assert r.status_code == 422
+    async with maker() as s:
+        jobs = (await s.execute(select(IndexJob).where(IndexJob.project_id == "p1"))).scalars().all()
+        assert jobs == []   # 不入队
+
+
+def test_reindex_missing_project_404(maker):
+    c = TestClient(_app(maker))
+    assert c.post("/projects/nope/reindex").status_code == 404
+
+
+def test_index_status_no_jobs_404(maker):
+    c = TestClient(_app(maker))
+    assert c.get("/projects/nope/index-status").status_code == 404
