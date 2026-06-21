@@ -33,10 +33,13 @@ async def run_worker_loop(
 
 def _main() -> None:  # pragma: no cover — 进程入口
     from src.service.db import get_session_maker
+    from src.service.scm.provider_factory import get_github_provider
+    from src.service.indexing.assembly import build_indexer_for_job
+    maker = get_session_maker()
     worker_id = os.getenv("KE_INDEXER_WORKER_ID", "ke-indexer-1")
-    # TODO(P3)：真实 indexer 需按 job→project→scm_connection 装配 GitHubAppProvider + installation。
-    #          P3 连接 API 落地后在此注入 make_real_indexer；当前入口仅占位，生产启用待 P3。
-    raise SystemExit("ke-indexer 入口待 P3 接通真实 indexer 装配（见 TODO）")
+    repos_root = os.getenv("KE_REPOS_ROOT", "/opt/ke-repos")
+    indexer = build_indexer_for_job(maker, provider=get_github_provider(), repos_root=repos_root)
+    asyncio.run(run_worker_loop(maker, worker_id=worker_id, indexer=indexer))
 
 
 if __name__ == "__main__":  # pragma: no cover
