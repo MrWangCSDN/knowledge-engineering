@@ -2,6 +2,8 @@
 # 允许在类型注解里使用 `X | Y` 语法（Python 3.9 兼容写法）
 from __future__ import annotations
 
+# logging：标准库日志模块，用于记录警告（非数字 sub 守卫告警等）
+import logging
 # time：读取当前 Unix 时间戳，用于 exp/iat 校验
 import time
 # Optional：表示"可能为 None"的类型注解
@@ -20,6 +22,9 @@ from joserfc.jwk import KeySet
 from src.service.scm.base import ScmIdentity
 # GitLabOidcConfig：GitLab OIDC 配置（issuer/client_id/client_secret）
 from src.service.scm.config import GitLabOidcConfig
+
+# 模块级日志器：统一用 "ke.scm.gitlab" 命名空间，方便日志过滤/聚合
+_log = logging.getLogger("ke.scm.gitlab")
 
 # 允许的时钟偏差（秒）：处理服务器时钟不完全同步的场景
 # exp 允许往过去延伸 120s，iat 允许往未来偏移 120s
@@ -230,3 +235,78 @@ class GitLabOidcProvider:
             scm_user_id=str(claims["sub"]),              # 强转 str 以防 sub 为数字类型
             login=claims.get("preferred_username"),       # .get()：字段不存在返回 None
         )
+
+    async def _get_authed(self, access_token: str, path: str) -> httpx.Response:
+        """用用户 access_token 发 Bearer 认证的 GET 请求（GitLab REST API）。
+
+        Args:
+            access_token: 用户的 GitLab OAuth access token
+            path:         API 路径（如 /api/v4/projects/42/members/all/7）
+        Returns:
+            httpx.Response 原始响应对象（由调用方判断状态码）
+        """
+        # `async with httpx.AsyncClient(...) as client:`：
+        # 异步上下文管理器，退出时自动关闭 HTTP 连接，避免连接泄漏
+        async with httpx.AsyncClient(timeout=15) as client:
+            # f-string 拼接完整 URL：issuer（如 https://gitlab.example.com）+ path
+            # headers 注入 Authorization: Bearer <token>，GitLab REST 标准认证方式
+            return await client.get(
+                f"{self._cfg.issuer}{path}",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+
+    async def resolve_repo_role(self, *, token: str, repo, principal):
+        """解析用户在指定 GitLab project 的 ScmRole。
+
+        调用 GitLab Members API /all（含继承成员），映射 access_level → ScmRole。
+
+        B3 守卫：GitLab sub 是数字型 user id；非数字 sub 无法构造合法 API 路径，
+        直接告警 + 返回 NOT_VISIBLE，不发 HTTP 请求（防止路径注入 + 提早失败）。
+
+        Args:
+            token:     用户的 GitLab access_token（Bearer 认证）
+            repo:      GitLab project_id（数字 id，绑定主键，不随 rename 变化）
+            principal: GitLab user_id（即 OIDC sub 字段，应为纯数字字符串）
+        Returns:
+            ScmRole.CAN_BIND    ── access_level ≥ 40（Maintainer/Owner）
+            ScmRole.CAN_QUERY   ── 20 ≤ access_level < 40（Reporter/Developer）
+            ScmRole.NOT_VISIBLE ── access_level < 20 / 非成员 / 无效 sub
+        Raises:
+            httpx.HTTPStatusError: 5xx 服务端错误（上层转 502）
+        """
+        # 延迟导入：避免循环依赖，且只在真正调用时才加载
+        from src.service.scm.base import ScmRole
+        from src.service.scm.scm_roles import gitlab_access_level_to_scm
+
+        # ── B3 守卫：sub 必须是纯数字字符串 ────────────────────────────────────
+        # str(principal).isdigit()：检查转为字符串后是否全为数字字符（0-9）
+        # 非数字 sub（如 UUID、邮箱、None）无法作为 GitLab user_id → 告警并直接返回
+        if principal is None or not str(principal).isdigit():
+            _log.warning(
+                "gitlab resolve_repo_role: 非数字 user_id(sub)=%r，无法核实仓权限",
+                principal,
+            )
+            return ScmRole.NOT_VISIBLE
+
+        # 调用 GitLab Members /all 端点（含继承自 group 的成员）
+        # /all 比 /members（直接成员）覆盖更广，避免 group 成员漏判
+        resp = await self._get_authed(token, f"/api/v4/projects/{repo}/members/all/{principal}")
+        sc = resp.status_code  # 取出 HTTP 状态码，便于多次判断
+
+        # 200：成员存在，读取 access_level 并映射到 ScmRole
+        if sc == 200:
+            # resp.json()["access_level"]：GitLab 角色级别（10/20/30/40/50）
+            # int(...)：确保类型为整数，再传给映射函数
+            return gitlab_access_level_to_scm(int(resp.json()["access_level"]))
+
+        # 401：token 无效/过期；404：用户不是该 project 的成员 → 均视为不可见
+        if sc in (401, 404):
+            return ScmRole.NOT_VISIBLE
+
+        # 5xx 及其他非预期状态码 → raise_for_status() 抛出 httpx.HTTPStatusError
+        # 上层路由捕获后转为 502 Bad Gateway（让调用方知道是下游故障）
+        resp.raise_for_status()
+
+        # raise_for_status() 对非 2xx 均会抛，理论上走不到这行；
+        # 保留此处是为了满足 Python 静态分析器（函数所有路径须有返回值）
+        return ScmRole.NOT_VISIBLE
