@@ -32,6 +32,9 @@ from src.service.scm_router import create_scm_routes
 from src.service.scm_binding_router import create_scm_binding_routes
 from src.service.scm.provider_factory import get_github_provider
 from src.service.webhook_router import create_webhook_routes
+from src.service.scm_oauth_router import create_scm_oauth_routes
+from src.service.scm.oauth_factory import get_login_provider
+from src.service.scm.config import load_oauth_config
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
 try:
@@ -98,6 +101,10 @@ app.include_router(create_scm_routes(
 ))  # P3：SCM onboarding（GET /scm/github/install-url）
 app.include_router(create_scm_binding_routes(get_current_user=get_current_user, get_db=get_db))  # P3：工程绑定 + 索引触发
 app.include_router(create_webhook_routes(get_db=get_db, webhook_secret=os.getenv("KE_GH_WEBHOOK_SECRET", "")))  # P3：GitHub webhook（HMAC 鉴权，不挂 auth）
+app.include_router(create_scm_oauth_routes(
+    get_current_user=get_current_user, get_db=get_db,
+    get_login_provider=get_login_provider, oauth_config=load_oauth_config(),
+))  # P4a：OAuth/OIDC 登录 + 身份关联
 
 
 @app.on_event("startup")
