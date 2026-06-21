@@ -120,6 +120,54 @@ class GitHubAppProvider:
         url = f"https://github.com/{full_name}.git"
         return await shallow_clone(url, ref=ref, dest=dest, token=token, subpath=subpath)
 
+    def build_authorize_url(self, *, client_id: str, redirect_uri: str, state: str) -> str:
+        """GitHub App user-to-server 授权 URL（不带 scope；权限由 App 配置）。"""
+        # urllib.parse.urlencode 将 dict 转为 URL 查询字符串，如 a=1&b=2
+        from urllib.parse import urlencode
+        # 构造三个必要查询参数：client_id（App Client ID）、redirect_uri（回调地址）、state（CSRF 防护随机串）
+        q = urlencode({"client_id": client_id, "redirect_uri": redirect_uri, "state": state})
+        # f-string：Python 3.6+ 的字符串格式化语法，{变量} 会被替换为其值
+        return f"https://github.com/login/oauth/authorize?{q}"
+
+    async def exchange_code(self, *, client_id: str, client_secret: str,
+                            code: str, redirect_uri: str) -> dict:
+        """用 code 换 user access token。返回 {"access_token":..., "scope":..., ...}。"""
+        # async with：异步上下文管理器，退出时自动关闭 httpx.AsyncClient 连接
+        async with httpx.AsyncClient(timeout=15) as client:
+            # POST 到 GitHub OAuth token 端点；Accept: application/json 让 GitHub 返回 JSON 而非表单编码
+            resp = await client.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                # data= 用于 application/x-www-form-urlencoded 格式（GitHub 要求）
+                data={"client_id": client_id, "client_secret": client_secret,
+                      "code": code, "redirect_uri": redirect_uri},
+            )
+            # raise_for_status：若 HTTP 状态码 >= 400 则抛出 httpx.HTTPStatusError
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_login_identity(self, token: dict) -> "ScmIdentity":
+        """用 OAuth user access token 调 GET /user，返回登录身份 ScmIdentity。"""
+        # 局部 import 避免循环依赖（github_app 和 base 互相不在顶层 import）
+        from src.service.scm.base import ScmIdentity
+        # 从 token dict 取出 access_token 字符串
+        access = token["access_token"]
+        # async with：异步上下文管理器，退出时自动关闭 httpx.AsyncClient 连接
+        async with httpx.AsyncClient(timeout=15) as client:
+            # GET /user：需要 Authorization 头携带 access_token
+            resp = await client.get(
+                f"{_API}/user",
+                headers={"Authorization": f"token {access}",
+                         "Accept": "application/vnd.github+json",
+                         "X-GitHub-Api-Version": "2022-11-28"},
+            )
+            # raise_for_status：若 HTTP 状态码 >= 400 则抛出 httpx.HTTPStatusError
+            resp.raise_for_status()
+            data = resp.json()
+        # str(data["id"])：GitHub 用户 id 是整数，统一转为字符串作为 scm_user_id
+        # data.get("login")：login 字段不一定存在，用 .get() 安全取值（不存在时返回 None）
+        return ScmIdentity(provider="github", scm_user_id=str(data["id"]), login=data.get("login"))
+
 
 # ---------------------------------------------------------------------------
 # 模块级工具函数（可单独单测，不依赖 class 实例）
