@@ -61,7 +61,8 @@ class OAuthConfig:
 def load_oauth_config() -> OAuthConfig:
     """从 env 装配 OAuth 配置。某 provider 凭证缺失 → 该 provider 为 None（不抛，路由层 503）。"""
     # KE_OAUTH_REDIRECT_BASE 是 callback URL 的域名前缀，如 https://ke.example.com
-    redirect_base = os.getenv("KE_OAUTH_REDIRECT_BASE", "").strip()
+    # rstrip("/")：去掉末尾斜杠，防止拼接 redirect_uri 时产生双斜杠（如 "https://ke.example.com//auth/..."）
+    redirect_base = os.getenv("KE_OAUTH_REDIRECT_BASE", "").strip().rstrip("/")
     # GitHub OAuth：client_id + client_secret 均有才视为已配置
     gh_id = os.getenv("KE_GH_OAUTH_CLIENT_ID", "").strip()
     gh_sec = os.getenv("KE_GH_OAUTH_CLIENT_SECRET", "").strip()

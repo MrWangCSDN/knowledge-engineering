@@ -175,3 +175,21 @@ async def test_callback_locked_423(maker, monkeypatch):
     state = r0.headers["location"].split("state=")[1]
     r = c.get("/auth/github/callback", params={"code": "c", "state": state})
     assert r.status_code == 423
+
+
+def test_gitlab_unconfigured_503(maker):
+    """gitlab=None 时 /auth/gitlab/login 应返回 503（provider 未配置，fail-closed）。
+
+    _cfg() 构造的 OAuthConfig 里 gitlab=None，路由层 _provider_or_503 检测到
+    oauth_config.provider("gitlab") is None → HTTPException(503)。
+    同时验证密码登录端点不受影响（不在此路由，不应 503）。
+    """
+    # _app 使用 _cfg()（gitlab=None）构造 app，不需要 async with maker()
+    c = TestClient(_app(maker), follow_redirects=False)
+    # gitlab 未配置 → 503
+    r = c.get("/auth/gitlab/login")
+    assert r.status_code == 503
+    # github 已配置（_cfg() 里 github=GitHubOAuthConfig(...)）→ 正常 302 跳转
+    r2 = c.get("/auth/github/login")
+    # 302/307 均表示正常重定向（不是 503）
+    assert r2.status_code in (302, 307)

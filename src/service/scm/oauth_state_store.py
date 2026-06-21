@@ -88,11 +88,9 @@ async def consume_state(
     state: str,
     csrf: Optional[str],
 ) -> Optional[OAuthState]:
-    """原子一次性消费：DELETE … RETURNING 拿回行；不存在/已用/过期/CSRF 不符 → None。
-
-    必须在任何 token 交换/身份/token 写入**之前**调用，且与后续写在同一事务（get_db 末统一 commit）。
-
-    注意：即使 CSRF 不符或已过期，该行已被 DELETE——这是有意为之（一次性，失败即作废，防重放攻击）。
+    """原子一次性消费（可移植：不依赖 DELETE…RETURNING，兼容 Oracle MySQL）。
+    先读行（拿 nonce/purpose/user_id），再按 hash 删除并以 rowcount==1 作为并发单赢门。
+    不存在/已用/过期/CSRF 不符 → None。必须在任何 token 交换/写入之前调用，同一事务内。
 
     Args:
         session: 异步 SQLAlchemy session
@@ -108,29 +106,37 @@ async def consume_state(
     # 计算 state 的 sha256，用于主键查找
     sh = _sha256(state)
 
-    # DELETE … RETURNING 原子操作：
-    #   - 找到该行并立即删除（原子性保证并发下不会两次消费同一行）
-    #   - RETURNING 子句让 SQLite/aiosqlite 把被删行的数据返回给调用方
-    #   - 若行不存在（已消费/从未存在），返回空结果集
-    res = await session.execute(
-        delete(OAuthState).where(OAuthState.state_hash == sh).returning(OAuthState)
-    )
-    # scalar_one_or_none()：结果集有且仅有一行时返回该行对象；空结果集返回 None
-    row = res.scalar_one_or_none()
+    # 第一步：SELECT 读取行，拿到 nonce/purpose/user_id 等字段
+    # 若行不存在（已消费 / 从未存在）→ 直接返回 None
+    row = (await session.execute(
+        select(OAuthState).where(OAuthState.state_hash == sh)
+    )).scalar_one_or_none()
     if row is None:
-        return None  # state 不存在或已被消费
+        return None
+
+    # 第二步：DELETE WHERE state_hash=sh，以 rowcount==1 作为原子单赢门
+    #   - synchronize_session=False：跳过 ORM 内存对象同步；
+    #     row 对象的属性在 delete 后仍可访问（我们只读不写），不需要 ORM 追踪该对象的删除状态
+    #   - 并发下只有第一个 DELETE 能拿到 rowcount==1（DB 行锁保证唯一赢家）
+    res = await session.execute(
+        delete(OAuthState).where(OAuthState.state_hash == sh)
+        .execution_options(synchronize_session=False)
+    )
+    if (res.rowcount or 0) != 1:
+        return None  # 并发下被他人先消费（rowcount==0）
 
     # 检查是否过期：如果 expires_at 是 naive datetime（无时区），补上 UTC 标记
+    # SQLite 不存时区信息，取出的 datetime 是 naive；MySQL 同样可能如此
     exp = row.expires_at
     if exp.tzinfo is None:
-        # replace(tzinfo=...) 不转换时间值，只附加时区信息（SQLite 存的是 UTC naive）
+        # replace(tzinfo=...) 不转换时间值，只附加时区信息（不改变数值本身）
         exp = exp.replace(tzinfo=timezone.utc)
     if exp < datetime.now(timezone.utc):
         return None  # 已过期——行已被删，不会重放
 
     # CSRF 常数时间比较：
     #   hmac.compare_digest 在长度相同时用固定时间比较，防止时序侧信道攻击
-    #   （普通字符串 == 比较会在第一个不匹配字符处提前返回，暴露信息）
+    #   （普通字符串 == 比较会在第一个不匹配字符处提前返回，暴露时序信息）
     if not hmac.compare_digest(row.csrf_hash, _sha256(csrf)):
         return None  # CSRF 不匹配——行已被删，不会重放
 

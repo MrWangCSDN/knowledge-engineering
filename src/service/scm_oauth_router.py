@@ -51,9 +51,12 @@ def create_scm_oauth_routes(*, get_current_user: Callable, get_db: Callable,
         return f"{oauth_config.redirect_base}/auth/{provider}/callback"
 
     def _set_csrf(resp: Response, csrf: str) -> None:
+        # SameSite=Lax（不能用 Strict）：Strict 会让浏览器在 IdP→callback 的跨站顶级重定向时
+        # 丢弃 cookie（因为请求来源是第三方站点），导致 callback 永远读不到 csrf cookie → 400。
+        # Lax 在顶级 GET 导航（正是 OAuth callback 的场景）时会携带 cookie，同时仍阻止跨站 POST/XHR。
         resp.set_cookie(key=_CSRF_COOKIE, value=csrf, httponly=True,
                         secure=os.getenv("KE_COOKIE_SECURE", "true").lower() == "true",
-                        samesite="strict", path="/", max_age=600)
+                        samesite="lax", path="/", max_age=600)
 
     @router.get("/auth/{provider}/login")
     async def login(provider: str, db=Depends(get_db)):
@@ -81,8 +84,15 @@ def create_scm_oauth_routes(*, get_current_user: Callable, get_db: Callable,
                 client_secret=oauth_config.github.client_secret,
                 code=code, redirect_uri=_redirect_uri(provider))
             ident = await prov.get_login_identity({"access_token": tok["access_token"]})
+            # expires_in 存在时（GitHub App token 有有效期）计算绝对 expires_at；
+            # 与 GitLab 分支保持一致，使 get_valid_scm_token 可在到期时自动刷新 token。
+            # GitHub 普通 OAuth App token 不含 expires_in（None），设为 None 表示永不过期。
+            exp = None
+            if tok.get("expires_in"):
+                # timedelta(seconds=...) 构造时间差；now(utc) + timedelta = 未来绝对时间点
+                exp = datetime.now(timezone.utc) + timedelta(seconds=int(tok["expires_in"]))
             persist = {"access_token": tok["access_token"], "refresh_token": tok.get("refresh_token"),
-                       "expires_at": None, "scopes": tok.get("scope")}
+                       "expires_at": exp, "scopes": tok.get("scope")}
         else:
             tok = await prov.exchange_code(code=code, redirect_uri=_redirect_uri(provider))
             claims = await prov.validate_id_token(tok["id_token"], expected_nonce=nonce)

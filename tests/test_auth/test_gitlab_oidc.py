@@ -187,3 +187,37 @@ async def test_reject_alg_none(httpx_mock):
     with pytest.raises(Exception):
         # decode 应因签名验证失败（BadSignatureError）或 alg 不匹配而 raise
         await p.validate_id_token(bad, expected_nonce="N1")
+
+
+@pytest.mark.asyncio
+async def test_reject_bad_aud(httpx_mock):
+    """aud 完全不匹配 client_id：token 的 aud='other'，配置 client_id=AUD='gl-cid' → 必须拒绝。
+
+    防御目标：阻止把发给其他 client 的 token 误注入当前应用（confused deputy 攻击）。
+    校验路径：validate_id_token 第 4 步（aud 包含 client_id）失败 → ValueError('aud 不符')。
+    """
+    key = _key()
+    p = _provider(httpx_mock, key)
+    # aud="other" 与配置的 client_id=AUD 不匹配；_id_token 已支持 aud 参数
+    bad_token = _id_token(key, aud="other")
+    with pytest.raises(Exception):
+        # validate_id_token 校验第 4 步：aud 不含 client_id → raise ValueError
+        await p.validate_id_token(bad_token, expected_nonce="N1")
+
+
+@pytest.mark.asyncio
+async def test_reject_multi_aud_without_azp(httpx_mock):
+    """multi-aud 但 azp 缺失或不匹配：aud=['gl-cid','other'] 且无 azp → 必须拒绝。
+
+    OIDC 规范（§3.1.3.7）：当 aud 包含多个受众时，RP 必须验证 azp==client_id，
+    否则无法证明 token 是专门给本应用签发的（防跨客户端 token 注入）。
+    校验路径：validate_id_token 第 4b 步（multi-aud 时 azp 校验）失败 → ValueError('azp 不符')。
+    """
+    key = _key()
+    p = _provider(httpx_mock, key)
+    # aud 包含 client_id（AUD）但还有其他受众 "other"，且不传 azp（默认 None）
+    # → multi-aud 场景要求 azp==client_id，azp 缺失 → 拒绝
+    bad_token = _id_token(key, aud=[AUD, "other"])  # azp 未传 → claims 里无 azp 字段
+    with pytest.raises(Exception):
+        # 第 4b 步：len(aud) > 1 且 claims.get("azp") != client_id → raise ValueError
+        await p.validate_id_token(bad_token, expected_nonce="N1")
