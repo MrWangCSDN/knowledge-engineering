@@ -149,8 +149,8 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "scm_connection_v1"
-# 写迁移时 head 为 qa_archive_v1；若已变，先跑 `./venv/bin/alembic heads` 用实际 head
-down_revision: Union[str, Sequence[str], None] = "qa_archive_v1"
+# 实际 head 经 `./venv/bin/alembic heads` 核实为 225c95710efa（链尾）；用它做 down_revision
+down_revision: Union[str, Sequence[str], None] = "225c95710efa"
 branch_labels = None
 depends_on = None
 
@@ -825,4 +825,5 @@ git commit -m "feat(scm): GitHubAppProvider clone（浅克隆 + sparse 子目录
 
 - P2 `index_job` + `ke-indexer`：调 `GitHubAppProvider.clone` 拉代码后跑 pipeline。
 - P3 连接 API：用 `list_repos`/`list_branches` + 建 `ScmConnection`。
+  - **前向项（P1 code review 提出）**：建连接时加唯一约束/校验防同一 installation 重复连接（如 `(provider, github_installation_id)` 唯一），并视需要给 `group_id`/`status` 加索引。P1 纯模型层未加。
 - P4 身份与授权：给 `ScmProvider` 补 `get_login_identity`/`resolve_scm_role`/`list_user_visible_repos`（base.py 已留位）。
