@@ -19,6 +19,11 @@ from src.models.structure import StructureFacts
 from src.persistence.repositories.structure_facts_repository import StructureFactsRepository
 from src.persistence.repositories.snapshot_repository import SnapshotRepository
 from src.pipeline.interpretation_policy import InterpretationPipelinePolicy
+# v2.0 工程状态机：段间回写 project.status（partial/ready/failed）+ 解读进度统计
+from src.service.project_status_writer import update_project_status_sync
+from src.service.db import get_session_maker
+from src.pipeline.interpretation_progress_calc import interpretation_percent, methods_total
+from src.pipeline.interpretation_standalone import get_interpretation_progress_from_weaviate
 
 _LOG = logging.getLogger(__name__)
 
@@ -235,9 +240,56 @@ FULL_PIPELINE_SEGMENT_RUNNERS: list[tuple[str, Callable[[FullPipelineScope], Opt
 
 
 def execute_full_pipeline_table(scope: FullPipelineScope) -> dict[str, Any]:
-    """按 `FULL_PIPELINE_SEGMENT_RUNNERS` 顺序执行；返回首个非 None 的字典（finalize 必返回）。"""
-    for seg_id, runner in FULL_PIPELINE_SEGMENT_RUNNERS:
-        out = runner(scope)
-        if out is not None:
-            return out
-    raise RuntimeError("流水线编排异常：所有段执行完毕但未返回结果")
+    """按 `FULL_PIPELINE_SEGMENT_RUNNERS` 顺序执行；返回首个非 None 的字典（finalize 必返回）。
+
+    v2.0：段循环里挂工程状态机回写（hook）：
+    - semantic 段跑完 → status=partial（已有可用骨架，前端可放行问答）
+    - finalize 段返回最终结果 → status=ready（带方法数/解读进度统计富化）
+    - 任一段抛异常 → status=failed 后重新抛出
+    - scope.project_id 为空时全程跳过，纯 CLI 跑零副作用
+    """
+    # getattr 安全取 project_id（即使 scope 不是标准 FullPipelineScope 也不报错）
+    pid = getattr(scope, "project_id", None)
+    # 只有需要回写时才构建 session maker，避免无 project_id 场景建库连接
+    sm = get_session_maker() if pid else None
+
+    def _mark(status: str, **kw: Any) -> None:
+        """按 status 回写工程状态；pid/sm 缺失则静默跳过（CLI 无副作用）。"""
+        # pid 空 或 sm 为 None → 不回写
+        if pid and sm is not None:
+            update_project_status_sync(sm, pid, status, **kw)
+
+    try:
+        # 保持原有循环：顺序执行段表，首个非 None 返回值即整条流水线结果
+        for seg_id, runner in FULL_PIPELINE_SEGMENT_RUNNERS:
+            out = runner(scope)
+            # semantic 段一跑完就回写 partial（骨架已就绪）
+            # 即使 until="semantic" 提前返回，partial 也应已写（语义上 semantic 确实完成了）
+            if seg_id == "semantic":
+                _mark("partial", interpretation_progress=0)
+            if out is not None:
+                # finalize 段产出最终结果时回写 ready，并富化统计
+                if seg_id == "finalize":
+                    # 统计富化可能触达 Weaviate/磁盘；用 try/except 降级：
+                    # 即便拿不到统计，也要把 status 置 ready，不因统计失败中断流水线
+                    try:
+                        prog = get_interpretation_progress_from_weaviate(scope.config_path)
+                        _mark(
+                            "ready",
+                            methods_count=methods_total(prog),
+                            interpretation_progress=interpretation_percent(prog),
+                            set_pipeline_at=True,
+                        )
+                    except Exception as e:  # noqa: BLE001 — 统计失败不应阻断 ready 回写
+                        _LOG.warning(
+                            "ready 统计富化失败（已降级为仅置 ready）: %s: %s",
+                            type(e).__name__,
+                            e,
+                        )
+                        _mark("ready", set_pipeline_at=True)
+                return out
+        raise RuntimeError("流水线编排异常：所有段执行完毕但未返回结果")
+    except Exception:
+        # 任一段（或编排本身）异常 → 回写 failed 后重新抛出，不吞异常
+        _mark("failed")
+        raise
