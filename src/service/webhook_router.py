@@ -2,6 +2,7 @@
 """GitHub webhook 接收：验签→解析→（绑定分支）去重入队→快速 200。设计 §4.4/§9。"""
 from __future__ import annotations
 
+import json  # Fix 3: 提到模块顶层，与 stdlib 同层，避免函数内反复 import
 from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -25,16 +26,23 @@ def create_webhook_routes(*, get_db: Callable, webhook_secret: str) -> APIRouter
         delivery = request.headers.get("X-GitHub-Delivery")
         if event != "push":
             return {"ok": True, "ignored": event}     # 仅处理 push（create/installation 后续）
-        import json
-        ev = parse_push(json.loads(body))
+        # Fix 2: 恶意/截断 body 会抛 JSONDecodeError；GitHub 对 4xx 不重试，对 5xx 会轮询重试（retry storm）
+        try:
+            ev = parse_push(json.loads(body))
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="无效 JSON body")
         # 找绑定了该 repo + 该分支的工程
         projects = (await db.execute(
             select(Project).where(Project.repo_external_id == ev.repo_external_id, Project.ref == ev.ref)
         )).scalars().all()
         enqueued = 0
         for p in projects:
+            # Fix 1: dedup_key 必须含 project_id，否则同一 delivery 发给多工程时
+            # 第 2 个工程的 job 会被错误去重（enqueue_index_job 仅以 dedup_key 做唯一键）
             await enqueue_index_job(db, project_id=p.id, type_="incremental",
-                                    trigger="webhook", dedup_key=delivery, commit_sha=ev.after_sha)
+                                    trigger="webhook",
+                                    dedup_key=f"{delivery}:{p.id}" if delivery else None,
+                                    commit_sha=ev.after_sha)
             enqueued += 1
         await db.commit()
         return {"ok": True, "enqueued": enqueued}      # 快速 200；重活在 worker

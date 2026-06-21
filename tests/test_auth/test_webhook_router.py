@@ -42,7 +42,8 @@ async def test_webhook_enqueues_for_bound_branch(maker):
     assert r.status_code == 200
     async with maker() as s:
         jobs = (await s.execute(select(IndexJob).where(IndexJob.project_id == "p1"))).scalars().all()
-        assert len(jobs) == 1 and jobs[0].type == "incremental" and jobs[0].dedup_key == "d1"
+        # dedup_key 现在格式为 "{delivery}:{project_id}"，保证多工程绑定同一 repo 时各自独立去重
+        assert len(jobs) == 1 and jobs[0].type == "incremental" and jobs[0].dedup_key == "d1:p1"
 
 
 def test_webhook_bad_signature_401(maker):
@@ -51,3 +52,32 @@ def test_webhook_bad_signature_401(maker):
     r = c.post("/webhooks/github", content=body,
                headers={"X-Hub-Signature-256": "sha256=bad", "X-GitHub-Event": "push", "X-GitHub-Delivery": "d2"})
     assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_webhook_enqueues_for_each_bound_project(maker):
+    # 两个工程绑定同一 repo+分支：同一 delivery 必须给每个工程各入队一条（dedup 按 project 区分）
+    async with maker() as s:
+        for pid in ("p1", "p2"):
+            s.add(Project(id=pid, name=pid, scm_connection_id="c1", repo_external_id=42,
+                          repo_full_name="o/r", ref="master", ref_type="branch"))
+        await s.commit()
+    c = TestClient(_app(maker))
+    body = json.dumps({"ref": "refs/heads/master", "after": "a"*40, "repository": {"id": 42}}).encode()
+    r = c.post("/webhooks/github", content=body,
+               headers={"X-Hub-Signature-256": _sig("whsec", body), "X-GitHub-Event": "push",
+                        "X-GitHub-Delivery": "d1"})
+    assert r.status_code == 200 and r.json()["enqueued"] == 2
+    async with maker() as s:
+        for pid in ("p1", "p2"):
+            jobs = (await s.execute(select(IndexJob).where(IndexJob.project_id == pid))).scalars().all()
+            assert len(jobs) == 1 and jobs[0].type == "incremental"
+
+
+def test_webhook_malformed_json_returns_400(maker):
+    c = TestClient(_app(maker))
+    body = b"not json at all"
+    r = c.post("/webhooks/github", content=body,
+               headers={"X-Hub-Signature-256": _sig("whsec", body), "X-GitHub-Event": "push",
+                        "X-GitHub-Delivery": "d9"})
+    assert r.status_code == 400
