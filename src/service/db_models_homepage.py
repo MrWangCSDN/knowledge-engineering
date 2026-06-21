@@ -194,6 +194,30 @@ class ScmConnection(Base):
     )
 
 
+class IndexJob(Base):
+    """索引作业队列（设计 §5.3/§9）。worker 原子认领 queued → 逐阶段更新 → done/failed。"""
+    __tablename__ = "index_jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
+    commit_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    dedup_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    worker_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    progress: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("(CURRENT_TIMESTAMP)"), nullable=False
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 # ─── 2. user_project_access ──────────────────────────────────────────────────
 
 class UserProjectAccess(Base):
