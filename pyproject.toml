@@ -23,6 +23,7 @@ dependencies = [
     # 2026-06-02：QASynthesizer 解析 LLM 输出 JSON 时的容错兜底
     # 遇到未转义引号/反斜杠（LLM 在 GFM 表格 / 代码块里偶发输出）时 json.loads 不再炸
     "json-repair>=0.30.0",
+    "joserfc>=1.0",
 ]
 
 [project.optional-dependencies]
