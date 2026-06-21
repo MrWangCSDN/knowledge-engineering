@@ -125,3 +125,27 @@ async def test_delete_connection_forbidden_for_non_owner(maker):
     async with maker() as s:
         row = (await s.execute(select(ScmConnection).where(ScmConnection.id == "c1"))).scalar_one_or_none()
         assert row is not None, "连接不应被无权限用户删除"
+
+
+class _FakeProvider2(_FakeProvider):
+    async def list_repos(self, installation_id):
+        from src.service.scm.base import RepoInfo
+        return [RepoInfo(external_id=42, full_name="o/r", default_branch="master", private=True)]
+    async def list_branches(self, installation_id, full_name):
+        from src.service.scm.base import BranchList
+        return BranchList(default_branch="master", branches=["master", "dev"])
+
+
+@pytest.mark.asyncio
+async def test_list_repos_and_branches(maker):
+    from fastapi.testclient import TestClient
+    from src.service.db_models_homepage import ScmConnection
+    async with maker() as s:
+        s.add(ScmConnection(id="c1", provider="github", auth_type="github_app",
+                            github_installation_id=7, account_login="o", status="active", created_by="alice"))
+        await s.commit()
+    c = TestClient(_app_db(maker, _FakeProvider2()))
+    repos = c.get("/scm/connections/c1/repos").json()["repos"]
+    assert repos[0]["external_id"] == 42 and repos[0]["full_name"] == "o/r"
+    br = c.get("/scm/connections/c1/repos/o%2Fr/branches").json()
+    assert br["default_branch"] == "master" and "dev" in br["branches"]

@@ -68,4 +68,38 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
         await db.commit()
         return Response(status_code=204)
 
+    async def _load_conn(connection_id: str, user, db) -> "ScmConnection":
+        """按 ID 加载连接，校验存在性与归属权（owner 或 admin 才可访问）。"""
+        conn = await db.get(ScmConnection, connection_id)
+        # 连接不存在时返回 404
+        if conn is None:
+            raise HTTPException(status_code=404, detail="连接不存在")
+        # 非拥有者且非管理员时返回 403
+        if conn.created_by != getattr(user, "username", None) and not getattr(user, "is_admin", False):
+            raise HTTPException(status_code=403, detail="无权访问该连接")
+        return conn
+
+    @router.get("/connections/{connection_id}/repos")
+    async def list_repos(connection_id: str, user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        """列出指定连接下 GitHub App 可见的仓库（installation 级别，不做成员过滤，P4 再加）。"""
+        # 校验连接归属
+        conn = await _load_conn(connection_id, user, db)
+        # 调用 P1 provider 的 list_repos，返回 RepoInfo 列表
+        repos = await get_provider().list_repos(conn.github_installation_id)
+        # 将 dataclass 字段转为普通 dict 返回给前端
+        return {"repos": [
+            {"external_id": r.external_id, "full_name": r.full_name,
+             "default_branch": r.default_branch, "private": r.private} for r in repos
+        ]}
+
+    @router.get("/connections/{connection_id}/repos/{full_name:path}/branches")
+    async def list_branches(connection_id: str, full_name: str,
+                            user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        """列出指定仓库的分支列表。{full_name:path} 允许 owner/repo 中包含斜杠。"""
+        # 校验连接归属
+        conn = await _load_conn(connection_id, user, db)
+        # 调用 P1 provider 的 list_branches，返回 BranchList(default_branch, branches)
+        bl = await get_provider().list_branches(conn.github_installation_id, full_name)
+        return {"default_branch": bl.default_branch, "branches": bl.branches}
+
     return router
