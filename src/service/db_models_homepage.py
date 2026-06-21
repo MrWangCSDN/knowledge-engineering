@@ -166,6 +166,34 @@ class GitCredential(Base):
     )
 
 
+class ScmConnection(Base):
+    """账号级 SCM 连接（"连接一次"）。设计 GitHub仓库连接-设计.md §5.1。
+
+    github_app：github_installation_id 必填、credential_id 空；
+    pat：credential_id 指向 git_credentials、github_installation_id 空。
+    """
+    __tablename__ = "scm_connections"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    auth_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    github_installation_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    account_login: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    credential_id: Mapped[Optional[str]] = mapped_column(
+        String(64), ForeignKey("git_credentials.id", ondelete="SET NULL"), nullable=True
+    )
+    gitlab_instance_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    oidc_issuer: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    created_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    group_id: Mapped[Optional[str]] = mapped_column(
+        String(64), ForeignKey("groups.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("(CURRENT_TIMESTAMP)"), nullable=False
+    )
+
+
 # ─── 2. user_project_access ──────────────────────────────────────────────────
 
 class UserProjectAccess(Base):
