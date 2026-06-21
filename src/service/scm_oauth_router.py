@@ -9,13 +9,14 @@ from typing import Callable, Literal, Optional
 
 import src.service.auth_security as sec
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
 
 from src.service.auth_models import User
+from src.service.db_models_homepage import UserScmToken
 from src.service.scm.oauth_factory import OAuthProviderUnavailable
 from src.service.scm.oauth_state_store import mint_state, consume_state, gc_expired
-from src.service.scm.scm_token_store import upsert_token
+from src.service.scm.scm_token_store import upsert_token, delete_token
 
 _log = logging.getLogger("ke.scm.oauth")
 _CSRF_COOKIE = "ke_oauth_csrf"
@@ -151,7 +152,83 @@ def create_scm_oauth_routes(*, get_current_user: Callable, get_db: Callable,
             resp = RedirectResponse(f"{oauth_config.redirect_base}/", status_code=302)
             resp.set_cookie(value=refresh, **sec.cookie_settings(False))  # access 不进 URL，前端走 /auth/refresh
             return resp
-        # link 分支 → Task 10 实现
-        raise HTTPException(status_code=400, detail="link 分支未实现（Task 10）")
+        # --- link 分支：当前用户把 SCM 身份关联到自己账号 ---
+        if st.purpose == "link":
+            if st.user_id is None:
+                raise HTTPException(status_code=400, detail="link state 缺 user_id")
+            col = _ID_COL[provider]
+            # I1：归一列类型再比较（github→int/BigInteger，gitlab→str）
+            lookup_val = _id_lookup_value(provider, ident.scm_user_id)
+            # 检查该 SCM id 是否已被他人占用（排除自己）
+            taken = (await db.execute(
+                select(User).where(getattr(User, col) == lookup_val, User.id != st.user_id)
+            )).scalar_one_or_none()
+            if taken is not None:
+                raise HTTPException(status_code=409, detail="该 SCM 身份已被其他账号关联")
+            # 加载当前用户行
+            me = (await db.execute(select(User).where(User.id == st.user_id))).scalar_one_or_none()
+            if me is None:
+                raise HTTPException(status_code=404, detail="用户不存在")
+            cur = getattr(me, col)
+            # 自己已绑不同 id → 禁止静默替换，要求先解绑
+            if cur is not None and str(cur) != str(ident.scm_user_id):
+                raise HTTPException(status_code=409, detail="已关联其他账号，请先解绑")
+            # 写身份列（setattr 直接在 ORM 对象上赋值，session.flush 时入库）
+            setattr(me, col, lookup_val)
+            await upsert_token(db, user_id=me.id, provider=provider,
+                               access_token=persist["access_token"], refresh_token=persist["refresh_token"],
+                               expires_at=persist["expires_at"], scopes=persist["scopes"],
+                               scm_login=ident.login)
+            # 302 跳回设置页，让前端刷新关联状态
+            return RedirectResponse(f"{oauth_config.redirect_base}/settings", status_code=302)
+        raise HTTPException(status_code=400, detail="未知 purpose")
+
+    @router.post("/account/link-scm/{provider}/start")
+    async def link_start(provider: str, user=Depends(get_current_user), db=Depends(get_db)):
+        """已登录用户发起 SCM 关联授权流程：mint link-purpose state，返回 authorize_url。"""
+        prov = _provider_or_503(provider)   # 未知→404、未配→503
+        # GitLab 是 OIDC，需要额外的 nonce；GitHub 用普通 OAuth，nonce=None
+        is_oidc = provider == "gitlab"
+        minted = await mint_state(db, provider=provider, purpose="link", user_id=user.id,
+                                  with_nonce=is_oidc)
+        if provider == "github":
+            # GitHub 用同步 build_authorize_url（返回字符串）
+            url = prov.build_authorize_url(client_id=oauth_config.github.client_id,
+                                           redirect_uri=_redirect_uri(provider), state=minted.state)
+        else:
+            # GitLab OIDC 用 async build_authorize_url
+            url = await prov.build_authorize_url(redirect_uri=_redirect_uri(provider),
+                                                 state=minted.state, nonce=minted.nonce)
+        # 返回 JSON（前端弹窗处理，不像 login 那样直接 302 重定向）
+        resp = JSONResponse({"authorize_url": url})
+        _set_csrf(resp, minted.csrf)
+        return resp
+
+    @router.get("/account/scm-links")
+    async def scm_links(user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        """查询当前用户已关联的所有 SCM provider 列表。"""
+        # 拉取该用户全部 token 行（每个 provider 一行）
+        rows = (await db.execute(
+            select(UserScmToken).where(UserScmToken.user_id == user.id)
+        )).scalars().all()
+        # 只返回展示字段，linked_at 序列化为 ISO 8601 字符串
+        return {"links": [{"provider": r.provider, "scm_login": r.scm_login,
+                           "linked_at": r.linked_at.isoformat() if r.linked_at else None} for r in rows]}
+
+    @router.delete("/account/scm-links/{provider}", status_code=204)
+    async def unlink(provider: str, user=Depends(get_current_user), db=Depends(get_db)):
+        """解除当前用户对指定 provider 的 SCM 关联。幂等：已解绑也返回 204。"""
+        # B1：未知 provider → 404；不走 _provider_or_503，解绑不需要 provider 客户端配置
+        if provider not in _KNOWN_PROVIDERS:
+            raise HTTPException(status_code=404, detail=f"未知 provider: {provider}")
+        me = (await db.execute(select(User).where(User.id == user.id))).scalar_one_or_none()
+        if me is not None:
+            # 清空身份列（置 None 即解绑 SCM 登录入口）
+            setattr(me, _ID_COL[provider], None)
+        # 删除 token 行（delete_token 内部用 DELETE WHERE，行不存在时也无报错，天然幂等）
+        await delete_token(db, user_id=user.id, provider=provider)
+        # I6（已记录决策）：provider 侧 token 撤销本片**有意不做**——解绑只清本地身份+token。
+        # KE 是 link-only over 密码账号，解绑不会困住用户；远端撤销留后续 best-effort。
+        return Response(status_code=204)
 
     return router
