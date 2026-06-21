@@ -2,6 +2,8 @@
 设计 §6/§7。token 不落库，缓存到接近过期重取。"""
 from __future__ import annotations
 
+import asyncio
+import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -98,3 +100,59 @@ class GitHubAppProvider:
                 break
             page += 1
         return BranchList(default_branch=default_branch, branches=branches)
+
+    async def clone(self, installation_id: int, full_name: str, ref: str,
+                    subpath: Optional[str], dest: str) -> str:
+        """浅克隆指定仓库分支到 dest，返回 HEAD commit sha（40 hex）。"""
+        token = await self.get_installation_token(installation_id)
+        url = f"https://github.com/{full_name}.git"
+        return await shallow_clone(url, ref=ref, dest=dest, token=token, subpath=subpath)
+
+
+# ---------------------------------------------------------------------------
+# 模块级工具函数（可单独单测，不依赖 class 实例）
+# ---------------------------------------------------------------------------
+
+def mask_token(text: str, token: Optional[str]) -> str:
+    """将 token 字符串从日志/错误信息中替换为 ***，避免泄露。"""
+    if not token or not text:
+        return text
+    return text.replace(token, "***")
+
+
+def build_clone_args(clone_url: str, ref: str, dest: str) -> list[str]:
+    """构造浅克隆命令（单分支）。subpath 的 sparse-checkout 在 shallow_clone 内 clone 后单独执行。"""
+    return ["git", "clone", "--depth", "1", "--branch", ref, "--single-branch", clone_url, dest]
+
+
+def _inject_token(clone_url_https: str, token: Optional[str]) -> str:
+    """将 installation token 注入 HTTPS URL，形如 x-access-token:<token>@github.com/…。"""
+    if not token:
+        return clone_url_https
+    return clone_url_https.replace("https://", f"https://x-access-token:{token}@", 1)
+
+
+async def _run(args: list[str], token: Optional[str], cwd: Optional[str] = None) -> str:
+    """运行子进程命令，返回 stdout 字符串；失败时抛出 RuntimeError（token 已掩码）。"""
+    proc = await asyncio.create_subprocess_exec(
+        *args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    out, err = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(mask_token(err.decode("utf-8", "replace"), token))
+    return out.decode("utf-8", "replace").strip()
+
+
+async def shallow_clone(clone_url_https: str, ref: str, dest: str,
+                        token: Optional[str], subpath: Optional[str] = None) -> str:
+    """浅克隆指定分支到 dest，返回 HEAD commit sha（40 hex）。subpath 非空时启用 sparse-checkout。"""
+    auth_url = _inject_token(clone_url_https, token)
+    if subpath:
+        # sparse-checkout 流程：先 no-checkout 克隆骨架，再设置稀疏路径，最后 checkout
+        await _run(["git", "clone", "--depth", "1", "--branch", ref, "--single-branch",
+                    "--filter=blob:none", "--no-checkout", auth_url, dest], token)
+        await _run(["git", "sparse-checkout", "set", subpath], token, cwd=dest)
+        await _run(["git", "checkout", ref], token, cwd=dest)
+    else:
+        await _run(build_clone_args(auth_url, ref, dest), token)
+    return await _run(["git", "rev-parse", "HEAD"], token, cwd=dest)
