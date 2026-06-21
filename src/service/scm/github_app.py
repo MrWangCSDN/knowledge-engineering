@@ -47,3 +47,54 @@ class GitHubAppProvider:
         exp = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00")).timestamp()
         self._tok_cache[installation_id] = (token, exp)
         return token
+
+    async def _get(self, installation_id: int, path: str) -> httpx.Response:
+        """用 installation token 发起 GET 请求，返回原始 httpx.Response。"""
+        token = await self.get_installation_token(installation_id)
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(f"{_API}{path}", headers=headers)
+            resp.raise_for_status()
+            return resp
+
+    async def list_repos(self, installation_id: int) -> list["RepoInfo"]:
+        """列出该 installation 下所有可见仓库，分页自动翻页（per_page=100）。"""
+        from src.service.scm.base import RepoInfo
+        out: list[RepoInfo] = []
+        page = 1
+        while True:
+            resp = await self._get(installation_id, f"/installation/repositories?per_page=100&page={page}")
+            repos = resp.json().get("repositories", [])
+            if not repos:
+                break
+            for r in repos:
+                out.append(RepoInfo(
+                    external_id=r["id"], full_name=r["full_name"],
+                    default_branch=r.get("default_branch", "main"), private=bool(r.get("private")),
+                ))
+            if len(repos) < 100:
+                break
+            page += 1
+        return out
+
+    async def list_branches(self, installation_id: int, full_name: str) -> "BranchList":
+        """列出仓库所有分支并返回默认分支，分页自动翻页（per_page=100）。"""
+        from src.service.scm.base import BranchList
+        meta = (await self._get(installation_id, f"/repos/{full_name}")).json()
+        default_branch = meta.get("default_branch", "main")
+        branches: list[str] = []
+        page = 1
+        while True:
+            resp = await self._get(installation_id, f"/repos/{full_name}/branches?per_page=100&page={page}")
+            items = resp.json()
+            if not items:
+                break
+            branches.extend(b["name"] for b in items)
+            if len(items) < 100:
+                break
+            page += 1
+        return BranchList(default_branch=default_branch, branches=branches)

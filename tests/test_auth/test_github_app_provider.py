@@ -58,3 +58,41 @@ async def test_installation_token_fetch_and_cache(provider, httpx_mock):
     assert t1 == "ghs_abc"
     t2 = await provider.get_installation_token(12345)
     assert t2 == "ghs_abc"
+
+
+@pytest.mark.asyncio
+async def test_list_repos(provider, httpx_mock):
+    httpx_mock.add_response(
+        url="https://api.github.com/app/installations/12345/access_tokens",
+        method="POST", json={"token": "ghs_abc", "expires_at": "2099-01-01T00:00:00Z"}, status_code=201,
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/installation/repositories?per_page=100&page=1",
+        json={"total_count": 1, "repositories": [
+            {"id": 42, "full_name": "macrozheng/mall-swarm", "default_branch": "master", "private": True}
+        ]},
+    )
+    repos = await provider.list_repos(12345)
+    assert len(repos) == 1
+    assert repos[0].external_id == 42
+    assert repos[0].full_name == "macrozheng/mall-swarm"
+    assert repos[0].private is True
+
+
+@pytest.mark.asyncio
+async def test_list_branches(provider, httpx_mock):
+    httpx_mock.add_response(
+        url="https://api.github.com/app/installations/12345/access_tokens",
+        method="POST", json={"token": "ghs_abc", "expires_at": "2099-01-01T00:00:00Z"}, status_code=201,
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/macrozheng/mall-swarm",
+        json={"default_branch": "master"},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/macrozheng/mall-swarm/branches?per_page=100&page=1",
+        json=[{"name": "master"}, {"name": "dev"}],
+    )
+    bl = await provider.list_branches(12345, "macrozheng/mall-swarm")
+    assert bl.default_branch == "master"
+    assert set(bl.branches) == {"master", "dev"}
