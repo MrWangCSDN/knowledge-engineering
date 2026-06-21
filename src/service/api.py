@@ -26,6 +26,9 @@ from src.service.project_router import router as project_router
 from src.service.qa_router import router as qa_router
 from src.service.code_router import router as code_router   # 代码片段查看端点（GET /projects/{pid}/code-snippet）
 from src.service.audit_router import router as audit_router  # v2.0 Task 11：审计日志查询路由
+from src.service.db import get_db  # 异步 DB session 依赖，供 scm_router 注入
+from src.service.scm_router import create_scm_routes
+from src.service.scm.provider_factory import get_github_provider
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
 try:
@@ -87,6 +90,9 @@ app.include_router(group_router)        # v2.0：Groups CRUD（/groups/*）
 app.include_router(project_member_router)  # v2.0：Project Members CRUD（/projects/{pid}/members/*）
 app.include_router(user_router)            # v2.0：User Management CRUD（/admin/users/*）
 app.include_router(audit_router)           # v2.0 Task 11：审计日志查询（/admin/audit-logs + /groups/{gid}/audit-logs）
+app.include_router(create_scm_routes(
+    get_current_user=get_current_user, get_db=get_db, get_provider=get_github_provider,
+))  # P3：SCM onboarding（GET /scm/github/install-url）
 
 
 @app.on_event("startup")
