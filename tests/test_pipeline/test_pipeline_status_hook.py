@@ -45,7 +45,8 @@ def test_hook_writes_partial_after_semantic_and_ready_after_finalize(monkeypatch
     )
     # session maker 工厂也拦截：避免真实建库连接，返回一个占位对象即可
     monkeypatch.setattr(orch, "get_session_maker", lambda: object())
-    # finalize 段的 ready 富化会查 Weaviate，拦截返回假计数（避免触达真实 Weaviate）
+    # finalize 段的状态富化会查 Weaviate，拦截返回假计数（避免触达真实 Weaviate）
+    # done==total（1/1=100%）→ finalize 判 ready，下方 ready 断言成立
     monkeypatch.setattr(
         orch,
         "get_interpretation_progress_from_weaviate",
@@ -75,6 +76,49 @@ def test_hook_writes_partial_after_semantic_and_ready_after_finalize(monkeypatch
     assert ("mall-swarm", "partial") in calls
     # finalize 后写过 ready
     assert ("mall-swarm", "ready") in calls
+
+
+def test_finalize_partial_coverage_writes_partial_not_ready(monkeypatch):
+    """finalize 时解读覆盖率未满 100% → 写 partial 不写 ready。
+
+    解读可能被门控跳过/部分完成（done<total），此时结构+语义虽完成，
+    但解读未满，finalize 应判 partial 而非硬编码 ready，
+    与 backfill 的 decide_status（同样判 partial）保持一致。
+    """
+    # calls 收集每次 writer 调用的 (project_id, status)
+    calls = []
+    # 拦截 DB 写入：换成只追加到 calls 的 lambda
+    monkeypatch.setattr(
+        orch,
+        "update_project_status_sync",
+        lambda sm, pid, status, **kw: calls.append((pid, status)),
+    )
+    # 拦截 session maker，避免真实建库连接
+    monkeypatch.setattr(orch, "get_session_maker", lambda: object())
+    # 解读进度 80/100=80% 未满 → finalize 应判 partial
+    monkeypatch.setattr(
+        orch,
+        "get_interpretation_progress_from_weaviate",
+        lambda *a, **k: {"tech": {"done": 80, "total": 100}},
+    )
+    # stub 段表：semantic 先写 partial，finalize 返回非 None 触发状态置位
+    monkeypatch.setattr(
+        orch,
+        "FULL_PIPELINE_SEGMENT_RUNNERS",
+        [
+            ("semantic", lambda scope: None),
+            ("finalize", lambda scope: {"ok": True}),
+        ],
+    )
+
+    # 构造带 project_id 的 stub scope 并执行编排
+    scope = _StubScope(project_id="mall-swarm")
+    orch.execute_full_pipeline_table(scope)
+
+    # finalize 80% 未满 → 写 partial
+    assert ("mall-swarm", "partial") in calls
+    # 未满 100% → 不写 ready
+    assert ("mall-swarm", "ready") not in calls
 
 
 def test_hook_skipped_when_no_project_id(monkeypatch):

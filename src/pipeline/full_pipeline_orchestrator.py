@@ -249,6 +249,9 @@ def execute_full_pipeline_table(scope: FullPipelineScope) -> dict[str, Any]:
     - scope.project_id 为空时全程跳过，纯 CLI 跑零副作用
     """
     # getattr 安全取 project_id（即使 scope 不是标准 FullPipelineScope 也不报错）
+    # 注：FullPipelineScope.__post_init__ 会把空 project_id 兜底成 "default"，故生产下 pid 几乎不为空。
+    # 真正的"无副作用"保障来自 update_project_status 对不存在 project 行的 no-op，而非此处守卫。
+    # 此处守卫只是 best-effort：pid 真为空（非标准 scope）时连 session maker 都不建。
     pid = getattr(scope, "project_id", None)
     # 只有需要回写时才构建 session maker，避免无 project_id 场景建库连接
     sm = get_session_maker() if pid else None
@@ -271,21 +274,28 @@ def execute_full_pipeline_table(scope: FullPipelineScope) -> dict[str, Any]:
                 # finalize 段产出最终结果时回写 ready，并富化统计
                 if seg_id == "finalize":
                     # 统计富化可能触达 Weaviate/磁盘；用 try/except 降级：
-                    # 即便拿不到统计，也要把 status 置 ready，不因统计失败中断流水线
+                    # 即便拿不到统计，也要把 status 置位，不因统计失败中断流水线
                     try:
                         prog = get_interpretation_progress_from_weaviate(scope.config_path)
+                        pct = interpretation_percent(prog)
+                        # 结构+语义既已完成 ⟹ 至少 partial（绝不会回退到 indexing）；
+                        # 解读覆盖率 100% 才置 ready，否则 partial（解读可能被门控跳过/部分完成）。
+                        # 与 backfill 的 decide_status 在 total>0 正常情形下一致（满→ready / 未满→partial）；
+                        # 二者仅在"无任何数据"时分歧（backfill 更保守判 indexing，因它没有"刚跑完一轮"信号）。
+                        final_status = "ready" if pct >= 100 else "partial"
                         _mark(
-                            "ready",
+                            final_status,
                             methods_count=methods_total(prog),
-                            interpretation_progress=interpretation_percent(prog),
+                            interpretation_progress=pct,
                             set_pipeline_at=True,
                         )
-                    except Exception as e:  # noqa: BLE001 — 统计失败不应阻断 ready 回写
+                    except Exception as e:  # noqa: BLE001 — 统计失败不应阻断状态置位
                         _LOG.warning(
-                            "ready 统计富化失败（已降级为仅置 ready）: %s: %s",
+                            "finalize 统计富化失败（已降级为仅置 ready）: %s: %s",
                             type(e).__name__,
                             e,
                         )
+                        # 统计拿不到：pipeline 已完整跑完一轮，降级按 ready 置位
                         _mark("ready", set_pipeline_at=True)
                 return out
         raise RuntimeError("流水线编排异常：所有段执行完毕但未返回结果")
