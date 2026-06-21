@@ -45,14 +45,29 @@ def build_indexer_for_job(maker: async_sessionmaker, *, provider, repos_root: st
                 # raise RuntimeError 抛出运行时异常，f-string 是 Python 格式化字符串语法
                 raise RuntimeError(f"工程 {p.id} 未绑定 SCM 连接")
 
-            # 查询对应的 ScmConnection 记录，取出 GitHub App installation_id
+            # 查询对应的 ScmConnection 记录；用 scalar_one_or_none() 代替 scalar_one()
+            # 这样当连接行不存在时得到 None，而不是 SQLAlchemy 抛出难以理解的 NoResultFound
             conn = (await s.execute(
                 select(ScmConnection).where(ScmConnection.id == p.scm_connection_id)
-            )).scalar_one()
+            )).scalar_one_or_none()
+
+            # 连接行不存在（如被删除后 FK 未及时置空的时间窗口）→ 给出可读的错误信息
+            if conn is None:
+                raise RuntimeError(
+                    f"工程 {p.id} 绑定的 SCM 连接 {p.scm_connection_id} 不存在（可能已被删除）"
+                )
 
             # 从数据库对象提取 clone 所需的参数，赋给局部变量后会话即可关闭
             installation_id = conn.github_installation_id  # GitHub App 安装 ID（整数）
             full_name, ref, subpath = p.repo_full_name, p.ref, p.subpath  # 仓库全名/分支/子路径
+
+            # PAT 类型连接的 github_installation_id 为 None；传 None 进 App clone 路径会触发
+            # 难以定位的 TypeError。在会话块内尽早检查，给出清晰的运维可读错误
+            if installation_id is None:
+                raise RuntimeError(
+                    f"工程 {p.id} 绑定的连接 {conn.id} 不是 GitHub App 类型"
+                    "（github_installation_id 为空），当前 worker 仅支持 GitHub App 安装"
+                )
 
         # make_real_indexer 返回一个 IndexerFn（闭包），把 clone 参数预绑定进去
         # 这里用关键字参数（keyword-only）显式传入所有配置，提高可读性
