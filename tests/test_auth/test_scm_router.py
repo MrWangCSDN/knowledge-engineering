@@ -88,3 +88,40 @@ async def test_list_and_delete_connections(maker):
     assert any(x["id"] == "c1" for x in r.json()["connections"])
     assert c.delete("/scm/connections/c1").status_code == 204
     assert all(x["id"] != "c1" for x in c.get("/scm/connections").json()["connections"])
+
+
+@pytest.mark.asyncio
+async def test_delete_connection_forbidden_for_non_owner(maker):
+    """非拥有者、非管理员用户尝试删除他人连接，应得到 403，且连接不被删除。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.service.db_models_homepage import ScmConnection
+
+    # bob 不是 admin，也不是 alice 创建的连接的拥有者
+    class _Bob:
+        username = "bob"; is_admin = False
+
+    # 先插入一条 alice 创建的连接
+    async with maker() as s:
+        s.add(ScmConnection(id="c1", provider="github", auth_type="github_app",
+                            github_installation_id=1, account_login="o", status="active", created_by="alice"))
+        await s.commit()
+
+    # 构造一个使用 bob 身份的独立 app
+    app = FastAPI()
+    async def _get_db():
+        async with maker() as s:
+            yield s
+    app.include_router(create_scm_routes(
+        get_current_user=lambda: _Bob(), get_db=_get_db,
+        get_provider=lambda: _FakeProvider(), app_slug="ke-test-app",
+    ))
+    c = TestClient(app)
+
+    # bob 尝试删除 c1，应返回 403
+    assert c.delete("/scm/connections/c1").status_code == 403
+
+    # 确认连接仍在 DB 中（bob 无权删除）
+    async with maker() as s:
+        row = (await s.execute(select(ScmConnection).where(ScmConnection.id == "c1"))).scalar_one_or_none()
+        assert row is not None, "连接不应被无权限用户删除"

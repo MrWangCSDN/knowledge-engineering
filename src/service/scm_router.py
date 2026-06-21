@@ -59,7 +59,10 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
         conn = await db.get(ScmConnection, connection_id)
         if conn is None:
             raise HTTPException(status_code=404, detail="连接不存在")
-        if conn.created_by != getattr(user, "username", None) and not getattr(user, "is_admin", False):
+        # 先取调用者用户名；若本身为 None，视为"无主"——永远不能匹配任何 owner
+        owner = getattr(user, "username", None)
+        # owner is None 时直接拒绝，防止 conn.created_by=NULL 与 None==None 比较通过形成绕过
+        if (owner is None or conn.created_by != owner) and not getattr(user, "is_admin", False):
             raise HTTPException(status_code=403, detail="无权删除该连接")
         await db.delete(conn)
         await db.commit()
