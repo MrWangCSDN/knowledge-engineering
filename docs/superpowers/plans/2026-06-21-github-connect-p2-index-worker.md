@@ -774,3 +774,6 @@ git commit -m "feat(indexing): ke-indexer worker 循环 + 入口 + systemd 单�
 - P3 连接 API：webhook/手动触发 → `enqueue_index_job`；并在 `src/service/indexer.py::_main` 接通"job→project→scm_connection→GitHubAppProvider+installation"装配，启用真实 worker。
 - 生产 MySQL：`claim_next_job` 子查询加 `FOR UPDATE SKIP LOCKED` 提并发（注释已标）。
 - 进度细化：pipeline 内部阶段回传（当前 real_indexer 粗粒度上报）。
+- **卡死作业回收 reaper（P2 终审提出，建议进 P3）**：worker 进程中途死亡时作业卡在非终态（cloning 等）永不重排——`attempts`/`MAX_ATTEMPTS` 只防 indexer 异常、不防 worker 死亡。加一个扫描：把非终态、`started_at` 超过租约超时的作业重排 queued（`started_at` 已在认领时记录，数据齐备）。
+- **requeue 清理（minor）**：失败重排回 `QUEUED` 时清掉 `worker_id`/`started_at`（当前残留上次认领值，仅观测性问题，不影响正确性）。
+- **常量一致性（minor）**：`queue.py` 去重用字面量 `["done","failed"]`，应改用 `states.DONE/FAILED`。
