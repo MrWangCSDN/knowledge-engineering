@@ -149,3 +149,33 @@ async def test_list_repos_and_branches(maker):
     assert repos[0]["external_id"] == 42 and repos[0]["full_name"] == "o/r"
     br = c.get("/scm/connections/c1/repos/o%2Fr/branches").json()
     assert br["default_branch"] == "master" and "dev" in br["branches"]
+
+
+@pytest.mark.asyncio
+async def test_list_repos_forbidden_for_non_owner(maker):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.service.db_models_homepage import ScmConnection
+
+    # bob 不是 admin，也不是 alice 创建的连接的拥有者
+    class _Bob:
+        username = "bob"; is_admin = False
+
+    # 先插入一条 alice 创建的连接
+    async with maker() as s:
+        s.add(ScmConnection(id="c1", provider="github", auth_type="github_app",
+                            github_installation_id=7, account_login="o", status="active", created_by="alice"))
+        await s.commit()
+
+    # 构造一个使用 bob 身份的独立 app
+    app = FastAPI()
+    async def _get_db():
+        async with maker() as s:
+            yield s
+    app.include_router(create_scm_routes(
+        get_current_user=lambda: _Bob(), get_db=_get_db,
+        get_provider=lambda: _FakeProvider2(), app_slug="ke-test-app",
+    ))
+    c = TestClient(app)
+    # bob 尝试访问 alice 的连接，应返回 403
+    assert c.get("/scm/connections/c1/repos").status_code == 403

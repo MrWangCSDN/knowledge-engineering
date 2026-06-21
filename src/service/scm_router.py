@@ -74,8 +74,10 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
         # 连接不存在时返回 404
         if conn is None:
             raise HTTPException(status_code=404, detail="连接不存在")
-        # 非拥有者且非管理员时返回 403
-        if conn.created_by != getattr(user, "username", None) and not getattr(user, "is_admin", False):
+        # 先取调用者用户名；username 为 None 时视为"无主"，直接拒绝，防 NULL==NULL 绕过
+        owner = getattr(user, "username", None)
+        # owner is None 时直接拒绝，防止 conn.created_by=NULL 与 None==None 比较通过形成绕过
+        if (owner is None or conn.created_by != owner) and not getattr(user, "is_admin", False):
             raise HTTPException(status_code=403, detail="无权访问该连接")
         return conn
 
@@ -84,6 +86,9 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
         """列出指定连接下 GitHub App 可见的仓库（installation 级别，不做成员过滤，P4 再加）。"""
         # 校验连接归属
         conn = await _load_conn(connection_id, user, db)
+        # PAT 类型连接的 github_installation_id 为 NULL，无法调用 App 级接口，提前拦截
+        if conn.github_installation_id is None:
+            raise HTTPException(status_code=422, detail="该连接不支持 GitHub App 操作")
         # 调用 P1 provider 的 list_repos，返回 RepoInfo 列表
         repos = await get_provider().list_repos(conn.github_installation_id)
         # 将 dataclass 字段转为普通 dict 返回给前端
@@ -98,6 +103,9 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
         """列出指定仓库的分支列表。{full_name:path} 允许 owner/repo 中包含斜杠。"""
         # 校验连接归属
         conn = await _load_conn(connection_id, user, db)
+        # PAT 类型连接的 github_installation_id 为 NULL，无法调用 App 级接口，提前拦截
+        if conn.github_installation_id is None:
+            raise HTTPException(status_code=422, detail="该连接不支持 GitHub App 操作")
         # 调用 P1 provider 的 list_branches，返回 BranchList(default_branch, branches)
         bl = await get_provider().list_branches(conn.github_installation_id, full_name)
         return {"default_branch": bl.default_branch, "branches": bl.branches}
