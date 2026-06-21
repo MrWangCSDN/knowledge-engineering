@@ -28,6 +28,7 @@ from src.service.code_router import router as code_router   # 代码片段查看
 from src.service.audit_router import router as audit_router  # v2.0 Task 11：审计日志查询路由
 from src.service.db import get_db  # 异步 DB session 依赖，供 scm_router 注入
 from src.service.scm_router import create_scm_routes
+from src.service.scm_binding_router import create_scm_binding_routes
 from src.service.scm.provider_factory import get_github_provider
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
@@ -93,6 +94,7 @@ app.include_router(audit_router)           # v2.0 Task 11：审计日志查询�
 app.include_router(create_scm_routes(
     get_current_user=get_current_user, get_db=get_db, get_provider=get_github_provider,
 ))  # P3：SCM onboarding（GET /scm/github/install-url）
+app.include_router(create_scm_binding_routes(get_current_user=get_current_user, get_db=get_db))  # P3：工程绑定 + 索引触发
 
 
 @app.on_event("startup")
