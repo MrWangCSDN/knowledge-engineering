@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -30,6 +31,7 @@ from src.service.db import get_db  # 异步 DB session 依赖，供 scm_router �
 from src.service.scm_router import create_scm_routes
 from src.service.scm_binding_router import create_scm_binding_routes
 from src.service.scm.provider_factory import get_github_provider
+from src.service.webhook_router import create_webhook_routes
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
 try:
@@ -95,6 +97,7 @@ app.include_router(create_scm_routes(
     get_current_user=get_current_user, get_db=get_db, get_provider=get_github_provider,
 ))  # P3：SCM onboarding（GET /scm/github/install-url）
 app.include_router(create_scm_binding_routes(get_current_user=get_current_user, get_db=get_db))  # P3：工程绑定 + 索引触发
+app.include_router(create_webhook_routes(get_db=get_db, webhook_secret=os.getenv("KE_GH_WEBHOOK_SECRET", "")))  # P3：GitHub webhook（HMAC 鉴权，不挂 auth）
 
 
 @app.on_event("startup")
