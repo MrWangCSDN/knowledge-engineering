@@ -146,3 +146,49 @@ def test_hook_writes_failed_on_exception(monkeypatch):
 
     # 异常前写过 failed
     assert ("mall-swarm", "failed") in calls
+
+
+def test_semantic_early_return_writes_partial_not_ready(monkeypatch):
+    """until='semantic' 路径：semantic 段返回非 None → 写 partial 但不写 ready。
+
+    验证编排循环在 semantic 段提前结束时：
+    - partial 已由 seg_id=='semantic' 守卫写出（骨架就绪）
+    - 循环因 runner 返回非 None 而 break，finalize 段未执行 → 不写 ready
+    """
+    # calls 收集每次 writer 调用的 (project_id, status)
+    calls = []
+
+    # 拦截 DB 写入：换成只追加到 calls 的 lambda
+    monkeypatch.setattr(
+        orch,
+        "update_project_status_sync",
+        lambda sm, pid, status, **kw: calls.append((pid, status)),
+    )
+    # 拦截 session maker，避免真实建库连接
+    monkeypatch.setattr(orch, "get_session_maker", lambda: object())
+    # 拦截 Weaviate 进度查询（finalize 路径才用到，这里不应到达；仍拦截避免意外触达）
+    monkeypatch.setattr(
+        orch,
+        "get_interpretation_progress_from_weaviate",
+        lambda *a, **k: {"tech": {"done": 1, "total": 1}},
+    )
+    # stub 段表：semantic 返回非 None，模拟 until="semantic" 提前退出
+    # finalize lambda 不应被调用（loop 在 semantic 处 break）
+    monkeypatch.setattr(
+        orch,
+        "FULL_PIPELINE_SEGMENT_RUNNERS",
+        [
+            ("structure", lambda scope: None),
+            ("semantic", lambda scope: {"stage": "semantic"}),  # 提前返回 → loop break
+            ("finalize", lambda scope: {"ok": True}),           # 不应到达
+        ],
+    )
+
+    # 构造带 project_id 的 stub scope 并执行编排
+    scope = _StubScope(project_id="mall-swarm")
+    orch.execute_full_pipeline_table(scope)
+
+    # semantic 段守卫已写 partial（骨架就绪，状态有效）
+    assert ("mall-swarm", "partial") in calls
+    # finalize 未执行 → 不应写 ready
+    assert ("mall-swarm", "ready") not in calls
