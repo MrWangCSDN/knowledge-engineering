@@ -160,3 +160,18 @@ async def test_callback_fail_closed_on_enc_failure(maker, monkeypatch):  # B5
     async with maker() as s:
         from src.service.db_models_homepage import UserScmToken
         assert (await s.execute(select(UserScmToken))).scalars().first() is None  # 未写 token（回滚）
+
+
+@pytest.mark.asyncio
+async def test_callback_locked_423(maker, monkeypatch):
+    monkeypatch.setenv("KE_JWT_SECRET", "x" * 32)
+    async with maker() as s:
+        s.add(User(email="l@x.com", username="lock", hashed_password="h",
+                   is_active=True, github_user_id=42,
+                   locked_until=datetime(2099, 12, 31, tzinfo=timezone.utc)))
+        await s.commit()
+    c = TestClient(_app(maker), follow_redirects=False)
+    r0 = c.get("/auth/github/login")
+    state = r0.headers["location"].split("state=")[1]
+    r = c.get("/auth/github/callback", params={"code": "c", "state": state})
+    assert r.status_code == 423

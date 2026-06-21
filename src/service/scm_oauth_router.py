@@ -126,8 +126,12 @@ def create_scm_oauth_routes(*, get_current_user: Callable, get_db: Callable,
                     detail="该 SCM 身份未关联任何 KE 账号，请先登录并在设置里关联")
             if not user.is_active:
                 raise HTTPException(status_code=403, detail="账号已停用")
-            if user.locked_until and user.locked_until > datetime.now(timezone.utc):
-                raise HTTPException(status_code=423, detail="账号已锁定")
+            lu = user.locked_until
+            if lu is not None:
+                if lu.tzinfo is None:
+                    lu = lu.replace(tzinfo=timezone.utc)
+                if lu > datetime.now(timezone.utc):
+                    raise HTTPException(status_code=423, detail="账号已锁定")
             # B5 fail-closed：先写 token（加密失败→抛→get_db 不 commit→整事务回滚，
             # 不下发 cookie、不签 access），再签 JWT、再建带 cookie 的响应。顺序即保证。
             # 捕获加密/存储异常并转为 HTTPException(500) 使 FastAPI 正常返回 5xx 响应
