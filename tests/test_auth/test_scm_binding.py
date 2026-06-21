@@ -24,7 +24,11 @@ def _app(maker):
     async def _get_db():
         async with maker() as s:
             yield s
-    app.include_router(create_scm_binding_routes(get_current_user=lambda: _User(), get_db=_get_db))
+    # 单测聚焦绑定逻辑本身，RBAC 用 no-op 注入旁路；真实 RBAC 见 test_scm_binding_rbac.py
+    app.include_router(create_scm_binding_routes(
+        get_current_user=lambda: _User(), get_db=_get_db,
+        require_role=lambda role: (lambda: None),  # no-op：任何 role 都直接放行
+    ))
     return app
 
 
