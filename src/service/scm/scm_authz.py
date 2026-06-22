@@ -66,3 +66,22 @@ def create_authorize_scm(*, oauth_cfg, get_login_provider: Callable, scm_timeout
             raise HTTPException(status_code=502, detail="SCM 权限校验失败，请重试")
         return role
     return authorize_scm
+
+
+async def resolve_caller_token(db, *, user, provider, oauth_cfg, get_login_provider):
+    """造 provider + 取调用者明文 user-token。异常→HTTPException(503/403/502)。"""
+    try:
+        prov = get_login_provider(provider, oauth_cfg)
+    except OAuthProviderUnavailable:
+        raise HTTPException(status_code=503, detail=f"{provider} 未配置")
+    refresh_fn = build_refresh_fn(
+        provider,
+        gitlab_provider=prov if provider == "gitlab" else None,
+        oauth_cfg=oauth_cfg)
+    try:
+        token = await get_valid_scm_token(db, user_id=user.id, provider=provider, refresh_fn=refresh_fn)
+    except ScmTokenInvalid:
+        raise HTTPException(status_code=403, detail="请先关联 SCM 账号")
+    except (httpx.HTTPError, RuntimeError):
+        raise HTTPException(status_code=502, detail="SCM 授权刷新失败，请重试")
+    return prov, token

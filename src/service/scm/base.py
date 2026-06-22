@@ -24,6 +24,12 @@ class RepoInfo:
 
 
 @dataclass(frozen=True)
+class VisibleRepo:
+    repo: RepoInfo
+    role: ScmRole        # CAN_BIND / CAN_QUERY（NOT_VISIBLE 在 provider 内已滤）
+
+
+@dataclass(frozen=True)
 class BranchList:
     default_branch: str
     branches: list[str] = field(default_factory=list)
