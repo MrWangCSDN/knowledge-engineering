@@ -33,6 +33,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -204,6 +205,46 @@ class ScmConnection(Base):
     )
 
 
+class UserScmToken(Base):
+    """per-user SCM OAuth/OIDC token（Fernet 加密落库）。设计 §5。"""
+    __tablename__ = "user_scm_token"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)        # github | gitlab
+    access_token: Mapped[str] = mapped_column(Text, nullable=False)          # Fernet 密文
+    refresh_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Fernet 密文
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    scopes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)       # Text 防长 scope 截断
+    scm_login: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # 展示，每次 upsert 刷新
+    linked_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)    # 首次关联一次，复写不 bump
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("(CURRENT_TIMESTAMP)"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("(CURRENT_TIMESTAMP)"), nullable=False
+    )
+    __table_args__ = (UniqueConstraint("user_id", "provider", name="uq_user_scm_token_user_provider"),)
+
+
+class OAuthState(Base):
+    """OAuth/OIDC 授权码流的 state/nonce（服务端一次性消费 + CSRF cookie 绑定）。设计 §6。"""
+    __tablename__ = "oauth_state"
+
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)  # sha256(state)
+    csrf_hash: Mapped[str] = mapped_column(String(64), nullable=False)     # sha256(ke_oauth_csrf cookie)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)       # login | link
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True) # link 发起者
+    nonce: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("(CURRENT_TIMESTAMP)"), nullable=False
+    )
+
+
 class IndexJob(Base):
     """索引作业队列（设计 §5.3/§9）。worker 原子认领 queued → 逐阶段更新 → done/failed。"""
     __tablename__ = "index_jobs"
@@ -226,6 +267,7 @@ class IndexJob(Base):
     )
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_expires: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 # ─── 2. user_project_access ──────────────────────────────────────────────────

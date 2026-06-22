@@ -6,39 +6,219 @@ import secrets
 import uuid
 from typing import Callable, Optional
 
-from fastapi import APIRouter, Depends
+import httpx
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
+from sqlalchemy import select
 
-from src.service.db_models_homepage import ScmConnection
+from src.service.db_models_homepage import ScmConnection, UserScmToken, Project
+# cache_invalidate：连接删除时清除该连接的全部权限缓存项，防止已删连接继续放行 QA 门
+from src.service.scm.scm_perm_cache import cache_invalidate
+from src.service.scm.scm_authz import flag_on, resolve_caller_token
+from src.service.scm.base import ScmRole
+from src.service.scm.oauth_state_store import mint_state, consume_state
+from src.service.scm.scm_token_store import get_valid_scm_token, ScmTokenInvalid
+from src.service.scm.scm_refresh import build_refresh_fn
+from src.service.scm.oauth_factory import OAuthProviderUnavailable
+
+# install-url 与 callback 共用，防 purpose typo 静默 400
+_INSTALL_PURPOSE = "install"
 
 
 def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
-                      get_provider: Callable, app_slug: Optional[str] = None) -> APIRouter:
+                      get_provider: Callable, app_slug: Optional[str] = None,
+                      oauth_cfg=None, get_login_provider: Optional[Callable] = None) -> APIRouter:
     router = APIRouter(prefix="/scm", tags=["scm"])
     slug = app_slug or os.getenv("KE_GH_APP_SLUG", "")
 
     @router.get("/github/install-url")
-    async def install_url(user=Depends(get_current_user)) -> dict:
-        """返回 GitHub App 安装 URL + 防 CSRF state（前端跳转后回带）。"""
-        state = secrets.token_urlsafe(24)
+    async def install_url(response: Response, user=Depends(get_current_user),
+                          db=Depends(get_db)) -> dict:
+        """返回 GitHub App 安装 URL + 真 state（CSRF 绑定）。A 早拦：未关联 GitHub → 403。"""
+        # A 早拦（UX 轻量存在性查；真核验在 callback）：无 github 关联 → 403 引导先关联
+        row = (await db.execute(select(UserScmToken).where(
+            UserScmToken.user_id == user.id, UserScmToken.provider == "github"
+        ))).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=403, detail="请先关联 GitHub 账号，再安装应用")
+        minted = await mint_state(db, provider="github", purpose=_INSTALL_PURPOSE,
+                                  user_id=user.id, with_nonce=False, ttl_seconds=1800)
+        # mint_state 仅 flush；不显式 commit——由 get_db 末尾 commit 持久化 state
+        response.set_cookie(
+            key="ke_oauth_csrf", value=minted.csrf, httponly=True,
+            secure=os.getenv("KE_COOKIE_SECURE", "true").lower() == "true",
+            samesite="lax", path="/", max_age=1800,
+        )
         return {
-            "install_url": f"https://github.com/apps/{slug}/installations/new?state={state}",
-            "state": state,
+            "install_url": f"https://github.com/apps/{slug}/installations/new?state={minted.state}",
+            "state": minted.state,
         }
 
     @router.get("/github/callback")
     async def callback(installation_id: int, state: str = "", user=Depends(get_current_user),
-                       db=Depends(get_db)) -> dict:
-        """GitHub App 安装回调：建 scm_connection。
-        TODO(P4)：用用户 OAuth user-to-server token 核实该 installation 确属当前用户（防伪造）。"""
-        provider = get_provider()
-        login = await provider.get_account_login(installation_id)
+                       db=Depends(get_db),
+                       ke_oauth_csrf: Optional[str] = Cookie(default=None)) -> dict:
+        """GitHub App 安装回调：先核验该 installation 确属调用者，再建 scm_connection。"""
+        # 1) 消费 state（CSRF 绑定、原子单用）；purpose/user_id 必须匹配
+        #    单用 / refuse-before-write 语义依赖 get_db 在 HTTPException 时回滚：consume_state 立即删 state 行，
+        #    任一 guard 抛错→get_db rollback 撤销该 DELETE→同一 state 可重试；仅成功 commit 时 state 才真正被消费。
+        #    若将来改 get_db 为 finally-commit 或吞异常，此语义会静默失效。
+        st = await consume_state(db, state=state, csrf=ke_oauth_csrf)
+        if st is None or st.purpose != _INSTALL_PURPOSE or st.user_id != user.id:
+            raise HTTPException(status_code=400, detail="state 校验失败")
+        # 2) 取调用者 user-to-server token（真核验前提）
+        try:
+            prov = get_login_provider("github", oauth_cfg)
+        except OAuthProviderUnavailable:
+            raise HTTPException(status_code=503, detail="github 未配置")
+        refresh_fn = build_refresh_fn("github", oauth_cfg=oauth_cfg)
+        try:
+            token = await get_valid_scm_token(db, user_id=user.id, provider="github",
+                                              refresh_fn=refresh_fn)
+        except ScmTokenInvalid:
+            raise HTTPException(status_code=403, detail="请先关联 GitHub 账号")
+        except (httpx.HTTPError, RuntimeError):
+            raise HTTPException(status_code=502, detail="SCM 授权刷新失败，请重试")
+        # 3) 核 installation 归属（用户可见即可绑）
+        try:
+            installs = await prov.list_user_installations(user_token=token)
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="校验安装归属失败，请重试")
+        if installation_id not in installs:
+            raise HTTPException(status_code=403, detail="该安装不属于当前用户")
+        # 4) 通过 → 才写连接
+        if getattr(user, "username", None) is None:
+            raise HTTPException(status_code=403, detail="无效用户")
+        try:
+            login = await prov.get_account_login(installation_id)
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="获取安装账号信息失败，请重试")
+        if not login:                           # 空 login（GitHub 响应缺 account.login）视为上游异常，fail-closed 不写脏行
+            raise HTTPException(status_code=502, detail="获取安装账号信息失败，请重试")
         conn = ScmConnection(
             id=f"conn-{uuid.uuid4().hex[:16]}", provider="github", auth_type="github_app",
-            github_installation_id=installation_id, account_login=login, status="active",
-            created_by=getattr(user, "username", None),
+            github_installation_id=installation_id, account_login=login,
+            status="active", created_by=user.username,
         )
         db.add(conn)
         await db.commit()
         return {"connection_id": conn.id, "account_login": login}
+
+    @router.get("/connections")
+    async def list_connections(user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        """列出当前用户的所有 SCM 连接。"""
+        rows = (await db.execute(
+            select(ScmConnection).where(ScmConnection.created_by == getattr(user, "username", None))
+        )).scalars().all()
+        return {"connections": [
+            {"id": r.id, "provider": r.provider, "auth_type": r.auth_type,
+             "account_login": r.account_login, "status": r.status} for r in rows
+        ]}
+
+    @router.delete("/connections/{connection_id}", status_code=204)
+    async def delete_connection(connection_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+        """删除指定 SCM 连接（仅创建者或管理员可操作）。"""
+        conn = await db.get(ScmConnection, connection_id)
+        if conn is None:
+            raise HTTPException(status_code=404, detail="连接不存在")
+        # 先取调用者用户名；若本身为 None，视为"无主"——永远不能匹配任何 owner
+        owner = getattr(user, "username", None)
+        # owner is None 时直接拒绝，防止 conn.created_by=NULL 与 None==None 比较通过形成绕过
+        if (owner is None or conn.created_by != owner) and not getattr(user, "is_admin", False):
+            raise HTTPException(status_code=403, detail="无权删除该连接")
+        await db.delete(conn)
+        await db.commit()
+        # best-effort：清除该连接的全部 can_query 权限缓存项
+        # try/except：cache_invalidate 是纯内存操作，通常不会抛，但防御性包裹确保缓存清理
+        # 绝不让缓存清理的异常让删除请求返回 500（BLE001：允许捕获宽泛 Exception）
+        try:
+            cache_invalidate(connection_id)      # best-effort：清该连接 can_query 缓存
+        except Exception:                        # noqa: BLE001 — 不让缓存清理 500 掉删除
+            pass
+        return Response(status_code=204)
+
+    async def _load_conn(connection_id: str, user, db) -> "ScmConnection":
+        """按 ID 加载连接，校验存在性与归属权（owner 或 admin 才可访问）。"""
+        conn = await db.get(ScmConnection, connection_id)
+        # 连接不存在时返回 404
+        if conn is None:
+            raise HTTPException(status_code=404, detail="连接不存在")
+        # 先取调用者用户名；username 为 None 时视为"无主"，直接拒绝，防 NULL==NULL 绕过
+        owner = getattr(user, "username", None)
+        # owner is None 时直接拒绝，防止 conn.created_by=NULL 与 None==None 比较通过形成绕过
+        if (owner is None or conn.created_by != owner) and not getattr(user, "is_admin", False):
+            raise HTTPException(status_code=403, detail="无权访问该连接")
+        return conn
+
+    @router.get("/connections/{connection_id}/repos")
+    async def list_repos(connection_id: str, user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        """列出指定连接下 GitHub App 可见的仓库（installation 级别，不做成员过滤，P4 再加）。"""
+        # 校验连接归属
+        conn = await _load_conn(connection_id, user, db)
+        # PAT 类型连接的 github_installation_id 为 NULL，无法调用 App 级接口，提前拦截
+        if conn.github_installation_id is None:
+            raise HTTPException(status_code=422, detail="该连接不支持 GitHub App 操作")
+        # 调用 P1 provider 的 list_repos，返回 RepoInfo 列表
+        repos = await get_provider().list_repos(conn.github_installation_id)
+        # 将 dataclass 字段转为普通 dict 返回给前端
+        return {"repos": [
+            {"external_id": r.external_id, "full_name": r.full_name,
+             "default_branch": r.default_branch, "private": r.private} for r in repos
+        ]}
+
+    @router.get("/connections/{connection_id}/visible-repos")
+    async def visible_repos(connection_id: str, q: str = "",
+                            user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        """列调用者在该连接 SCM 上可见/可绑的仓 + KE 已绑标注（onboarding 选仓）。kill-switch 默认关。"""
+        if not flag_on("KE_SCM_VISIBLE_REPOS"):
+            raise HTTPException(status_code=404, detail="not found")
+        conn = await _load_conn(connection_id, user, db)
+        if conn.auth_type == "pat":
+            raise HTTPException(status_code=422, detail="PAT 连接不支持可见仓列举")
+        if conn.provider not in ("github", "gitlab"):
+            raise HTTPException(status_code=422, detail="不支持的 provider")
+        prov, token = await resolve_caller_token(
+            db, user=user, provider=conn.provider, oauth_cfg=oauth_cfg, get_login_provider=get_login_provider)
+        try:
+            if conn.provider == "github":
+                if conn.github_installation_id is None:
+                    raise HTTPException(status_code=422, detail="该连接不是 GitHub App 类型")
+                visibles = await prov.list_user_visible_repos(
+                    user_token=token, installation_id=conn.github_installation_id)
+            else:
+                visibles = await prov.list_user_visible_repos(user_token=token)
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="列举可见仓失败，请重试")
+        ext_ids = [v.repo.external_id for v in visibles]
+        bound = {}
+        if ext_ids:
+            rows = (await db.execute(select(Project.id, Project.repo_external_id).where(
+                Project.scm_connection_id == conn.id, Project.repo_external_id.in_(ext_ids)))).all()
+            bound = {r.repo_external_id: r.id for r in rows}
+        ql = q.strip().lower()
+        out = []
+        for v in visibles:
+            if ql and ql not in v.repo.full_name.lower():
+                continue
+            out.append({
+                "external_id": v.repo.external_id, "full_name": v.repo.full_name,
+                "default_branch": v.repo.default_branch, "private": v.repo.private,
+                "scm_role": "can_bind" if v.role == ScmRole.CAN_BIND else "can_query",
+                "bound": v.repo.external_id in bound,
+                "bound_project_id": bound.get(v.repo.external_id),
+            })
+        return {"repos": out}
+
+    @router.get("/connections/{connection_id}/repos/{full_name:path}/branches")
+    async def list_branches(connection_id: str, full_name: str,
+                            user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        """列出指定仓库的分支列表。{full_name:path} 允许 owner/repo 中包含斜杠。"""
+        # 校验连接归属
+        conn = await _load_conn(connection_id, user, db)
+        # PAT 类型连接的 github_installation_id 为 NULL，无法调用 App 级接口，提前拦截
+        if conn.github_installation_id is None:
+            raise HTTPException(status_code=422, detail="该连接不支持 GitHub App 操作")
+        # 调用 P1 provider 的 list_branches，返回 BranchList(default_branch, branches)
+        bl = await get_provider().list_branches(conn.github_installation_id, full_name)
+        return {"default_branch": bl.default_branch, "branches": bl.branches}
 
     return router

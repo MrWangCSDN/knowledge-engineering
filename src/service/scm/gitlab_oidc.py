@@ -1,0 +1,366 @@
+"""GitLab OIDC 登录 provider：discovery + 授权 URL + code 交换 + id_token 完整校验 + 登录身份。设计 §4.2/§6 B3。"""
+# 允许在类型注解里使用 `X | Y` 语法（Python 3.9 兼容写法）
+from __future__ import annotations
+
+# logging：标准库日志模块，用于记录警告（非数字 sub 守卫告警等）
+import logging
+# time：读取当前 Unix 时间戳，用于 exp/iat 校验
+import time
+# Optional：表示"可能为 None"的类型注解
+from typing import Optional
+# urlencode：把 dict 转成 URL query string（如 key=val&key2=val2）
+from urllib.parse import urlencode
+
+# httpx：异步 HTTP 客户端，用于 discovery/JWKS/token exchange 网络请求
+import httpx
+# jjwt：joserfc 的 JWT 模块，提供 encode/decode（验签+claims 读取）
+from joserfc import jwt as jjwt
+# KeySet：JWKS 公钥集合，import_key_set 从 JSON 构建
+from joserfc.jwk import KeySet
+
+# ScmIdentity：登录身份数据类（provider/scm_user_id/login）
+from src.service.scm.base import ScmIdentity
+# GitLabOidcConfig：GitLab OIDC 配置（issuer/client_id/client_secret）
+from src.service.scm.config import GitLabOidcConfig
+
+# 模块级日志器：统一用 "ke.scm.gitlab" 命名空间，方便日志过滤/聚合
+_log = logging.getLogger("ke.scm.gitlab")
+
+# 允许的时钟偏差（秒）：处理服务器时钟不完全同步的场景
+# exp 允许往过去延伸 120s，iat 允许往未来偏移 120s
+_CLOCK_SKEW = 120  # 秒
+
+
+class GitLabOidcProvider:
+    """GitLab OIDC 登录 provider。
+
+    职责链：
+      1. _discovery() → 拉取 OpenID Configuration（缓存在实例上）
+      2. build_authorize_url() → 构造 OAuth 授权跳转 URL
+      3. exchange_code() → 用 authorization_code 换 token（含 id_token）
+      4. _jwks() → 拉取 JWKS 公钥集合
+      5. validate_id_token() → 完整校验 id_token（签名+iss/aud/exp/iat/nonce）
+      6. get_login_identity() → 从已校验 claims 提取登录身份
+    """
+
+    def __init__(self, cfg: GitLabOidcConfig):
+        """初始化，注入配置；_disc 延迟加载（首次调用 _discovery 时拉取）。"""
+        # 保存 OIDC 配置（issuer/client_id/client_secret）
+        self._cfg = cfg
+        # discovery 文档缓存：None 表示尚未拉取；拉取后赋值为 dict，避免重复请求
+        self._disc: Optional[dict] = None
+
+    async def _discovery(self) -> dict:
+        """拉 OIDC discovery 文档（含 authorization/token/jwks 端点 + 支持的 alg）。
+
+        路径：{issuer}/.well-known/openid-configuration（OIDC 标准端点）。
+        首次调用时发 HTTP GET，之后直接返回缓存（同实例生命周期内只拉一次）。
+        """
+        # `is None` 而非 `not self._disc`：防止 discovery 返回空 dict 时误判
+        if self._disc is None:
+            # `async with` + AsyncClient：异步上下文管理器，自动关闭 HTTP 连接
+            async with httpx.AsyncClient(timeout=15) as client:
+                # f-string 拼接 discovery 端点；raise_for_status 遇 4xx/5xx 直接抛异常
+                r = await client.get(f"{self._cfg.issuer}/.well-known/openid-configuration")
+                r.raise_for_status()
+                # r.json()：解析响应体为 Python dict
+                self._disc = r.json()
+        return self._disc
+
+    async def build_authorize_url(self, *, redirect_uri: str, state: str, nonce: str) -> str:
+        """构造 GitLab OIDC 授权跳转 URL。
+
+        Args:
+            redirect_uri: 授权成功后 GitLab 回调的 URL
+            state:        随机不可预测字符串（防 CSRF）
+            nonce:        随机不可预测字符串（防 id_token 重放，写入 id_token claims）
+        Returns:
+            完整授权 URL，前端 redirect 到此地址
+        """
+        # 等待 discovery 拿到 authorization_endpoint
+        disc = await self._discovery()
+        # urlencode：将参数 dict 转为 URL query string（自动 percent-encode 特殊字符）
+        q = urlencode({
+            "response_type": "code",             # 授权码模式（OIDC 标准）
+            "client_id": self._cfg.client_id,    # OAuth App 的 client_id
+            "redirect_uri": redirect_uri,         # 回调地址（必须与 GitLab 配置一致）
+            "scope": "openid profile",            # openid 必选（OIDC）；profile 取 preferred_username
+            "state": state,                       # CSRF 防护令牌
+            "nonce": nonce,                       # id_token 防重放令牌
+        })
+        # 拼接 authorization_endpoint 和 query string
+        return f"{disc['authorization_endpoint']}?{q}"
+
+    async def exchange_code(self, *, code: str, redirect_uri: str) -> dict:
+        """用 authorization_code 换 token（access_token + id_token 等）。
+
+        Args:
+            code:         GitLab 回调携带的 authorization_code（一次性）
+            redirect_uri: 必须与授权请求时完全一致（GitLab 会校验）
+        Returns:
+            token 响应 dict，含 access_token / refresh_token / id_token / expires_in
+        """
+        disc = await self._discovery()
+        async with httpx.AsyncClient(timeout=15) as client:
+            # POST 到 token_endpoint：data= 发送 application/x-www-form-urlencoded
+            r = await client.post(disc["token_endpoint"], data={
+                "grant_type": "authorization_code",  # 固定值，代表授权码换 token
+                "code": code,                        # 从 callback URL 取到的一次性授权码
+                "redirect_uri": redirect_uri,        # 必须与授权请求完全匹配
+                "client_id": self._cfg.client_id,    # App 标识
+                "client_secret": self._cfg.client_secret,  # App 密钥（机密，走 server-side）
+            }, headers={"Accept": "application/json"})
+            r.raise_for_status()
+            # 返回含 id_token 的 token 响应
+            return r.json()
+
+    async def _jwks(self) -> KeySet:
+        """拉取 GitLab JWKS 公钥集合，构建 joserfc KeySet 用于验签。
+
+        Returns:
+            joserfc.jwk.KeySet：可直接传给 jjwt.decode 作为验签密钥集合
+        """
+        disc = await self._discovery()
+        async with httpx.AsyncClient(timeout=15) as client:
+            # jwks_uri 来自 discovery 文档（如 {issuer}/oauth/discovery/keys）
+            r = await client.get(disc["jwks_uri"])
+            r.raise_for_status()
+            # KeySet.import_key_set：把 {"keys": [...]} 格式的 JWKS JSON 转为 KeySet 对象
+            return KeySet.import_key_set(r.json())
+
+    async def validate_id_token(self, id_token: str, *, expected_nonce: Optional[str]) -> dict:
+        """完整校验 id_token：JWKS 验签 + alg 锚定（拒 none/对称）+ iss/aud/azp/exp/iat/nonce。
+
+        校验顺序（任一失败立即 raise）：
+          1. alg allowlist 非空守卫（防 algorithms=[] 绕过验签）
+          2. JWKS 签名验证 + alg 锚定到 discovery 声明的非对称算法集
+          3. iss 精确匹配
+          4. aud 包含 client_id（multi-aud 场景还要求 azp == client_id）
+          5. exp 未过期（含 CLOCK_SKEW）
+          6. iat 存在且未来偏移不超过 CLOCK_SKEW
+          7. nonce 与期望值精确匹配
+
+        Args:
+            id_token:       从 token endpoint 取到的 JWT 字符串
+            expected_nonce: 授权请求时生成的 nonce（None 表示跳过检查，不推荐）
+        Returns:
+            通过全部校验的 claims dict
+        Raises:
+            ValueError:           iss/aud/azp/exp/iat/nonce 校验失败
+            BadSignatureError:    签名验证失败（含 alg=none 抹签名场景）
+            DecodeError / ...:    token 格式非法
+        """
+        disc = await self._discovery()
+
+        # ── 校验 1：alg allowlist 非空守卫 ─────────────────────────────────────
+        # 从 discovery 取支持的签名算法，只保留非对称算法（RS*/ES*/PS*）
+        # 杜绝 HS*（对称，需共享密钥）和 none（无签名）混入
+        allowed = [
+            a for a in disc.get("id_token_signing_alg_values_supported", ["RS256"])
+            if a.startswith(("RS", "ES", "PS"))  # 白名单：仅非对称算法族
+        ]
+        # ⚠️ 关键安全守卫：joserfc 的 decode(..., algorithms=[]) 含义是"不约束算法"
+        # → 等价于关闭 alg 校验，任意 alg 的 token 都会通过。
+        # 因此 allowed 为空时必须直接拒绝，不能把空列表传给 decode。
+        if not allowed:
+            raise ValueError("id_token: discovery 未提供可信的非对称签名算法")
+
+        # ── 校验 2：JWKS 签名验证 + alg 锚定 ────────────────────────────────────
+        # _jwks() 拉取 GitLab 公钥集合；algorithms=allowed 同时做：
+        #   a) 验签（签名与公钥不匹配 → BadSignatureError）
+        #   b) alg 锚定（token header 的 alg 不在 allowed 里 → 报错，拒绝 none/HS*）
+        keyset = await self._jwks()
+        # jjwt.decode 是同步调用；若验签失败直接抛异常，不返回 token 对象
+        token = jjwt.decode(id_token, keyset, algorithms=allowed)
+        # token.claims 是解码后的 claims dict（只有验签通过才能走到这里）
+        claims = token.claims
+
+        # 读取当前 Unix 时间戳，用于 exp/iat 边界计算
+        now = int(time.time())
+
+        # ── 校验 3：iss 精确匹配 ─────────────────────────────────────────────────
+        # iss 必须与配置的 issuer 完全一致（字符串精确比较，不做前缀/域名匹配）
+        if claims.get("iss") != self._cfg.issuer:
+            raise ValueError("id_token iss 不符")
+
+        # ── 校验 4：aud 包含 client_id ───────────────────────────────────────────
+        # aud 可以是单个字符串或字符串列表（OIDC 规范 5.1）
+        aud = claims.get("aud")
+        # `isinstance(aud, list)`：判断是否为列表类型（多受众场景）
+        aud_ok = (aud == self._cfg.client_id) or (isinstance(aud, list) and self._cfg.client_id in aud)
+        if not aud_ok:
+            raise ValueError("id_token aud 不符")
+
+        # ── 校验 4b：multi-aud 时 azp 必须等于 client_id ────────────────────────
+        # OIDC 规范：当 aud 包含多个受众时，azp（Authorized Party）必须是当前 client_id
+        # 防止 token 被其他 client 窃用（confused deputy 攻击）
+        if isinstance(aud, list) and len(aud) > 1 and claims.get("azp") != self._cfg.client_id:
+            raise ValueError("多 aud 但 azp 不符")
+
+        # ── 校验 5：exp 未过期 ───────────────────────────────────────────────────
+        # exp（expiration time）：token 过期时间；加 CLOCK_SKEW 容忍时钟偏差
+        # 若 exp 缺失，claims.get("exp", 0) 返回 0 → 视为已过期（安全 fail-closed）
+        if int(claims.get("exp", 0)) < now - _CLOCK_SKEW:
+            raise ValueError("id_token 已过期")
+
+        # ── 校验 6：iat 存在且不在未来 ──────────────────────────────────────────
+        # iat（issued at）：签发时间；必须存在且不超过 now+CLOCK_SKEW
+        # iat > now+skew 说明 token 是"未来签发的"，可能是时间篡改攻击
+        if "iat" not in claims or int(claims["iat"]) > now + _CLOCK_SKEW:
+            raise ValueError("id_token iat 非法")
+
+        # ── 校验 7：nonce 精确匹配 ───────────────────────────────────────────────
+        # nonce 防止 id_token 重放攻击：授权请求时生成随机值，回调时验证 token 里的 nonce
+        # expected_nonce=None 表示调用方明确不校验（仅用于无状态场景，通常不推荐）
+        if expected_nonce is not None and claims.get("nonce") != expected_nonce:
+            raise ValueError("id_token nonce 不符")
+
+        # 所有校验通过，返回 claims dict（dict() 构造副本，防止外部修改影响内部状态）
+        return dict(claims)
+
+    async def get_login_identity(self, token: dict) -> ScmIdentity:
+        """从已通过 validate_id_token 校验的 claims 提取登录身份。
+
+        Args:
+            token: 含 "id_token_claims" 键的 dict，值为 validate_id_token 返回的 claims
+        Returns:
+            ScmIdentity(provider="gitlab", scm_user_id=sub, login=preferred_username)
+        """
+        # 取出已校验的 claims dict（由调用方在 validate_id_token 后存入）
+        claims = token["id_token_claims"]
+        # sub：OIDC 标准字段，GitLab 用户唯一标识（stable across rename）
+        # preferred_username：GitLab 用户名（可能随用户改名变化，展示用）
+        return ScmIdentity(
+            provider="gitlab",
+            scm_user_id=str(claims["sub"]),              # 强转 str 以防 sub 为数字类型
+            login=claims.get("preferred_username"),       # .get()：字段不存在返回 None
+        )
+
+    async def _get_authed(self, access_token: str, path: str) -> httpx.Response:
+        """用用户 access_token 发 Bearer 认证的 GET 请求（GitLab REST API）。
+
+        Args:
+            access_token: 用户的 GitLab OAuth access token
+            path:         API 路径（如 /api/v4/projects/42/members/all/7）
+        Returns:
+            httpx.Response 原始响应对象（由调用方判断状态码）
+        """
+        # `async with httpx.AsyncClient(...) as client:`：
+        # 异步上下文管理器，退出时自动关闭 HTTP 连接，避免连接泄漏
+        async with httpx.AsyncClient(timeout=15) as client:
+            # f-string 拼接完整 URL：issuer（如 https://gitlab.example.com）+ path
+            # headers 注入 Authorization: Bearer <token>，GitLab REST 标准认证方式
+            return await client.get(
+                f"{self._cfg.issuer}{path}",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+
+    async def resolve_repo_role(self, *, token: str, repo, principal):
+        """解析用户在指定 GitLab project 的 ScmRole。
+
+        调用 GitLab Members API /all（含继承成员），映射 access_level → ScmRole。
+
+        B3 守卫：GitLab sub 是数字型 user id；非数字 sub 无法构造合法 API 路径，
+        直接告警 + 返回 NOT_VISIBLE，不发 HTTP 请求（防止路径注入 + 提早失败）。
+
+        Args:
+            token:     用户的 GitLab access_token（Bearer 认证）
+            repo:      GitLab project_id（数字 id，绑定主键，不随 rename 变化）
+            principal: GitLab user_id（即 OIDC sub 字段，应为纯数字字符串）
+        Returns:
+            ScmRole.CAN_BIND    ── access_level ≥ 40（Maintainer/Owner）
+            ScmRole.CAN_QUERY   ── 20 ≤ access_level < 40（Reporter/Developer）
+            ScmRole.NOT_VISIBLE ── access_level < 20 / 非成员 / 无效 sub
+        Raises:
+            httpx.HTTPStatusError: 5xx 服务端错误（上层转 502）
+        """
+        # 延迟导入：避免循环依赖，且只在真正调用时才加载
+        from src.service.scm.base import ScmRole
+        from src.service.scm.scm_roles import gitlab_access_level_to_scm
+
+        # ── B3 守卫：sub 必须是纯数字字符串 ────────────────────────────────────
+        # str(principal).isdigit()：检查转为字符串后是否全为数字字符（0-9）
+        # 非数字 sub（如 UUID、邮箱、None）无法作为 GitLab user_id → 告警并直接返回
+        if principal is None or not str(principal).isdigit():
+            _log.warning(
+                "gitlab resolve_repo_role: 非数字 user_id(sub)=%r，无法核实仓权限",
+                principal,
+            )
+            return ScmRole.NOT_VISIBLE
+
+        # 调用 GitLab Members /all 端点（含继承自 group 的成员）
+        # /all 比 /members（直接成员）覆盖更广，避免 group 成员漏判
+        resp = await self._get_authed(token, f"/api/v4/projects/{repo}/members/all/{principal}")
+        sc = resp.status_code  # 取出 HTTP 状态码，便于多次判断
+
+        # 200：成员存在，读取 access_level 并映射到 ScmRole
+        if sc == 200:
+            # resp.json()["access_level"]：GitLab 角色级别（10/20/30/40/50）
+            # int(...)：确保类型为整数，再传给映射函数
+            return gitlab_access_level_to_scm(int(resp.json()["access_level"]))
+
+        # 401：token 无效/过期；404：用户不是该 project 的成员 → 均视为不可见
+        if sc in (401, 404):
+            return ScmRole.NOT_VISIBLE
+
+        # 5xx 及其他非预期状态码 → raise_for_status() 抛出 httpx.HTTPStatusError
+        # 上层路由捕获后转为 502 Bad Gateway（让调用方知道是下游故障）
+        resp.raise_for_status()
+
+        # raise_for_status() 对非 2xx 均会抛，理论上走不到这行；
+        # 保留此处是为了满足 Python 静态分析器（函数所有路径须有返回值）
+        return ScmRole.NOT_VISIBLE
+
+    async def list_user_visible_repos(self, *, user_token: str) -> list["VisibleRepo"]:
+        """用户可见 GitLab project（GET /projects?membership=true&min_access_level=20，Bearer，分页）。
+        服务端 min_access_level=20 是可见性权威下限：入选即 ≥CAN_QUERY；permissions 仅用于升档 CAN_BIND
+        （permissions.{project_access,group_access} 在纯继承访问时可能皆 null，绝不据此判 NOT_VISIBLE）。"""
+        # 延迟导入：避免循环依赖，且只在真正调用时才加载这些数据类/枚举
+        from src.service.scm.base import RepoInfo, VisibleRepo, ScmRole
+        # 累加各页结果的列表；类型注解 list[VisibleRepo] 标明元素类型
+        out: list[VisibleRepo] = []
+        # GitLab 分页从 page=1 开始（per_page=100 是每页上限）
+        page = 1
+        # while True + 内部 break：典型"先取再判停"的分页循环写法
+        while True:
+            # _get_authed 用 Bearer user_token 发 GET，返回原始 resp（不 raise）
+            resp = await self._get_authed(
+                user_token, f"/api/v4/projects?membership=true&min_access_level=20&per_page=100&page={page}")
+            # raise_for_status：401/5xx 等非 2xx 抛 HTTPStatusError → 上层转 502
+            resp.raise_for_status()
+            # GitLab /projects 返回的是 JSON 数组（list），不是带 wrapper 的对象
+            projects = resp.json()
+            # 空数组：已无更多数据，结束分页
+            if not projects:
+                break
+            # 遍历当前页每个 project，映射成 VisibleRepo
+            for p in projects:
+                # `or {}`：permissions 缺失/为 None 时回退空 dict，避免后续 .get 报错
+                perms = p.get("permissions") or {}
+                # 收集"有值"的 access_level，用于后续取最大值
+                levels = []
+                # project_access / group_access 各自可能是 {"access_level": int} 或 None
+                pa, ga = perms.get("project_access"), perms.get("group_access")
+                # 仅当 access 对象存在且 access_level 非 None 时才纳入（避免把 null 当 0）
+                if pa and pa.get("access_level") is not None:
+                    levels.append(int(pa["access_level"]))
+                if ga and ga.get("access_level") is not None:
+                    levels.append(int(ga["access_level"]))
+                # 三元表达式：有有效值取 max，皆缺则为 None（纯继承访问场景）
+                level = max(levels) if levels else None
+                # 入选即 ≥CAN_QUERY；level≥40（Maintainer/Owner）才升档 CAN_BIND
+                # level is None（纯继承）→ 不升档，保持 CAN_QUERY，绝不判 NOT_VISIBLE
+                role = ScmRole.CAN_BIND if (level is not None and level >= 40) else ScmRole.CAN_QUERY
+                out.append(VisibleRepo(
+                    repo=RepoInfo(external_id=p["id"], full_name=p["path_with_namespace"],
+                                  # default_branch 可能缺失/为 None，回退 "main"
+                                  default_branch=p.get("default_branch") or "main",
+                                  # visibility != "public" 即视为私有（private/internal）
+                                  private=(p.get("visibility") != "public")),
+                    role=role))
+            # 不足整页说明是最后一页，结束（GitLab 满页才可能有下一页）
+            if len(projects) < 100:
+                break
+            # 否则翻到下一页继续
+            page += 1
+        return out
