@@ -98,14 +98,17 @@ app.include_router(group_router)        # v2.0：Groups CRUD（/groups/*）
 app.include_router(project_member_router)  # v2.0：Project Members CRUD（/projects/{pid}/members/*）
 app.include_router(user_router)            # v2.0：User Management CRUD（/admin/users/*）
 app.include_router(audit_router)           # v2.0 Task 11：审计日志查询（/admin/audit-logs + /groups/{gid}/audit-logs）
+# P4b-2：OAuth 配置加载一次，供 mount + authorize_scm 复用。
+# load_oauth_config() 在 import 期执行，未配 provider 时返回 None 不抛异常，import 冒烟安全。
+_oauth_cfg = load_oauth_config()
 app.include_router(create_scm_routes(
     get_current_user=get_current_user, get_db=get_db, get_provider=get_github_provider,
-))  # P3：SCM onboarding（GET /scm/github/install-url）
+    oauth_cfg=_oauth_cfg, get_login_provider=get_login_provider,
+))  # P3：SCM onboarding（GET /scm/github/install-url）+ P4b-2：callback 闭包参
 # P4b-1：装配 authorize_scm 工厂实例。
-# load_oauth_config() 在 import 期执行，未配 provider 时返回 None 不抛异常，import 冒烟安全。
 # get_login_provider 已在顶部 import，无需重复引入。
 # app.state.authorize_scm 供 qa_router 等通过 request.app.state 取用（QA 门路径）。
-_authorize_scm = create_authorize_scm(oauth_cfg=load_oauth_config(), get_login_provider=get_login_provider)
+_authorize_scm = create_authorize_scm(oauth_cfg=_oauth_cfg, get_login_provider=get_login_provider)
 app.state.authorize_scm = _authorize_scm          # QA 门经 app.state 取
 app.include_router(create_scm_binding_routes(
     get_current_user=get_current_user, get_db=get_db, authorize_scm=_authorize_scm))  # P3+P4b-1：工程绑定 + 索引触发 + SCM 门
