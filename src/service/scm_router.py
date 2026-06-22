@@ -10,6 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 
 from src.service.db_models_homepage import ScmConnection
+# cache_invalidate：连接删除时清除该连接的全部权限缓存项，防止已删连接继续放行 QA 门
+from src.service.scm.scm_perm_cache import cache_invalidate
 
 
 def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
@@ -66,6 +68,13 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
             raise HTTPException(status_code=403, detail="无权删除该连接")
         await db.delete(conn)
         await db.commit()
+        # best-effort：清除该连接的全部 can_query 权限缓存项
+        # try/except：cache_invalidate 是纯内存操作，通常不会抛，但防御性包裹确保缓存清理
+        # 绝不让缓存清理的异常让删除请求返回 500（BLE001：允许捕获宽泛 Exception）
+        try:
+            cache_invalidate(connection_id)      # best-effort：清该连接 can_query 缓存
+        except Exception:                        # noqa: BLE001 — 不让缓存清理 500 掉删除
+            pass
         return Response(status_code=204)
 
     async def _load_conn(connection_id: str, user, db) -> "ScmConnection":
