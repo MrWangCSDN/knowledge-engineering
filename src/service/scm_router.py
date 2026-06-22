@@ -57,6 +57,9 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
                        ke_oauth_csrf: Optional[str] = Cookie(default=None)) -> dict:
         """GitHub App 安装回调：先核验该 installation 确属调用者，再建 scm_connection。"""
         # 1) 消费 state（CSRF 绑定、原子单用）；purpose/user_id 必须匹配
+        #    单用 / refuse-before-write 语义依赖 get_db 在 HTTPException 时回滚：consume_state 立即删 state 行，
+        #    任一 guard 抛错→get_db rollback 撤销该 DELETE→同一 state 可重试；仅成功 commit 时 state 才真正被消费。
+        #    若将来改 get_db 为 finally-commit 或吞异常，此语义会静默失效。
         st = await consume_state(db, state=state, csrf=ke_oauth_csrf)
         if st is None or st.purpose != _INSTALL_PURPOSE or st.user_id != user.id:
             raise HTTPException(status_code=400, detail="state 校验失败")

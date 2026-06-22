@@ -84,12 +84,14 @@ class _FakeOAuthCfg:        # build_refresh_fn 读 .github → 无该属性返�
     pass
 
 
-def _app_callback(maker, *, user=None, provider=None):
+def _app_callback(maker, *, user=None, provider=None, get_login_provider=None):
     """callback 专用 app：注入 get_login_provider + oauth_cfg。
-    _get_db 必须镜像生产 db.get_db 的 commit/rollback 语义，否则 I4 replay-after-403 测试不确定。"""
+    _get_db 必须镜像生产 db.get_db 的 commit/rollback 语义，否则 I4 replay-after-403 测试不确定。
+    get_login_provider 可覆盖（默认返回 prov；503 用例传一个抛 OAuthProviderUnavailable 的）。"""
     from fastapi import FastAPI
     app = FastAPI()
     prov = provider or _InstallProvider()
+    glp = get_login_provider or (lambda p, cfg: prov)
     async def _get_db():
         async with maker() as s:
             try:
@@ -101,7 +103,7 @@ def _app_callback(maker, *, user=None, provider=None):
     app.include_router(create_scm_routes(
         get_current_user=lambda: (user or _User()), get_db=_get_db,
         get_provider=lambda: prov, app_slug="ke-test-app",
-        oauth_cfg=_FakeOAuthCfg(), get_login_provider=lambda p, cfg: prov,
+        oauth_cfg=_FakeOAuthCfg(), get_login_provider=glp,
     ))
     return app
 
@@ -204,6 +206,24 @@ async def test_callback_wrong_user_rejected(maker):
     c = TestClient(_app_callback(maker))
     r = _callback(c, installation_id=12345, state=state, csrf=csrf)
     assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_provider_unavailable_503(maker):
+    """provider 未配（get_login_provider 抛 OAuthProviderUnavailable）→ 503，且不落库。"""
+    from src.service.scm.oauth_factory import OAuthProviderUnavailable
+
+    def _raise(p, cfg):
+        raise OAuthProviderUnavailable("github 未配置")
+
+    await _seed_token(maker)
+    state, csrf = await _mint(maker)
+    c = TestClient(_app_callback(maker, get_login_provider=_raise))
+    r = _callback(c, installation_id=12345, state=state, csrf=csrf)
+    assert r.status_code == 503
+    async with maker() as s:
+        rows = (await s.execute(select(ScmConnection))).scalars().all()
+        assert rows == []
 
 
 @pytest.mark.asyncio
