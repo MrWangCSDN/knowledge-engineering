@@ -297,6 +297,24 @@ async def test_callback_replay_after_403_then_success(maker):
 
 
 @pytest.mark.asyncio
+async def test_install_url_to_callback_e2e(maker):
+    """E2E：install-url 出口的 state + 下发的 ke_oauth_csrf cookie，直接喂给 callback 应被接受并建连接。
+    锁死「install-url mint 的 state/csrf 与 callback consume_state 配对」这一唯一未被串联的缝（同一 TestClient
+    的 cookie jar 自动把 install-url 的 set-cookie 带进 callback）。"""
+    await _seed_token(maker)
+    c = TestClient(_app_callback(maker))                      # 同一 app 既服务 install-url 又服务 callback
+    r1 = c.get("/scm/github/install-url")                     # 出口：真 state + set-cookie ke_oauth_csrf
+    assert r1.status_code == 200
+    state = r1.json()["state"]
+    # 不手动传 csrf——install-url 的 set-cookie 已进 c 的 cookie jar，callback 请求会自动带上
+    r2 = c.get("/scm/github/callback", params={"installation_id": 12345, "state": state})
+    assert r2.status_code == 200
+    async with maker() as s:
+        rows = (await s.execute(select(ScmConnection))).scalars().all()
+        assert len(rows) == 1 and rows[0].github_installation_id == 12345
+
+
+@pytest.mark.asyncio
 async def test_list_and_delete_connections(maker):
     from fastapi.testclient import TestClient
     from src.service.db_models_homepage import ScmConnection
