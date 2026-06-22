@@ -9,9 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, desc
 
-from src.service.db_models_homepage import Project, IndexJob
+from src.service.db_models_homepage import Project, IndexJob, ScmConnection  # ScmConnection 供 bind 门查连接
 from src.service.indexing.queue import enqueue_index_job
 from src.service.permission_deps import require_project_role  # KE RBAC 权限工厂
+from src.service.scm.scm_authz import flag_on   # 读环境变量 kill-switch（与 qa_router 共用范式）
+from src.service.scm.base import ScmRole          # 三档权限枚举（CAN_BIND / CAN_QUERY / NOT_VISIBLE）
 
 
 class BindRequest(BaseModel):
@@ -28,7 +30,8 @@ def create_scm_binding_routes(
     *,
     get_current_user: Callable,
     get_db: Callable,
-    require_role: Callable = require_project_role,  # 可注入；默认用真实 RBAC；单测可传 no-op
+    require_role: Callable = require_project_role,    # 可注入；默认用真实 RBAC；单测可传 no-op
+    authorize_scm: Optional[Callable] = None,         # SCM 门；None=不启用（api.py 装配前默认关）
 ) -> APIRouter:
     router = APIRouter(tags=["scm-binding"])
 
@@ -39,7 +42,23 @@ def create_scm_binding_routes(
         p = await db.get(Project, project_id)
         if p is None:
             raise HTTPException(status_code=404, detail="工程不存在")
-        # TODO(P4)：SCM-role 门禁——校验 user 在该仓是 owner/maintainer 才放行。
+        # SCM-role 门禁（KE_SCM_BIND_AUTHZ=1 且工厂传入了 authorize_scm 才激活）。
+        # flag 默认关——现有测试零回归；PAT 连接走纯 KE-RBAC，跳过 SCM 门。
+        if flag_on("KE_SCM_BIND_AUTHZ") and authorize_scm is not None:
+            # body.connection_id 是调用者可自由填的，必须先确认连接存在（否则 404）。
+            # 这与 QA 门不同：QA 读的是已校验的 project.scm_connection_id，永不 404。
+            conn = await db.get(ScmConnection, body.connection_id)
+            if conn is None:
+                raise HTTPException(status_code=404, detail="连接不存在")
+            if conn.auth_type != "pat":          # PAT → 跳过 SCM 门（纯 KE-RBAC 已够）
+                role = await authorize_scm(
+                    db, user=user, conn=conn,
+                    repo_full_name=body.repo_full_name,
+                    repo_external_id=body.repo_external_id,
+                    need_bind=True,
+                )
+                if role != ScmRole.CAN_BIND:
+                    raise HTTPException(status_code=403, detail="无该仓 maintainer/admin 权限，不能绑定")
         p.scm_connection_id = body.connection_id
         p.repo_external_id = body.repo_external_id
         p.repo_full_name = body.repo_full_name
