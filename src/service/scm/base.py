@@ -24,6 +24,12 @@ class RepoInfo:
 
 
 @dataclass(frozen=True)
+class VisibleRepo:
+    repo: RepoInfo
+    role: ScmRole        # CAN_BIND / CAN_QUERY（NOT_VISIBLE 在 provider 内已滤）
+
+
+@dataclass(frozen=True)
 class BranchList:
     default_branch: str
     branches: list[str] = field(default_factory=list)
@@ -53,3 +59,8 @@ class ScmProvider(Protocol):
     async def list_branches(self, installation_id: int, full_name: str) -> BranchList: ...
     async def clone(self, installation_id: int, full_name: str, ref: str,
                     subpath: Optional[str], dest: str) -> str: ...
+
+    async def get_login_identity(self, token: dict) -> "ScmIdentity":
+        """从本次回调换得的 token 解析登录身份。
+        GitHub: token={"access_token": str} → GET /user；GitLab: token={"id_token_claims": dict}。"""
+        ...

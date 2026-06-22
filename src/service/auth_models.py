@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.service.db import Base
@@ -34,6 +34,10 @@ class User(Base):
     # nullable=True：未设置时应用层（llm_factory.get_llm_provider）兜底用 DEFAULT_MODEL_ID。
     # 由 alembic add_user_preferred_model 添加；详见 llm_factory.SUPPORTED_MODELS。
     preferred_model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # ── SCM 身份链（P4a，设计 §5）；身份键=SCM 数字 id，UNIQUE ──
+    github_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, unique=True)
+    gitlab_sub: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, unique=True)
 
     def __repr__(self) -> str:
         return f"<User id={self.id} username={self.username!r} admin={self.is_admin}>"
