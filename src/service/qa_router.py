@@ -290,11 +290,21 @@ async def explain(
     # P4b-1：SCM can_query 门（仅 /explain；unbound/PAT → 纯 KE-RBAC；门在会话创建前→403 不留孤儿）
     # getattr 取 app.state.authorize_scm：api.py startup 时注入；未注入（单测/旧部署）则跳过
     authorize_scm = getattr(request.app.state, "authorize_scm", None)
-    # 三个条件全满足才进门：
-    #   1. KE_SCM_QA_AUTHZ env flag 已开启（生产默认关，灰度翻转）
-    #   2. 工程已绑定 SCM 连接（unbound → 只走 KE-RBAC，无需 SCM 校验）
-    #   3. authorize_scm 已注入（未注入 → 退化为旧行为）
-    if flag_on("KE_SCM_QA_AUTHZ") and p.scm_connection_id and authorize_scm is not None:
+    # spec I6：flag 已开且工程已绑定但 authorize_scm 未接线时，打 WARNING 而非静默透过。
+    # 条件拆为两支：
+    #   unwired 分支：flag=on + 工程已绑定 + authorize_scm=None → WARNING + 透过（不阻断）
+    #   wired 分支  ：flag=on + 工程已绑定 + authorize_scm 有值  → 执行门禁逻辑
+    if flag_on("KE_SCM_QA_AUTHZ") and p.scm_connection_id and authorize_scm is None:
+        # 装配漏了：kill-switch 已翻但 app.state.authorize_scm 未注入 →
+        # 门实际未生效，用 WARNING 提示运维（安全 tripwire，不影响业务流程）
+        _log.warning(
+            "KE_SCM_QA_AUTHZ 已开但 app.state.authorize_scm 未接线，QA SCM 门未生效（装配漏了？）"
+        )
+    elif flag_on("KE_SCM_QA_AUTHZ") and p.scm_connection_id and authorize_scm is not None:
+        # 三个条件全满足才进门：
+        #   1. KE_SCM_QA_AUTHZ env flag 已开启（生产默认关，灰度翻转）
+        #   2. 工程已绑定 SCM 连接（unbound → 只走 KE-RBAC，无需 SCM 校验）
+        #   3. authorize_scm 已注入
         # 查连接记录（主键查询）；连接可能已被删除，用 None 检查兜底
         conn = await db.get(ScmConnection, p.scm_connection_id)
         # PAT 类型（auth_type="pat"）不需要 SCM 权限校验：PAT 是用户自己提供的 token，

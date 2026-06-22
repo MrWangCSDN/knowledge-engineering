@@ -89,3 +89,20 @@ async def test_flag_on_pat_skips_gate(maker, monkeypatch):
     async def _boom(*a, **k): raise AssertionError("PAT should skip SCM gate")
     c = TestClient(_app(maker, authorize_scm=_boom))
     assert c.post("/projects/p1/bind", json=_BODY).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_flag_on_but_unwired_warns(maker, monkeypatch, caplog):
+    import logging
+    # flag 翻开但工厂没有传入 authorize_scm（模拟装配漏了的场景）
+    monkeypatch.setenv("KE_SCM_BIND_AUTHZ", "1")
+    async with maker() as s:
+        s.add(Project(id="p1", name="P1")); await s.commit()
+    # authorize_scm=None：flag on 但未接线
+    c = TestClient(_app(maker, authorize_scm=None))
+    with caplog.at_level(logging.WARNING):
+        r = c.post("/projects/p1/bind", json=_BODY)
+    # 门未生效 → 仍走 KE-RBAC（不 403/500，正常返回 200）
+    assert r.status_code == 200
+    # 但必须打出 WARNING 提示运维装配漏了
+    assert "未接线" in caplog.text
