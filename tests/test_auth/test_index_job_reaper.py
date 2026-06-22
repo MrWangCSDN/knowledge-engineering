@@ -123,3 +123,60 @@ async def test_claim_sets_lease(maker):
     if lease.tzinfo is None:
         lease = lease.replace(tzinfo=timezone.utc)
     assert lease > now + timedelta(seconds=1500)
+
+
+from src.service.indexer import run_worker_loop
+
+
+@pytest.mark.asyncio
+async def test_run_one_job_reclaims_before_claim(maker):
+    """B1 回归门 + 机会式：seed 过期 running + 1 queued → 一轮 run_one_job：过期者回 queued 并在同轮被认领。
+    （reclaim+claim 同 session 会 load IndexJob 对象——若 reclaim 缺 synchronize_session=False 此处必抛 TypeError）。"""
+    from src.service.indexing.runner import run_one_job
+    await _add_project(maker)
+    await _add_job(maker, jid="stuck", status="cloning", lease_delta=-10, started_delta=-7200)
+    await _add_job(maker, jid="fresh_q", status="queued")
+    seen = {}
+    async def _indexer(job, progress):
+        seen["job_id"] = job.id
+        await progress("cloning", 10)
+        return "deadbeef"
+    handled = await run_one_job(maker, worker_id="w1", indexer=_indexer, lease_seconds=3600)
+    assert handled is True
+    assert seen["job_id"] == "stuck"   # 回收→queued 后按 created_at 最早优先，本轮被认领
+    j = await _get(maker, "stuck")
+    assert j.status == "done" and j.commit_sha == "deadbeef"
+
+
+@pytest.mark.asyncio
+async def test_progress_extends_lease(maker):
+    from src.service.indexing.runner import run_one_job
+    await _add_project(maker)
+    await _add_job(maker, jid="q1", status="queued")
+    captured = {}
+    async def _indexer(job, progress):
+        await progress("embedding", 50)
+        async with maker() as s:
+            j = (await s.execute(select(IndexJob).where(IndexJob.id == job.id))).scalar_one()
+            captured["lease"] = j.lease_expires
+        return "c0ffee"
+    await run_one_job(maker, worker_id="w1", indexer=_indexer, lease_seconds=1800)
+    assert captured["lease"] is not None
+    now = datetime.now(timezone.utc)
+    lease = captured["lease"]
+    if lease.tzinfo is None:
+        lease = lease.replace(tzinfo=timezone.utc)
+    assert lease > now + timedelta(seconds=1500)
+
+
+@pytest.mark.asyncio
+async def test_run_worker_loop_passes_lease_seconds(maker):
+    await _add_project(maker)
+    await _add_job(maker, jid="q1", status="queued")
+    async def _indexer(job, progress):
+        await progress("cloning", 5)
+        return "abc1234"
+    processed = await run_worker_loop(maker, worker_id="w1", indexer=_indexer,
+                                      max_rounds=2, lease_seconds=900)
+    assert processed == 1
+    assert (await _get(maker, "q1")).status == "done"
