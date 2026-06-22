@@ -39,12 +39,17 @@ async def reencrypt_all_tokens(session) -> dict:
 
 def _main() -> None:  # pragma: no cover — 进程入口
     import asyncio
+    import sys
     from src.service.db import get_session_maker
     maker = get_session_maker()
-    async def _run():
+    async def _run() -> dict:
         async with maker() as s:
-            print(await reencrypt_all_tokens(s))
-    asyncio.run(_run())
+            return await reencrypt_all_tokens(s)
+    counts = asyncio.run(_run())
+    print(counts)
+    # 安全闸：有解不开的行 → 非零退出，提醒运维**勿在 errors>0 时弃旧 key**（否则未迁行将永久无法解密）
+    if counts["errors"]:
+        sys.exit(1)
 
 
 if __name__ == "__main__":  # pragma: no cover
