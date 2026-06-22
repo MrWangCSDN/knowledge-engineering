@@ -161,3 +161,131 @@ async def test_gl_visible_pagination(httpx_mock):
         url=f"{_ISS}/api/v4/projects?membership=true&min_access_level=20&per_page=100&page=2", json=page2)
     out = await _gl_provider().list_user_visible_repos(user_token="AT")
     assert len(out) == 101 and out[-1].repo.full_name == "g/last" and out[-1].role == ScmRole.CAN_BIND
+
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from src.service.scm_router import create_scm_routes
+from src.service.db_models_homepage import ScmConnection, Project
+
+
+class _FakeVisProvider:
+    def __init__(self, items): self._items = items
+    async def list_user_visible_repos(self, *, user_token, installation_id=None):
+        return self._items
+
+
+def _vis_app(maker, *, items=None, user=None, get_login_provider=None):
+    app = FastAPI()
+    prov = _FakeVisProvider(items or [])
+    async def _get_db():
+        async with maker() as s:
+            try:
+                yield s
+                await s.commit()
+            except Exception:
+                await s.rollback()
+                raise
+    app.include_router(create_scm_routes(
+        get_current_user=lambda: (user or _User()), get_db=_get_db,
+        get_provider=lambda: prov, app_slug="ke-test-app",
+        oauth_cfg=object(), get_login_provider=get_login_provider or (lambda p, cfg: prov)))
+    return app
+
+
+async def _seed_conn(maker, *, cid="c1", provider="github", auth_type="github_app",
+                     installation_id=55, created_by="alice"):
+    async with maker() as s:
+        s.add(ScmConnection(id=cid, provider=provider, auth_type=auth_type,
+                            github_installation_id=installation_id, account_login="o",
+                            status="active", created_by=created_by))
+        await s.commit()
+
+
+async def _seed_user_token(maker):
+    async with maker() as s:
+        await upsert_token(s, user_id=1, provider="github", access_token="AT",
+                           refresh_token=None, expires_at=None, scopes=None, scm_login="alice")
+        await s.commit()
+
+
+def _vr(rid, name, role=ScmRole.CAN_BIND):
+    return VisibleRepo(repo=RepoInfo(external_id=rid, full_name=name, default_branch="main", private=True), role=role)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_flag_off_404(maker, monkeypatch):
+    monkeypatch.delenv("KE_SCM_VISIBLE_REPOS", raising=False)
+    await _seed_conn(maker); await _seed_user_token(maker)
+    c = TestClient(_vis_app(maker, items=[_vr(1, "o/r")]))
+    assert c.get("/scm/connections/c1/visible-repos").status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_endpoint_happy_with_bound_and_q(maker, monkeypatch):
+    monkeypatch.setenv("KE_SCM_VISIBLE_REPOS", "1")
+    await _seed_conn(maker); await _seed_user_token(maker)
+    async with maker() as s:
+        s.add(Project(id="p1", name="P1", scm_connection_id="c1", repo_external_id=1))
+        await s.commit()
+    items = [_vr(1, "org/alpha", ScmRole.CAN_BIND), _vr(2, "org/beta", ScmRole.CAN_QUERY)]
+    c = TestClient(_vis_app(maker, items=items))
+    r = c.get("/scm/connections/c1/visible-repos")
+    assert r.status_code == 200
+    repos = {x["full_name"]: x for x in r.json()["repos"]}
+    assert repos["org/alpha"]["scm_role"] == "can_bind"
+    assert repos["org/alpha"]["bound"] is True and repos["org/alpha"]["bound_project_id"] == "p1"
+    assert repos["org/beta"]["scm_role"] == "can_query" and repos["org/beta"]["bound"] is False
+    r2 = c.get("/scm/connections/c1/visible-repos", params={"q": "beta"})
+    assert [x["full_name"] for x in r2.json()["repos"]] == ["org/beta"]
+
+
+@pytest.mark.asyncio
+async def test_endpoint_not_found_and_forbidden(maker, monkeypatch):
+    monkeypatch.setenv("KE_SCM_VISIBLE_REPOS", "1")
+    await _seed_user_token(maker)
+    c = TestClient(_vis_app(maker, items=[]))
+    assert c.get("/scm/connections/missing/visible-repos").status_code == 404
+    await _seed_conn(maker, cid="c2", created_by="bob")
+    assert c.get("/scm/connections/c2/visible-repos").status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_endpoint_pat_and_bad_provider_422(maker, monkeypatch):
+    monkeypatch.setenv("KE_SCM_VISIBLE_REPOS", "1")
+    await _seed_user_token(maker)
+    await _seed_conn(maker, cid="cpat", auth_type="pat", installation_id=None)
+    c = TestClient(_vis_app(maker, items=[]))
+    assert c.get("/scm/connections/cpat/visible-repos").status_code == 422
+    await _seed_conn(maker, cid="cbad", provider="bitbucket")
+    assert c.get("/scm/connections/cbad/visible-repos").status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_endpoint_github_installation_none_422(maker, monkeypatch):
+    monkeypatch.setenv("KE_SCM_VISIBLE_REPOS", "1")
+    await _seed_user_token(maker)
+    await _seed_conn(maker, cid="cnull", auth_type="github_app", installation_id=None)
+    c = TestClient(_vis_app(maker, items=[]))
+    assert c.get("/scm/connections/cnull/visible-repos").status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_endpoint_provider_unavailable_503(maker, monkeypatch):
+    monkeypatch.setenv("KE_SCM_VISIBLE_REPOS", "1")
+    await _seed_conn(maker); await _seed_user_token(maker)
+
+    def _raise(p, cfg):
+        raise OAuthProviderUnavailable("x")
+    c = TestClient(_vis_app(maker, items=[], get_login_provider=_raise))
+    assert c.get("/scm/connections/c1/visible-repos").status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_endpoint_empty_set_200(maker, monkeypatch):
+    monkeypatch.setenv("KE_SCM_VISIBLE_REPOS", "1")
+    await _seed_conn(maker); await _seed_user_token(maker)
+    c = TestClient(_vis_app(maker, items=[]))
+    r = c.get("/scm/connections/c1/visible-repos")
+    assert r.status_code == 200 and r.json() == {"repos": []}

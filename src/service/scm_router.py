@@ -10,9 +10,11 @@ import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
 from sqlalchemy import select
 
-from src.service.db_models_homepage import ScmConnection, UserScmToken
+from src.service.db_models_homepage import ScmConnection, UserScmToken, Project
 # cache_invalidate：连接删除时清除该连接的全部权限缓存项，防止已删连接继续放行 QA 门
 from src.service.scm.scm_perm_cache import cache_invalidate
+from src.service.scm.scm_authz import flag_on, resolve_caller_token
+from src.service.scm.base import ScmRole
 from src.service.scm.oauth_state_store import mint_state, consume_state
 from src.service.scm.scm_token_store import get_valid_scm_token, ScmTokenInvalid
 from src.service.scm.scm_refresh import build_refresh_fn
@@ -162,6 +164,49 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
             {"external_id": r.external_id, "full_name": r.full_name,
              "default_branch": r.default_branch, "private": r.private} for r in repos
         ]}
+
+    @router.get("/connections/{connection_id}/visible-repos")
+    async def visible_repos(connection_id: str, q: str = "",
+                            user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        """列调用者在该连接 SCM 上可见/可绑的仓 + KE 已绑标注（onboarding 选仓）。kill-switch 默认关。"""
+        if not flag_on("KE_SCM_VISIBLE_REPOS"):
+            raise HTTPException(status_code=404, detail="not found")
+        conn = await _load_conn(connection_id, user, db)
+        if conn.auth_type == "pat":
+            raise HTTPException(status_code=422, detail="PAT 连接不支持可见仓列举")
+        if conn.provider not in ("github", "gitlab"):
+            raise HTTPException(status_code=422, detail="不支持的 provider")
+        prov, token = await resolve_caller_token(
+            db, user=user, provider=conn.provider, oauth_cfg=oauth_cfg, get_login_provider=get_login_provider)
+        try:
+            if conn.provider == "github":
+                if conn.github_installation_id is None:
+                    raise HTTPException(status_code=422, detail="该连接不是 GitHub App 类型")
+                visibles = await prov.list_user_visible_repos(
+                    user_token=token, installation_id=conn.github_installation_id)
+            else:
+                visibles = await prov.list_user_visible_repos(user_token=token)
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="列举可见仓失败，请重试")
+        ext_ids = [v.repo.external_id for v in visibles]
+        bound = {}
+        if ext_ids:
+            rows = (await db.execute(select(Project.id, Project.repo_external_id).where(
+                Project.scm_connection_id == conn.id, Project.repo_external_id.in_(ext_ids)))).all()
+            bound = {r.repo_external_id: r.id for r in rows}
+        ql = q.strip().lower()
+        out = []
+        for v in visibles:
+            if ql and ql not in v.repo.full_name.lower():
+                continue
+            out.append({
+                "external_id": v.repo.external_id, "full_name": v.repo.full_name,
+                "default_branch": v.repo.default_branch, "private": v.repo.private,
+                "scm_role": "can_bind" if v.role == ScmRole.CAN_BIND else "can_query",
+                "bound": v.repo.external_id in bound,
+                "bound_project_id": bound.get(v.repo.external_id),
+            })
+        return {"repos": out}
 
     @router.get("/connections/{connection_id}/repos/{full_name:path}/branches")
     async def list_branches(connection_id: str, full_name: str,
