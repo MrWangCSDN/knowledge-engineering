@@ -4,17 +4,20 @@
 from __future__ import annotations
 
 import logging  # 标准库日志模块
+import os  # 标准库：读环境变量（KE_INDEX_LEASE_SECONDS）
+from datetime import datetime, timezone, timedelta  # 时间处理：当前时间/时区/时间差
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func, and_, or_  # func=聚合函数(count)；and_/or_=组合 WHERE 条件
 
 # 模块级 logger：日志名遵循 ke.scm.bind 命名空间，方便运维按前缀过滤
 _log = logging.getLogger("ke.scm.bind")
 
 from src.service.db_models_homepage import Project, IndexJob, ScmConnection  # ScmConnection 供 bind 门查连接
 from src.service.indexing.queue import enqueue_index_job
+from src.service.indexing.states import QUEUED, DONE, FAILED, PHASE_ORDER  # 作业状态常量 + 工作阶段顺序
 from src.service.permission_deps import require_project_role  # KE RBAC 权限工厂
 from src.service.scm.scm_authz import flag_on   # 读环境变量 kill-switch（与 qa_router 共用范式）
 from src.service.scm.base import ScmRole          # 三档权限枚举（CAN_BIND / CAN_QUERY / NOT_VISIBLE）
@@ -28,6 +31,12 @@ class BindRequest(BaseModel):
     ref: str
     ref_type: str = "branch"
     subpath: Optional[str] = None
+
+
+def _iso(dt):
+    """datetime → ISO 字符串；None 透传。"""
+    # 三元表达式：A if 条件 else B —— 等效于 if/else，写在一行更紧凑
+    return dt.isoformat() if dt is not None else None
 
 
 def create_scm_binding_routes(
@@ -105,5 +114,59 @@ def create_scm_binding_routes(
         if job is None:
             raise HTTPException(status_code=404, detail="无索引作业")
         return {"job_id": job.id, "status": job.status, "progress": job.progress, "error": job.error}
+
+    @router.get("/projects/{project_id}/sync-health",
+                dependencies=[Depends(require_role("reporter"))])  # reporter 以上可查看同步健康度
+    async def sync_health(project_id: str, user=Depends(get_current_user), db=Depends(get_db)) -> dict:
+        # 先取工程本体；不存在 → 404（与其他端点一致的契约）
+        proj = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+        if proj is None:
+            raise HTTPException(status_code=404, detail="工程不存在")
+        # 当前时间（带 UTC 时区），用于算 staleness 和判定卡死
+        now = datetime.now(timezone.utc)
+        # 租约秒数：默认 3600；os.getenv 第二参是默认值（环境变量缺省时返回）
+        lease_seconds = int(os.getenv("KE_INDEX_LEASE_SECONDS", "3600"))
+        # 最近一条作业：按 created_at 降序，并列时用 id 降序兜底（created_at 仅秒级精度）
+        latest = (await db.execute(
+            select(IndexJob).where(IndexJob.project_id == project_id)
+            .order_by(desc(IndexJob.created_at), desc(IndexJob.id)).limit(1))).scalars().first()
+        # None if ... else {...}：无作业返回 None，否则组装精简字段字典
+        latest_job = None if latest is None else {
+            "job_id": latest.id, "status": latest.status, "progress": latest.progress,
+            "error": latest.error, "finished_at": _iso(latest.finished_at)}
+        # 按 status 分组计数：SELECT status, COUNT(*) ... GROUP BY status
+        rows = (await db.execute(
+            select(IndexJob.status, func.count()).where(IndexJob.project_id == project_id)
+            .group_by(IndexJob.status))).all()
+        # 字典推导式：把 [(状态, 数量), ...] 转成 {状态: 数量}
+        counts = {st: n for st, n in rows}
+        # 三档聚合：running = 所有工作阶段(cloning/.../interpreting)计数之和
+        job_counts = {
+            "queued": counts.get(QUEUED, 0),
+            "running": sum(counts.get(p, 0) for p in PHASE_ORDER),
+            "failed": counts.get(FAILED, 0)}
+        # 最新一条失败作业的 error 文本：按 finished_at 降序取首条
+        last_error = (await db.execute(
+            select(IndexJob.error).where(IndexJob.project_id == project_id, IndexJob.status == FAILED)
+            .order_by(desc(IndexJob.finished_at)).limit(1))).scalars().first()
+        # 卡死判定：在跑(非 queued/done/failed) 且 (租约已过 或 (无租约且 started_at 早于截止点))
+        started_cutoff = now - timedelta(seconds=lease_seconds)
+        running = IndexJob.status.notin_([QUEUED, DONE, FAILED])
+        expired = or_(IndexJob.lease_expires < now,
+                      and_(IndexJob.lease_expires.is_(None), IndexJob.started_at < started_cutoff))
+        stuck_id = (await db.execute(
+            select(IndexJob.id).where(IndexJob.project_id == project_id, running, expired).limit(1)
+        )).scalars().first()
+        # last_synced_at 可能是 naive datetime（SQLite 不存时区）→ 补成 UTC 再做差
+        ls = proj.last_synced_at
+        if ls is not None and ls.tzinfo is None:
+            ls = ls.replace(tzinfo=timezone.utc)
+        # 距上次同步的小时数（保留两位小数）；从未同步 → None
+        staleness_hours = None if ls is None else round((now - ls).total_seconds() / 3600, 2)
+        return {
+            "project_id": project_id, "status": proj.status,
+            "last_synced_at": _iso(proj.last_synced_at), "last_synced_commit": proj.last_synced_commit,
+            "staleness_hours": staleness_hours, "is_stuck": stuck_id is not None,
+            "latest_job": latest_job, "job_counts": job_counts, "last_error": last_error}
 
     return router
