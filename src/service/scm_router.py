@@ -53,15 +53,46 @@ def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
 
     @router.get("/github/callback")
     async def callback(installation_id: int, state: str = "", user=Depends(get_current_user),
-                       db=Depends(get_db)) -> dict:
-        """GitHub App 安装回调：建 scm_connection。
-        TODO(P4)：用用户 OAuth user-to-server token 核实该 installation 确属当前用户（防伪造）。"""
-        provider = get_provider()
-        login = await provider.get_account_login(installation_id)
+                       db=Depends(get_db),
+                       ke_oauth_csrf: Optional[str] = Cookie(default=None)) -> dict:
+        """GitHub App 安装回调：先核验该 installation 确属调用者，再建 scm_connection。"""
+        # 1) 消费 state（CSRF 绑定、原子单用）；purpose/user_id 必须匹配
+        st = await consume_state(db, state=state, csrf=ke_oauth_csrf)
+        if st is None or st.purpose != _INSTALL_PURPOSE or st.user_id != user.id:
+            raise HTTPException(status_code=400, detail="state 校验失败")
+        # 2) 取调用者 user-to-server token（真核验前提）
+        try:
+            prov = get_login_provider("github", oauth_cfg)
+        except OAuthProviderUnavailable:
+            raise HTTPException(status_code=503, detail="github 未配置")
+        refresh_fn = build_refresh_fn("github", oauth_cfg=oauth_cfg)
+        try:
+            token = await get_valid_scm_token(db, user_id=user.id, provider="github",
+                                              refresh_fn=refresh_fn)
+        except ScmTokenInvalid:
+            raise HTTPException(status_code=403, detail="请先关联 GitHub 账号")
+        except (httpx.HTTPError, RuntimeError):
+            raise HTTPException(status_code=502, detail="SCM 授权刷新失败，请重试")
+        # 3) 核 installation 归属（用户可见即可绑）
+        try:
+            installs = await prov.list_user_installations(user_token=token)
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="校验安装归属失败，请重试")
+        if installation_id not in installs:
+            raise HTTPException(status_code=403, detail="该安装不属于当前用户")
+        # 4) 通过 → 才写连接
+        if getattr(user, "username", None) is None:
+            raise HTTPException(status_code=403, detail="无效用户")
+        try:
+            login = await prov.get_account_login(installation_id)
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="获取安装账号信息失败，请重试")
+        if not login:                           # 空 login（GitHub 响应缺 account.login）视为上游异常，fail-closed 不写脏行
+            raise HTTPException(status_code=502, detail="获取安装账号信息失败，请重试")
         conn = ScmConnection(
             id=f"conn-{uuid.uuid4().hex[:16]}", provider="github", auth_type="github_app",
-            github_installation_id=installation_id, account_login=login, status="active",
-            created_by=getattr(user, "username", None),
+            github_installation_id=installation_id, account_login=login,
+            status="active", created_by=user.username,
         )
         db.add(conn)
         await db.commit()

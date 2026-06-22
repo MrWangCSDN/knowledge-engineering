@@ -65,6 +65,76 @@ async def test_install_url_without_link_forbidden(maker):
     assert r.status_code == 403
 
 
+class _InstallProvider:
+    """callback 归属核验 fake：list_user_installations 返回可见安装；get_account_login 返回 login。"""
+    def __init__(self, installs=(12345,), login="acme", installs_exc=None, login_exc=None):
+        self._installs = list(installs); self._login = login
+        self._installs_exc = installs_exc; self._login_exc = login_exc
+    async def list_user_installations(self, *, user_token):
+        if self._installs_exc:
+            raise self._installs_exc
+        return self._installs
+    async def get_account_login(self, installation_id):
+        if self._login_exc:
+            raise self._login_exc
+        return self._login
+
+
+class _FakeOAuthCfg:        # build_refresh_fn 读 .github → 无该属性返回 None refresh_fn（token 未过期不会用到）
+    pass
+
+
+def _app_callback(maker, *, user=None, provider=None):
+    """callback 专用 app：注入 get_login_provider + oauth_cfg。
+    _get_db 必须镜像生产 db.get_db 的 commit/rollback 语义，否则 I4 replay-after-403 测试不确定。"""
+    from fastapi import FastAPI
+    app = FastAPI()
+    prov = provider or _InstallProvider()
+    async def _get_db():
+        async with maker() as s:
+            try:
+                yield s
+                await s.commit()
+            except Exception:
+                await s.rollback()
+                raise
+    app.include_router(create_scm_routes(
+        get_current_user=lambda: (user or _User()), get_db=_get_db,
+        get_provider=lambda: prov, app_slug="ke-test-app",
+        oauth_cfg=_FakeOAuthCfg(), get_login_provider=lambda p, cfg: prov,
+    ))
+    return app
+
+
+async def _seed_token(maker, *, user_id=1):
+    from src.service.scm.scm_token_store import upsert_token
+    async with maker() as s:
+        await upsert_token(s, user_id=user_id, provider="github", access_token="AT",
+                           refresh_token=None, expires_at=None, scopes=None, scm_login="alice")
+        await s.commit()
+
+
+async def _mint(maker, *, purpose="install", user_id=1):
+    """铸一个真 state，返回 (state, csrf)。"""
+    from src.service.scm.oauth_state_store import mint_state
+    async with maker() as s:
+        m = await mint_state(s, provider="github", purpose=purpose,
+                             user_id=user_id, with_nonce=False, ttl_seconds=1800)
+        await s.commit()
+        return m.state, m.csrf
+
+
+def _callback(c, *, installation_id, state=None, csrf=None):
+    """对 callback 发请求。csrf 非 None 时在 client 实例上 set cookie（避 httpx0.28 per-request cookies= 弃用警告）。
+    state=None 不带 state 参；csrf=None 不带 cookie。"""
+    if csrf is not None:
+        c.cookies.set("ke_oauth_csrf", csrf)
+    params = {"installation_id": installation_id}
+    if state is not None:
+        params["state"] = state
+    return c.get("/scm/github/callback", params=params)
+
+
 class _FakeProvider:
     async def get_account_login(self, installation_id):
         return "macrozheng"
@@ -85,9 +155,10 @@ def _app_db(maker, provider):
 
 @pytest.mark.asyncio
 async def test_callback_creates_connection(maker):
-    from fastapi.testclient import TestClient
-    c = TestClient(_app_db(maker, _FakeProvider()))
-    r = c.get("/scm/github/callback", params={"installation_id": 12345, "state": "s1"})
+    await _seed_token(maker)
+    state, csrf = await _mint(maker)
+    c = TestClient(_app_callback(maker))
+    r = _callback(c, installation_id=12345, state=state, csrf=csrf)
     assert r.status_code == 200
     cid = r.json()["connection_id"]
     async with maker() as s:
@@ -95,8 +166,114 @@ async def test_callback_creates_connection(maker):
         assert conn.github_installation_id == 12345
         assert conn.provider == "github"
         assert conn.auth_type == "github_app"
-        assert conn.account_login == "macrozheng"
+        assert conn.account_login == "acme"
         assert conn.status == "active"
+        assert conn.created_by == "alice"
+
+
+@pytest.mark.asyncio
+async def test_callback_missing_state_rejected(maker):
+    await _seed_token(maker)
+    c = TestClient(_app_callback(maker))
+    r = _callback(c, installation_id=12345)
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_missing_csrf_cookie_rejected(maker):
+    await _seed_token(maker)
+    state, _csrf = await _mint(maker)
+    c = TestClient(_app_callback(maker))
+    r = _callback(c, installation_id=12345, state=state)
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_wrong_purpose_rejected(maker):
+    await _seed_token(maker)
+    state, csrf = await _mint(maker, purpose="login")
+    c = TestClient(_app_callback(maker))
+    r = _callback(c, installation_id=12345, state=state, csrf=csrf)
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_wrong_user_rejected(maker):
+    await _seed_token(maker, user_id=1)
+    state, csrf = await _mint(maker, user_id=2)
+    c = TestClient(_app_callback(maker))
+    r = _callback(c, installation_id=12345, state=state, csrf=csrf)
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_no_token_forbidden(maker):
+    state, csrf = await _mint(maker)
+    c = TestClient(_app_callback(maker))
+    r = _callback(c, installation_id=12345, state=state, csrf=csrf)
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_callback_forged_installation_forbidden(maker):
+    await _seed_token(maker)
+    state, csrf = await _mint(maker)
+    c = TestClient(_app_callback(maker, provider=_InstallProvider(installs=(12345,))))
+    r = _callback(c, installation_id=99999, state=state, csrf=csrf)
+    assert r.status_code == 403
+    async with maker() as s:
+        rows = (await s.execute(select(ScmConnection))).scalars().all()
+        assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_callback_installations_upstream_error_502(maker):
+    await _seed_token(maker)
+    state, csrf = await _mint(maker)
+    boom = httpx.HTTPStatusError("5xx", request=httpx.Request("GET", "https://x"),
+                                 response=httpx.Response(503))
+    c = TestClient(_app_callback(maker, provider=_InstallProvider(installs_exc=boom)))
+    r = _callback(c, installation_id=12345, state=state, csrf=csrf)
+    assert r.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_callback_account_login_5xx_502_no_write(maker):
+    await _seed_token(maker)
+    state, csrf = await _mint(maker)
+    boom = httpx.HTTPStatusError("5xx", request=httpx.Request("GET", "https://x"),
+                                 response=httpx.Response(502))
+    c = TestClient(_app_callback(maker, provider=_InstallProvider(installs=(12345,), login_exc=boom)))
+    r = _callback(c, installation_id=12345, state=state, csrf=csrf)
+    assert r.status_code == 502
+    async with maker() as s:
+        rows = (await s.execute(select(ScmConnection))).scalars().all()
+        assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_callback_empty_account_login_502_no_write(maker):
+    await _seed_token(maker)
+    state, csrf = await _mint(maker)
+    c = TestClient(_app_callback(maker, provider=_InstallProvider(installs=(12345,), login="")))
+    r = _callback(c, installation_id=12345, state=state, csrf=csrf)
+    assert r.status_code == 502
+    async with maker() as s:
+        rows = (await s.execute(select(ScmConnection))).scalars().all()
+        assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_callback_replay_after_403_then_success(maker):
+    await _seed_token(maker)
+    state, csrf = await _mint(maker)
+    c = TestClient(_app_callback(maker, provider=_InstallProvider(installs=(12345,))))
+    r1 = _callback(c, installation_id=99999, state=state, csrf=csrf)
+    assert r1.status_code == 403
+    r2 = _callback(c, installation_id=12345, state=state)
+    assert r2.status_code == 200
+    r3 = _callback(c, installation_id=12345, state=state)
+    assert r3.status_code == 400
 
 
 @pytest.mark.asyncio
