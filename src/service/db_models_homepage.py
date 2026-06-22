@@ -267,6 +267,7 @@ class IndexJob(Base):
     )
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_expires: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 # ─── 2. user_project_access ──────────────────────────────────────────────────
