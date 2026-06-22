@@ -6,26 +6,49 @@ import secrets
 import uuid
 from typing import Callable, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+import httpx
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
 from sqlalchemy import select
 
-from src.service.db_models_homepage import ScmConnection
+from src.service.db_models_homepage import ScmConnection, UserScmToken
 # cache_invalidate：连接删除时清除该连接的全部权限缓存项，防止已删连接继续放行 QA 门
 from src.service.scm.scm_perm_cache import cache_invalidate
+from src.service.scm.oauth_state_store import mint_state, consume_state
+from src.service.scm.scm_token_store import get_valid_scm_token, ScmTokenInvalid
+from src.service.scm.scm_refresh import build_refresh_fn
+from src.service.scm.oauth_factory import OAuthProviderUnavailable
+
+# install-url 与 callback 共用，防 purpose typo 静默 400
+_INSTALL_PURPOSE = "install"
 
 
 def create_scm_routes(*, get_current_user: Callable, get_db: Optional[Callable],
-                      get_provider: Callable, app_slug: Optional[str] = None) -> APIRouter:
+                      get_provider: Callable, app_slug: Optional[str] = None,
+                      oauth_cfg=None, get_login_provider: Optional[Callable] = None) -> APIRouter:
     router = APIRouter(prefix="/scm", tags=["scm"])
     slug = app_slug or os.getenv("KE_GH_APP_SLUG", "")
 
     @router.get("/github/install-url")
-    async def install_url(user=Depends(get_current_user)) -> dict:
-        """返回 GitHub App 安装 URL + 防 CSRF state（前端跳转后回带）。"""
-        state = secrets.token_urlsafe(24)
+    async def install_url(response: Response, user=Depends(get_current_user),
+                          db=Depends(get_db)) -> dict:
+        """返回 GitHub App 安装 URL + 真 state（CSRF 绑定）。A 早拦：未关联 GitHub → 403。"""
+        # A 早拦（UX 轻量存在性查；真核验在 callback）：无 github 关联 → 403 引导先关联
+        row = (await db.execute(select(UserScmToken).where(
+            UserScmToken.user_id == user.id, UserScmToken.provider == "github"
+        ))).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=403, detail="请先关联 GitHub 账号，再安装应用")
+        minted = await mint_state(db, provider="github", purpose=_INSTALL_PURPOSE,
+                                  user_id=user.id, with_nonce=False, ttl_seconds=1800)
+        # mint_state 仅 flush；不显式 commit——由 get_db 末尾 commit 持久化 state
+        response.set_cookie(
+            key="ke_oauth_csrf", value=minted.csrf, httponly=True,
+            secure=os.getenv("KE_COOKIE_SECURE", "true").lower() == "true",
+            samesite="lax", path="/", max_age=1800,
+        )
         return {
-            "install_url": f"https://github.com/apps/{slug}/installations/new?state={state}",
-            "state": state,
+            "install_url": f"https://github.com/apps/{slug}/installations/new?state={minted.state}",
+            "state": minted.state,
         }
 
     @router.get("/github/callback")

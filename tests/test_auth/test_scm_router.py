@@ -1,3 +1,4 @@
+import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
@@ -9,27 +10,7 @@ from src.service.db_models_homepage import Base, ScmConnection
 
 
 class _User:
-    username = "alice"; is_admin = True
-
-
-def _app(provider=None):
-    app = FastAPI()
-    app.include_router(create_scm_routes(
-        get_current_user=lambda: _User(),
-        get_db=None,
-        get_provider=lambda: provider,
-        app_slug="ke-test-app",
-    ))
-    return app
-
-
-def test_install_url():
-    c = TestClient(_app())
-    r = c.get("/scm/github/install-url")
-    assert r.status_code == 200
-    body = r.json()
-    assert "github.com/apps/ke-test-app/installations/new" in body["install_url"]
-    assert body["state"]
+    id = 1; username = "alice"; is_admin = True
 
 
 @pytest_asyncio.fixture
@@ -38,6 +19,50 @@ async def maker():
     async with engine.begin() as c:
         await c.run_sync(Base.metadata.create_all)
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+def _app_install(maker, user=None):
+    """install-url 专用 app：带 db（A 早拦要查 UserScmToken）。_get_db 镜像生产 commit 语义。"""
+    from fastapi import FastAPI
+    app = FastAPI()
+    async def _get_db():
+        async with maker() as s:
+            try:
+                yield s
+                await s.commit()
+            except Exception:
+                await s.rollback()
+                raise
+    app.include_router(create_scm_routes(
+        get_current_user=lambda: (user or _User()), get_db=_get_db,
+        get_provider=lambda: None, app_slug="ke-test-app",
+    ))
+    return app
+
+
+@pytest.mark.asyncio
+async def test_install_url_with_link_returns_state_and_cookie(maker):
+    from src.service.scm.scm_token_store import upsert_token
+    async with maker() as s:                    # seed alice 的 github token 行
+        await upsert_token(s, user_id=1, provider="github", access_token="AT",
+                           refresh_token=None, expires_at=None, scopes=None, scm_login="alice")
+        await s.commit()
+    c = TestClient(_app_install(maker))
+    r = c.get("/scm/github/install-url")
+    assert r.status_code == 200
+    body = r.json()
+    assert "github.com/apps/ke-test-app/installations/new" in body["install_url"]
+    assert body["state"]
+    assert "state=" in body["install_url"]
+    sc = r.headers.get("set-cookie", "")
+    assert "ke_oauth_csrf=" in sc and "samesite=lax" in sc.lower() and "httponly" in sc.lower()
+
+
+@pytest.mark.asyncio
+async def test_install_url_without_link_forbidden(maker):
+    c = TestClient(_app_install(maker))         # 不 seed token 行
+    r = c.get("/scm/github/install-url")
+    assert r.status_code == 403
 
 
 class _FakeProvider:
