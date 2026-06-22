@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -26,6 +27,16 @@ from src.service.project_router import router as project_router
 from src.service.qa_router import router as qa_router
 from src.service.code_router import router as code_router   # 代码片段查看端点（GET /projects/{pid}/code-snippet）
 from src.service.audit_router import router as audit_router  # v2.0 Task 11：审计日志查询路由
+from src.service.db import get_db  # 异步 DB session 依赖，供 scm_router 注入
+from src.service.scm_router import create_scm_routes
+from src.service.scm_binding_router import create_scm_binding_routes
+# create_authorize_scm：bind/QA 门的权限核验工厂函数（P4b-1 §4.1）
+from src.service.scm.scm_authz import create_authorize_scm
+from src.service.scm.provider_factory import get_github_provider
+from src.service.webhook_router import create_webhook_routes
+from src.service.scm_oauth_router import create_scm_oauth_routes
+from src.service.scm.oauth_factory import get_login_provider
+from src.service.scm.config import load_oauth_config
 
 # load_dotenv 让 KE_JWT_SECRET / KE_DB_URL 等从 .env / .env.local 加载
 try:
@@ -87,6 +98,25 @@ app.include_router(group_router)        # v2.0：Groups CRUD（/groups/*）
 app.include_router(project_member_router)  # v2.0：Project Members CRUD（/projects/{pid}/members/*）
 app.include_router(user_router)            # v2.0：User Management CRUD（/admin/users/*）
 app.include_router(audit_router)           # v2.0 Task 11：审计日志查询（/admin/audit-logs + /groups/{gid}/audit-logs）
+# P4b-2：OAuth 配置加载一次，供 mount + authorize_scm 复用。
+# load_oauth_config() 在 import 期执行，未配 provider 时返回 None 不抛异常，import 冒烟安全。
+_oauth_cfg = load_oauth_config()
+app.include_router(create_scm_routes(
+    get_current_user=get_current_user, get_db=get_db, get_provider=get_github_provider,
+    oauth_cfg=_oauth_cfg, get_login_provider=get_login_provider,
+))  # P3：SCM onboarding（GET /scm/github/install-url）+ P4b-2：callback 闭包参
+# P4b-1：装配 authorize_scm 工厂实例。
+# get_login_provider 已在顶部 import，无需重复引入。
+# app.state.authorize_scm 供 qa_router 等通过 request.app.state 取用（QA 门路径）。
+_authorize_scm = create_authorize_scm(oauth_cfg=_oauth_cfg, get_login_provider=get_login_provider)
+app.state.authorize_scm = _authorize_scm          # QA 门经 app.state 取
+app.include_router(create_scm_binding_routes(
+    get_current_user=get_current_user, get_db=get_db, authorize_scm=_authorize_scm))  # P3+P4b-1：工程绑定 + 索引触发 + SCM 门
+app.include_router(create_webhook_routes(get_db=get_db, webhook_secret=os.getenv("KE_GH_WEBHOOK_SECRET", "")))  # P3：GitHub webhook（HMAC 鉴权，不挂 auth）
+app.include_router(create_scm_oauth_routes(
+    get_current_user=get_current_user, get_db=get_db,
+    get_login_provider=get_login_provider, oauth_config=load_oauth_config(),
+))  # P4a：OAuth/OIDC 登录 + 身份关联
 
 
 @app.on_event("startup")

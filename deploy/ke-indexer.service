@@ -1,0 +1,15 @@
+[Unit]
+Description=KE indexer worker (clone + 索引作业)
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/knowledge-engineering
+EnvironmentFile=/opt/knowledge-engineering/.env
+ExecStart=/opt/knowledge-engineering/venv/bin/python -m src.service.indexer
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
