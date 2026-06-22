@@ -92,17 +92,32 @@ async def test_flag_on_pat_skips_gate(maker, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_flag_on_but_unwired_warns(maker, monkeypatch, caplog):
+async def test_flag_on_but_unwired_warns(maker, monkeypatch):
     import logging
-    # flag 翻开但工厂没有传入 authorize_scm（模拟装配漏了的场景）
+    # flag 翻开但工厂没传 authorize_scm（模拟装配漏了）
     monkeypatch.setenv("KE_SCM_BIND_AUTHZ", "1")
     async with maker() as s:
         s.add(Project(id="p1", name="P1")); await s.commit()
-    # authorize_scm=None：flag on 但未接线
-    c = TestClient(_app(maker, authorize_scm=None))
-    with caplog.at_level(logging.WARNING):
+    # 直接在 ke.scm.bind logger 上挂 handler 捕获——不依赖 caplog（caplog 受全局 logging 状态污染，整套跑时会空）
+    # 注意：某些测试会调用 logging.config.dictConfig(disable_existing_loggers=True)，
+    # 导致已注册 logger 的 disabled 标志被置 True，从而根本不执行任何 handler。
+    # 必须在挂 handler 的同时强制 re-enable，才能保证跨 suite 顺序的隔离性。
+    records: list[str] = []
+    class _Capture(logging.Handler):
+        def emit(self, rec): records.append(rec.getMessage())
+    lg = logging.getLogger("ke.scm.bind")
+    handler = _Capture(); handler.setLevel(logging.WARNING)
+    lg.addHandler(handler)
+    old_level = lg.level
+    old_disabled = lg.disabled
+    lg.setLevel(logging.WARNING)
+    lg.disabled = False          # re-enable：防止 dictConfig disable_existing_loggers 污染
+    try:
+        c = TestClient(_app(maker, authorize_scm=None))
         r = c.post("/projects/p1/bind", json=_BODY)
-    # 门未生效 → 仍走 KE-RBAC（不 403/500，正常返回 200）
-    assert r.status_code == 200
-    # 但必须打出 WARNING 提示运维装配漏了
-    assert "未接线" in caplog.text
+    finally:
+        lg.removeHandler(handler)
+        lg.setLevel(old_level)
+        lg.disabled = old_disabled
+    assert r.status_code == 200            # 门未生效 → 仍走 KE-RBAC（不 403/500）
+    assert any("未接线" in m for m in records)   # 但确实打了 WARNING
