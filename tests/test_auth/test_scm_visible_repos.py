@@ -114,3 +114,50 @@ async def test_gh_visible_rate_limited_raises(httpx_mock):
                             status_code=403, headers={"x-ratelimit-remaining": "0"})
     with pytest.raises(httpx.HTTPError):
         await _gh_provider().list_user_visible_repos(user_token="UT", installation_id=55)
+
+
+_ISS = "https://gitlab.example.com"
+
+
+def _gl_provider():
+    from src.service.scm.gitlab_oidc import GitLabOidcProvider
+    from src.service.scm.config import GitLabOidcConfig
+    return GitLabOidcProvider(GitLabOidcConfig(issuer=_ISS, client_id="c", client_secret="s"))
+
+
+def _proj(pid, name, perms, visibility="private", default_branch="main"):
+    return {"id": pid, "path_with_namespace": name, "default_branch": default_branch,
+            "visibility": visibility, "permissions": perms}
+
+
+@pytest.mark.asyncio
+async def test_gl_visible_roles_and_inherited_floor(httpx_mock):
+    url = f"{_ISS}/api/v4/projects?membership=true&min_access_level=20&per_page=100&page=1"
+    httpx_mock.add_response(url=url, json=[
+        _proj(1, "g/maint", {"project_access": {"access_level": 40}, "group_access": None}),
+        _proj(2, "g/report", {"project_access": {"access_level": 20}, "group_access": None}),
+        _proj(3, "g/groupowner", {"project_access": None, "group_access": {"access_level": 50}}),
+        _proj(4, "g/inherited", {"project_access": None, "group_access": None}, visibility="public"),
+    ])
+    out = await _gl_provider().list_user_visible_repos(user_token="AT")
+    by = {v.repo.full_name: v.role for v in out}
+    assert by == {
+        "g/maint": ScmRole.CAN_BIND, "g/report": ScmRole.CAN_QUERY,
+        "g/groupowner": ScmRole.CAN_BIND,
+        "g/inherited": ScmRole.CAN_QUERY,        # 双 null（纯继承）→ 入选下限 can_query，不被误滤
+    }
+    pri = {v.repo.full_name: v.repo.private for v in out}
+    assert pri["g/inherited"] is False and pri["g/maint"] is True
+    assert all(req.headers["Authorization"] == "Bearer AT" for req in httpx_mock.get_requests())
+
+
+@pytest.mark.asyncio
+async def test_gl_visible_pagination(httpx_mock):
+    page1 = [_proj(i, f"g/r{i}", {"project_access": {"access_level": 20}}) for i in range(100)]
+    page2 = [_proj(100, "g/last", {"project_access": {"access_level": 40}})]
+    httpx_mock.add_response(
+        url=f"{_ISS}/api/v4/projects?membership=true&min_access_level=20&per_page=100&page=1", json=page1)
+    httpx_mock.add_response(
+        url=f"{_ISS}/api/v4/projects?membership=true&min_access_level=20&per_page=100&page=2", json=page2)
+    out = await _gl_provider().list_user_visible_repos(user_token="AT")
+    assert len(out) == 101 and out[-1].repo.full_name == "g/last" and out[-1].role == ScmRole.CAN_BIND

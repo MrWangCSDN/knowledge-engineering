@@ -310,3 +310,57 @@ class GitLabOidcProvider:
         # raise_for_status() 对非 2xx 均会抛，理论上走不到这行；
         # 保留此处是为了满足 Python 静态分析器（函数所有路径须有返回值）
         return ScmRole.NOT_VISIBLE
+
+    async def list_user_visible_repos(self, *, user_token: str) -> list["VisibleRepo"]:
+        """用户可见 GitLab project（GET /projects?membership=true&min_access_level=20，Bearer，分页）。
+        服务端 min_access_level=20 是可见性权威下限：入选即 ≥CAN_QUERY；permissions 仅用于升档 CAN_BIND
+        （permissions.{project_access,group_access} 在纯继承访问时可能皆 null，绝不据此判 NOT_VISIBLE）。"""
+        # 延迟导入：避免循环依赖，且只在真正调用时才加载这些数据类/枚举
+        from src.service.scm.base import RepoInfo, VisibleRepo, ScmRole
+        # 累加各页结果的列表；类型注解 list[VisibleRepo] 标明元素类型
+        out: list[VisibleRepo] = []
+        # GitLab 分页从 page=1 开始（per_page=100 是每页上限）
+        page = 1
+        # while True + 内部 break：典型"先取再判停"的分页循环写法
+        while True:
+            # _get_authed 用 Bearer user_token 发 GET，返回原始 resp（不 raise）
+            resp = await self._get_authed(
+                user_token, f"/api/v4/projects?membership=true&min_access_level=20&per_page=100&page={page}")
+            # raise_for_status：401/5xx 等非 2xx 抛 HTTPStatusError → 上层转 502
+            resp.raise_for_status()
+            # GitLab /projects 返回的是 JSON 数组（list），不是带 wrapper 的对象
+            projects = resp.json()
+            # 空数组：已无更多数据，结束分页
+            if not projects:
+                break
+            # 遍历当前页每个 project，映射成 VisibleRepo
+            for p in projects:
+                # `or {}`：permissions 缺失/为 None 时回退空 dict，避免后续 .get 报错
+                perms = p.get("permissions") or {}
+                # 收集"有值"的 access_level，用于后续取最大值
+                levels = []
+                # project_access / group_access 各自可能是 {"access_level": int} 或 None
+                pa, ga = perms.get("project_access"), perms.get("group_access")
+                # 仅当 access 对象存在且 access_level 非 None 时才纳入（避免把 null 当 0）
+                if pa and pa.get("access_level") is not None:
+                    levels.append(int(pa["access_level"]))
+                if ga and ga.get("access_level") is not None:
+                    levels.append(int(ga["access_level"]))
+                # 三元表达式：有有效值取 max，皆缺则为 None（纯继承访问场景）
+                level = max(levels) if levels else None
+                # 入选即 ≥CAN_QUERY；level≥40（Maintainer/Owner）才升档 CAN_BIND
+                # level is None（纯继承）→ 不升档，保持 CAN_QUERY，绝不判 NOT_VISIBLE
+                role = ScmRole.CAN_BIND if (level is not None and level >= 40) else ScmRole.CAN_QUERY
+                out.append(VisibleRepo(
+                    repo=RepoInfo(external_id=p["id"], full_name=p["path_with_namespace"],
+                                  # default_branch 可能缺失/为 None，回退 "main"
+                                  default_branch=p.get("default_branch") or "main",
+                                  # visibility != "public" 即视为私有（private/internal）
+                                  private=(p.get("visibility") != "public")),
+                    role=role))
+            # 不足整页说明是最后一页，结束（GitLab 满页才可能有下一页）
+            if len(projects) < 100:
+                break
+            # 否则翻到下一页继续
+            page += 1
+        return out
