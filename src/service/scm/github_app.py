@@ -222,6 +222,43 @@ class GitHubAppProvider:
             page += 1         # 翻到下一页继续
         return out
 
+    async def list_user_visible_repos(self, *, user_token: str, installation_id: int) -> list["VisibleRepo"]:
+        """该用户在指定 installation 下可见仓（user-token 视角，GET /user/installations/{id}/repositories）。
+        内联 permissions 推 role_name → github_role_to_scm；NOT_VISIBLE 滤除。
+        非限流 403/404（无安装访问）→ 空列表；限流 403/429 或 5xx → raise（上层 502）。"""
+        from src.service.scm.base import RepoInfo, VisibleRepo, ScmRole
+        from src.service.scm.scm_roles import github_role_to_scm
+        out: list[VisibleRepo] = []
+        page = 1
+        while True:
+            resp = await self._get_user(
+                user_token, f"/user/installations/{installation_id}/repositories?per_page=100&page={page}")
+            if resp.status_code in (403, 404) and not self._is_rate_limited(resp):
+                return []                                   # 调用者对该安装无访问 → 合法空集（fail-closed）
+            resp.raise_for_status()                          # 限流 403/429 或 5xx → HTTPStatusError → 上层 502
+            repos = resp.json().get("repositories", [])
+            if not repos:
+                break
+            for r in repos:
+                perms = r.get("permissions") or {}
+                role_name = ("admin" if perms.get("admin") else
+                             "maintain" if perms.get("maintain") else
+                             "write" if perms.get("push") else
+                             "triage" if perms.get("triage") else
+                             "read" if perms.get("pull") else None)
+                role = github_role_to_scm(role_name)
+                if role == ScmRole.NOT_VISIBLE:
+                    continue
+                out.append(VisibleRepo(
+                    repo=RepoInfo(external_id=r["id"], full_name=r["full_name"],
+                                  default_branch=r.get("default_branch") or "main",
+                                  private=bool(r.get("private"))),
+                    role=role))
+            if len(repos) < 100:
+                break
+            page += 1
+        return out
+
     async def resolve_repo_role(self, *, token: str, repo: str, principal) -> "ScmRole":
         """解析用户在仓 repo(=full_name) 的 ScmRole。token=user-to-server，principal=GitHub username(=scm_login)。
         状态矩阵：200→映射角色，限流403→抛，401→NOT_VISIBLE，403/404→只读回退，5xx→抛。"""
