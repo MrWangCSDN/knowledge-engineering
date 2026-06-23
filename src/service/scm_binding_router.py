@@ -9,13 +9,13 @@ from datetime import datetime, timezone, timedelta  # 时间处理：当前时�
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func, and_, or_  # func=聚合函数(count)；and_/or_=组合 WHERE 条件
 
 # 模块级 logger：日志名遵循 ke.scm.bind 命名空间，方便运维按前缀过滤
 _log = logging.getLogger("ke.scm.bind")
 
-from src.service.db_models_homepage import Project, IndexJob, ScmConnection  # ScmConnection 供 bind 门查连接
+from src.service.db_models_homepage import Project, IndexJob, ScmConnection, UserProjectAccess  # ScmConnection 供 bind 门查连接；UserProjectAccess 供 create_project 写入 owner 权限
 from src.service.indexing.queue import enqueue_index_job
 from src.service.indexing.states import QUEUED, DONE, FAILED, PHASE_ORDER  # 作业状态常量 + 工作阶段顺序
 from src.service.permission_deps import require_project_role  # KE RBAC 权限工厂
@@ -30,6 +30,34 @@ class BindRequest(BaseModel):
     repo_full_name: str
     ref: str
     ref_type: str = "branch"
+    subpath: Optional[str] = None
+
+
+class CreateProjectBindRequest(BaseModel):
+    """自助连接：从某 SCM 连接的某仓创建工程并绑定。
+
+    与 BindRequest 不同：此请求会新建 Project；BindRequest 是更新已有 Project。
+    """
+    # 工程业务可读 ID，如 'deposit-system'；格式：小写字母开头，2-64 字符，可含数字和连字符，不能以连字符结尾
+    # Field(pattern=...)：pydantic 内置的正则校验，不合规在路由前就抛 422 ValidationError
+    # 与 ProjectCreateRequest.id 使用完全相同的 pattern，保证全仓 slug 规范统一
+    project_id: str = Field(
+        ...,
+        pattern=r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$",
+        description="工程 ID（如 'deposit-system'）",
+    )
+    # 工程显示名，如 '存款系统'；min_length=1 防空串，max_length=128 防超长打爆 MySQL varchar
+    # 与 ProjectCreateRequest.name 约束完全一致
+    name: str = Field(..., min_length=1, max_length=128)
+    # SCM 平台仓库的数字 ID（GitHub = repository.id，BigInteger 防溢出）
+    repo_external_id: int
+    # 仓库全名，格式 "owner/repo"，如 "myorg/deposit-service"
+    repo_full_name: str
+    # 要索引的 ref，如 'main'、'master'、'v2.0.0'
+    ref: str
+    # ref 类型：branch（默认）或 tag（语义不同，pipeline 区别对待）
+    ref_type: str = "branch"
+    # 子路径：仅索引仓库内某个子目录；None = 全仓
     subpath: Optional[str] = None
 
 
@@ -168,5 +196,109 @@ def create_scm_binding_routes(
             "last_synced_at": _iso(proj.last_synced_at), "last_synced_commit": proj.last_synced_commit,
             "staleness_hours": staleness_hours, "is_stuck": stuck_id is not None,
             "latest_job": latest_job, "job_counts": job_counts, "last_error": last_error}
+
+    @router.post("/scm/connections/{connection_id}/projects")
+    async def create_project_from_connection(
+        connection_id: str,                    # 路径参数：SCM 连接 ID
+        body: CreateProjectBindRequest,        # Pydantic 自动从请求 JSON body 解析
+        user=Depends(get_current_user),        # 从 JWT 解析出当前登录用户
+        db=Depends(get_db),                    # 注入异步 DB session
+    ) -> dict:
+        """自助从 SCM 连接的某仓创建工程并入队首次全量索引。
+
+        鉴权层级（按顺序，先核验后写入）：
+          1. 连接归属（created_by == user.username）→ 404
+          2. App 连接强制 SCM can_bind 门（PAT 以连接归属为门）→ 403
+          3. project_id 冲突检查 → 409
+          4. 建工程 + owner 授权 + 入队 full_index → 200
+
+        Args:
+            connection_id: 路径参数，SCM 连接的 ID（如 "conn-abc123"）
+            body: 请求体，含工程 ID、仓库信息、ref 等
+            user: 当前登录用户（从 JWT 解析）
+            db: 异步 DB session（SQLAlchemy 2.0）
+        Returns:
+            {"project_id": str, "job_id": str}
+        """
+        # ── 步骤 1：连接归属校验 ────────────────────────────────────────────
+        # db.get(Model, pk)：按主键查单条记录；连接不存在返回 None
+        conn = await db.get(ScmConnection, connection_id)
+        # getattr：防御性取属性，避免 user 对象意外缺少 username 属性
+        caller_username = getattr(user, "username", None)
+        # 三个判断合一：
+        #   conn is None          → 连接不存在
+        #   caller_username None  → user 异常（JWT 解析出问题）
+        #   created_by 不匹配     → 连接属于他人
+        # 统一 404：不泄露"连接属于他人"这一信息（防枚举他人连接 ID）
+        if conn is None or caller_username is None or conn.created_by != caller_username:
+            raise HTTPException(status_code=404, detail="连接不存在")
+
+        # ── 步骤 2：SCM 授权门（App 连接必须 can_bind；PAT 以连接归属为门）──
+        # PAT 连接：auth_type="pat"，连接归属已足够（步骤 1 通过即可），不调 authorize_scm
+        if conn.auth_type != "pat":
+            # 非 PAT（如 github_app）：必须有 authorize_scm；否则说明装配漏了 → 503
+            if authorize_scm is None:
+                # 工厂函数没传 authorize_scm，但连接是 App 类型，安全失败不放行
+                raise HTTPException(status_code=503, detail="SCM 授权未装配")
+            # 调用 authorize_scm 查询调用者对目标仓的实际 SCM 权限
+            # need_bind=True：告知授权函数这是 bind 操作（GitHub App 可区分 read/write）
+            role = await authorize_scm(
+                db,
+                user=user,
+                conn=conn,
+                repo_full_name=body.repo_full_name,
+                repo_external_id=body.repo_external_id,
+                need_bind=True,
+            )
+            # 只有 CAN_BIND（maintainer/admin）才能自助建工程
+            if role != ScmRole.CAN_BIND:
+                raise HTTPException(status_code=403, detail="无该仓 maintainer/admin 权限，不能连接")
+
+        # ── 步骤 3：project_id 冲突检查 ─────────────────────────────────────
+        # db.get(Project, pk)：按主键查 Project；不为 None 表示 ID 已占用
+        if await db.get(Project, body.project_id) is not None:
+            # 已存在同 ID 工程 → 409 Conflict，拒绝覆盖（幂等性保护）
+            raise HTTPException(status_code=409, detail="工程 ID 已存在")
+
+        # ── 步骤 4：建工程 + 创建者 owner + 入队首次全量索引 ───────────────────
+        # 构造 Project ORM 对象，status="indexing" 表示已入队等待 worker
+        p = Project(
+            id=body.project_id,
+            name=body.name,
+            status="indexing",                          # 工程状态：等待首次索引
+            scm_connection_id=connection_id,            # 绑定到本次用的 SCM 连接
+            repo_external_id=body.repo_external_id,     # SCM 平台仓库数字 ID
+            repo_full_name=body.repo_full_name,         # "owner/repo" 格式
+            ref=body.ref,                               # 目标分支/tag
+            ref_type=body.ref_type,                     # "branch" 或 "tag"
+            subpath=body.subpath,                       # 子路径（可为 None）
+            created_by=caller_username,                  # 记录创建人 username，与 project_router/模型约定一致
+        )
+        # db.add(p)：把 ORM 对象纳入当前 session 追踪（相当于 INSERT 待执行）
+        db.add(p)
+        # 同时写入创建者的 owner 权限——让创建者能直接访问自己建的工程
+        # UserProjectAccess.user_id 是 int（FK → users.id），user.id 本身就是 int
+        db.add(UserProjectAccess(
+            user_id=user.id,       # int；FK 约束指向 users.id
+            project_id=body.project_id,
+            role="owner",          # 创建者是 owner，拥有最高权限
+        ))
+        # await db.flush()：把 Project/UserProjectAccess 刷入事务（不 commit，但 DB 已可见）
+        # 目的：enqueue_index_job 内部会 flush IndexJob，IndexJob.project_id 有外键约束
+        # 必须先让 Project 在同一事务里可见，否则外键约束失败
+        await db.flush()
+        # 入队首次全量索引作业（type_="full_index"，trigger="manual"）
+        # enqueue_index_job 内部会 session.add + session.flush，返回已 flush 的 IndexJob
+        job = await enqueue_index_job(
+            db,
+            project_id=body.project_id,
+            type_="full_index",   # 首次全量索引
+            trigger="manual",     # 由用户手动触发（区别于 webhook 自动触发）
+        )
+        # await db.commit()：一次性提交所有写入：Project / UserProjectAccess / IndexJob
+        # commit 后数据持久化，其他 session 才能看到
+        await db.commit()
+        # 返回工程 ID 和作业 ID，供前端跳转进度页（如 /projects/newp/index-status）
+        return {"project_id": body.project_id, "job_id": job.id}
 
     return router
