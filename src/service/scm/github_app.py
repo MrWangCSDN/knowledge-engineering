@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -340,6 +342,9 @@ async def shallow_clone(clone_url_https: str, ref: str, dest: str,
                         token: Optional[str], subpath: Optional[str] = None) -> str:
     """浅克隆指定分支到 dest，返回 HEAD commit sha（40 hex）。subpath 非空时启用 sparse-checkout。"""
     auth_url = _inject_token(clone_url_https, token)
+    # 复用同一 dest 时（重试/重复索引）git clone 会因目录非空失败；先清掉旧目录保证干净克隆。
+    if os.path.isdir(dest):
+        shutil.rmtree(dest, ignore_errors=True)
     if subpath:
         # sparse-checkout 流程：先 no-checkout 克隆骨架，再设置稀疏路径，最后 checkout
         await _run(["git", "clone", "--depth", "1", "--branch", ref, "--single-branch",
