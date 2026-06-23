@@ -467,6 +467,8 @@ def test_create_project_happy_path(client, session_maker):
             assert p.scm_connection_id == "c1", f"Project.scm_connection_id 应为 c1，实际：{p.scm_connection_id}"
             # repo_full_name 应与请求体一致
             assert p.repo_full_name == "alice/newp", f"Project.repo_full_name 不对：{p.repo_full_name}"
+            # created_by 应是 username（"alice"），而不是 user.id 数字字符串
+            assert p.created_by == "alice", f"Project.created_by 应为 username 'alice'，实际：{p.created_by}"
 
             # 检查 UserProjectAccess（alice 应有 owner 角色）
             # 组合主键查询：get(Model, (pk1, pk2))
@@ -490,3 +492,204 @@ def test_create_project_happy_path(client, session_maker):
 
     # asyncio.run：在同步测试函数里运行 async 查询协程
     asyncio.run(check_db())
+
+
+# ─── Task 6：非法 project_id / 空 name → 422（Pydantic 输入校验） ──────────────
+
+def test_create_project_empty_project_id_422(client):
+    """project_id="" 空串 → 422。
+
+    CreateProjectBindRequest.project_id 有 pattern 校验（slug 格式），
+    空串不匹配 ^[a-z][a-z0-9-]{0,62}[a-z0-9]$ → Pydantic 在路由前拦下，返回 422。
+    """
+    tok = _login(client, "alice")
+    url = _ENDPOINT.format(connection_id="c1")
+    # 用空字符串覆盖 project_id
+    body = {**_BODY, "project_id": ""}
+    r = client.post(url, json=body, headers=_auth(tok))
+    # Pydantic ValidationError → FastAPI 转 422 Unprocessable Entity
+    assert r.status_code == 422, f"空 project_id 应报 422，实际: {r.status_code} {r.text}"
+
+
+def test_create_project_invalid_project_id_422(client):
+    """project_id 含大写字母 / 超长 → 422。
+
+    'X' * 70 = 70 字符，超过 slug 最大 64 字符且含大写，不满足 pattern → 422。
+    """
+    tok = _login(client, "alice")
+    url = _ENDPOINT.format(connection_id="c1")
+    # 70 个大写 X：含大写字母 + 超长，双重不合规
+    body = {**_BODY, "project_id": "X" * 70}
+    r = client.post(url, json=body, headers=_auth(tok))
+    assert r.status_code == 422, f"非法 project_id 应报 422，实际: {r.status_code} {r.text}"
+
+
+def test_create_project_empty_name_422(client):
+    """name="" 空串 → 422。
+
+    CreateProjectBindRequest.name 有 min_length=1 校验，空串直接 422。
+    """
+    tok = _login(client, "alice")
+    url = _ENDPOINT.format(connection_id="c1")
+    # 用空字符串覆盖 name
+    body = {**_BODY, "name": ""}
+    r = client.post(url, json=body, headers=_auth(tok))
+    assert r.status_code == 422, f"空 name 应报 422，实际: {r.status_code} {r.text}"
+
+
+# ─── Task 7：commit/enqueue 失败回滚（三表零残留） ───────────────────────────────
+
+def test_create_project_enqueue_failure_rollback(session_maker, monkeypatch):
+    """enqueue_index_job 抛异常 → 事务回滚，三表零新增。
+
+    monkeypatch 把 scm_binding_router 模块里引用的 enqueue_index_job 替换成
+    始终抛 RuntimeError 的版本，模拟队列写入失败。
+    断言：
+      1. 端点返回 5xx（DB 异常未被吞）
+      2. Project / UserProjectAccess / IndexJob 均无新增行（db 事务已回滚）
+    """
+    import asyncio  # 同步测试函数里运行 async 查询
+
+    # monkeypatch 是 pytest 内置 fixture，可在测试结束后自动还原所有 patch
+    # 把 scm_binding_router 模块里对 enqueue_index_job 的引用换成会抛错的版本
+    # 注意：patch 目标是引用处（scm_binding_router 模块），而非定义处（indexing.queue）
+    import src.service.scm_binding_router as sbr   # 导入被测模块，方便用 monkeypatch.setattr
+
+    async def boom(*args, **kwargs):
+        """替代 enqueue_index_job 的 fake：始终抛 RuntimeError，模拟队列写入失败。
+
+        *args/**kwargs：接受任意参数（与真实签名解耦），避免因签名不匹配报错。
+        """
+        raise RuntimeError("fake enqueue failure")
+
+    # monkeypatch.setattr(模块, 属性名, 新值)：把模块里的 enqueue_index_job 替换掉
+    monkeypatch.setattr(sbr, "enqueue_index_job", boom)
+
+    # ── 构造注入了 monkeypatched 路由的 mini-app ──
+    # monkeypatch 已在 session_maker fixture 里设好 KE_JWT_SECRET/KE_COOKIE_SECURE
+    monkeypatch.setenv("KE_JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("KE_COOKIE_SECURE", "false")
+
+    from fastapi import FastAPI             # 构造测试用 mini-app
+    from fastapi.testclient import TestClient  # 同步测试客户端
+    from src.service.db import get_db         # 生产 get_db（要被 override）
+    from src.service.auth_router import router as auth_router  # 提供 /auth/login
+    from src.service.auth_dependencies import get_current_user  # JWT 解析依赖
+    from src.service.scm.base import ScmRole  # CAN_BIND 枚举值
+
+    app = FastAPI()
+    app.include_router(auth_router)
+
+    # authorize_scm：始终返回 CAN_BIND，让 SCM 门不拦截（聚焦测 enqueue 失败场景）
+    async def fake_authorize(db, *, user, conn, repo_full_name, repo_external_id, need_bind):
+        """Fake：始终 CAN_BIND，排除 SCM 门的干扰。"""
+        return ScmRole.CAN_BIND
+
+    # 注意：create_scm_binding_routes 会在模块里 import enqueue_index_job，
+    # 但 monkeypatch.setattr 已替换了 sbr.enqueue_index_job，路由执行时会用 boom
+    app.include_router(create_scm_binding_routes(
+        get_current_user=get_current_user,
+        get_db=get_db,
+        authorize_scm=fake_authorize,
+    ))
+
+    # override get_db → 使用内存 SQLite session（与其他测试一致）
+    async def override_db():
+        """替换 get_db → 使用内存 SQLite session。"""
+        async with session_maker() as s:
+            yield s
+            await s.commit()
+
+    app.dependency_overrides[get_db] = override_db
+
+    # raise_server_exceptions=False：不把 500 变成 pytest 异常，让我们直接检查状态码
+    # 默认 raise_server_exceptions=True 会把 500 转成 Python 异常（测试直接报错）
+    c = TestClient(app, raise_server_exceptions=False)
+
+    # ── 记录基线行数 ──
+    async def count_rows():
+        """查询三表当前总行数。"""
+        async with session_maker() as s:
+            p = (await s.execute(select(Project))).scalars().all()
+            a = (await s.execute(select(UserProjectAccess))).scalars().all()
+            j = (await s.execute(select(IndexJob))).scalars().all()
+            return len(p), len(a), len(j)
+
+    p_before, a_before, j_before = asyncio.run(count_rows())
+
+    # ── 发请求 ──
+    tok = _login(c, "alice")
+    url = _ENDPOINT.format(connection_id="c1")
+    # project_id="rollback-test"：合法 slug，不与已有 seed 数据冲突
+    body = {**_BODY, "project_id": "rollback-test"}
+    r = c.post(url, json=body, headers=_auth(tok))
+
+    # ── 断言 1：端点返回 5xx（异常未被吞）──
+    assert r.status_code >= 500, f"enqueue 失败应返回 5xx，实际: {r.status_code} {r.text}"
+
+    # ── 断言 2：三表零新增 ──
+    p_after, a_after, j_after = asyncio.run(count_rows())
+    assert p_after == p_before, "enqueue 失败时 Project 不应有残留写入"
+    assert a_after == a_before, "enqueue 失败时 UserProjectAccess 不应有残留写入"
+    assert j_after == j_before, "enqueue 失败时 IndexJob 不应有残留写入"
+
+
+# ─── Task 8：caller_username=None 或 conn.created_by=NULL → 404（防 NULL==NULL 绕过）───
+
+def test_create_project_null_username_404(session_maker, monkeypatch):
+    """conn.created_by=NULL + 调用方 username 有值 → 404（NULL 不能匹配任何 username）。
+
+    场景：seed 一条 created_by=None 的连接，alice 用自己的 username 去访问 → 不应绑过去。
+    防御 NULL==NULL 绕过：若实现写成 conn.created_by == caller_username 而 Python
+    None == None 为 True，则 created_by=NULL 的连接会被任意有效用户绕过归属检查。
+    端点实现在 caller_username is None 前先判，也要保证 conn.created_by=None 时不放行。
+    """
+    import asyncio  # 同步测试里运行 async 查询
+
+    # seed 一条 created_by=None 的连接
+    monkeypatch.setenv("KE_JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("KE_COOKIE_SECURE", "false")
+
+    async def seed_null_conn():
+        """向内存 DB 添加 created_by=None 的连接 cnull。"""
+        async with session_maker() as s:
+            # ScmConnection(created_by=None)：模拟 DB 里有 created_by 为 NULL 的异常记录
+            s.add(ScmConnection(id="cnull", created_by=None, provider="github", auth_type="pat"))
+            await s.commit()
+
+    asyncio.run(seed_null_conn())
+
+    # ── 构造 mini-app ──
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.service.db import get_db
+    from src.service.auth_router import router as auth_router
+    from src.service.auth_dependencies import get_current_user
+    from src.service.scm.base import ScmRole
+
+    app = FastAPI()
+    app.include_router(auth_router)
+    app.include_router(create_scm_binding_routes(
+        get_current_user=get_current_user,
+        get_db=get_db,
+        authorize_scm=None,  # PAT 连接不走 authorize_scm，这里 None 也可
+    ))
+
+    async def override_db():
+        """替换 get_db → 使用内存 SQLite session。"""
+        async with session_maker() as s:
+            yield s
+            await s.commit()
+
+    app.dependency_overrides[get_db] = override_db
+    c = TestClient(app)
+
+    # alice 以自己身份访问 cnull 连接（cnull.created_by=None，alice.username="alice"）
+    tok = _login(c, "alice")
+    url = _ENDPOINT.format(connection_id="cnull")
+    r = c.post(url, json=_BODY, headers=_auth(tok))
+
+    # 无论 conn.created_by 是 None 还是其他人的 username，都应返回 404（归属不匹配）
+    assert r.status_code == 404, (
+        f"conn.created_by=NULL 时应返回 404（防止 NULL==NULL 绕过归属检查），实际: {r.status_code} {r.text}"
+    )

@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta  # 时间处理：当前时�
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func, and_, or_  # func=聚合函数(count)；and_/or_=组合 WHERE 条件
 
 # 模块级 logger：日志名遵循 ke.scm.bind 命名空间，方便运维按前缀过滤
@@ -38,10 +38,17 @@ class CreateProjectBindRequest(BaseModel):
 
     与 BindRequest 不同：此请求会新建 Project；BindRequest 是更新已有 Project。
     """
-    # 工程业务可读 ID，如 'deposit-system'；后端不生成，由调用方传入
-    project_id: str
-    # 工程显示名，如 '存款系统'
-    name: str
+    # 工程业务可读 ID，如 'deposit-system'；格式：小写字母开头，2-64 字符，可含数字和连字符，不能以连字符结尾
+    # Field(pattern=...)：pydantic 内置的正则校验，不合规在路由前就抛 422 ValidationError
+    # 与 ProjectCreateRequest.id 使用完全相同的 pattern，保证全仓 slug 规范统一
+    project_id: str = Field(
+        ...,
+        pattern=r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$",
+        description="工程 ID（如 'deposit-system'）",
+    )
+    # 工程显示名，如 '存款系统'；min_length=1 防空串，max_length=128 防超长打爆 MySQL varchar
+    # 与 ProjectCreateRequest.name 约束完全一致
+    name: str = Field(..., min_length=1, max_length=128)
     # SCM 平台仓库的数字 ID（GitHub = repository.id，BigInteger 防溢出）
     repo_external_id: int
     # 仓库全名，格式 "owner/repo"，如 "myorg/deposit-service"
@@ -265,7 +272,7 @@ def create_scm_binding_routes(
             ref=body.ref,                               # 目标分支/tag
             ref_type=body.ref_type,                     # "branch" 或 "tag"
             subpath=body.subpath,                       # 子路径（可为 None）
-            created_by=str(user.id),                    # 记录创建人 user.id（与 scm_router 约定一致）
+            created_by=caller_username,                  # 记录创建人 username，与 project_router/模型约定一致
         )
         # db.add(p)：把 ORM 对象纳入当前 session 追踪（相当于 INSERT 待执行）
         db.add(p)
