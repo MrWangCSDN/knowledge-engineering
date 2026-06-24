@@ -216,7 +216,10 @@ class KnowledgeStage:
                     neo4j_password=graph_cfg.neo4j_password or "password",
                     neo4j_database=graph_cfg.neo4j_database or "neo4j",
                 )
-                backend.clear()
+                # 多工程隔离（Phase1-T1）：这里构造 backend 时未传 project_id，
+                # 所以必须在 clear 时显式传 ctx.project_id，只清当前工程的图，
+                # 避免索引本工程时把其它已索引工程的图节点全删光。
+                backend.clear(project_id=ctx.project_id)
                 backend.close()
             except (OSError, ConnectionError, TimeoutError, ValueError, RuntimeError) as e:
                 _LOG.warning(

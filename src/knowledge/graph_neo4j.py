@@ -63,9 +63,26 @@ class Neo4jGraphBackend:
                 pass
             self._driver = None
 
-    def clear(self) -> None:
+    def clear(self, project_id: Optional[str] = None) -> None:
+        # 多工程隔离（Phase1-T1）：旧实现无条件清掉所有 Entity 节点，导致
+        # 索引第二个工程会把已索引工程的图全删光。改为：传了 project_id 时
+        # 只清该工程的节点（节点写入时已带 project_id 属性，见 add_node）。
+        #
+        # 注意：Neo4j 的「标签」（self.LABEL = "Entity"）不能参数化，只能拼进
+        # Cypher 文本；但 project_id 是普通属性值，必须走 $pid 参数（绝不拼字符串，
+        # 否则有 Cypher 注入风险，且字符串拼接对特殊字符不安全）。
         with self._driver.session(database=self._database) as session:
-            session.run("MATCH (n:" + self.LABEL + ") DETACH DELETE n")
+            if project_id:
+                # 内联 map 形式 {project_id: $pid} 直接在 MATCH 里按属性过滤，
+                # 只命中该工程的节点；DETACH DELETE 连同其关系一并删除。
+                session.run(
+                    f"MATCH (n:{self.LABEL} {{project_id: $pid}}) DETACH DELETE n",
+                    pid=project_id,
+                )
+            else:
+                # project_id 为 None / 空字符串 等假值 → 保持旧的全库清除语义，
+                # 向后兼容现有单测、CLI 与 teardown（单租户 / legacy 模式）。
+                session.run(f"MATCH (n:{self.LABEL}) DETACH DELETE n")
 
     def add_node(self, nid: str, **attrs: Any) -> None:
         # v2.0：当构造时传入了 project_id，自动注入到每个节点的属性中，

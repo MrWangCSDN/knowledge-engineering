@@ -69,7 +69,10 @@ def _sync_graph_to_neo4j(
         # 最多重试 2 次（每次新连接），仍失败再上抛
         for attempt in range(3):
             try:
-                backend.clear()
+                # 多工程隔离（Phase1-T1）：只清当前工程的图节点，避免清掉其它已索引工程。
+                # backend 构造时已带 project_id（见上方 create(...)），但 clear 仍显式传一次，
+                # 语义更清晰且不依赖 backend 内部状态。
+                backend.clear(project_id=project_id)
                 break
             except Exception as e:
                 if attempt < 2 and ('defunct' in str(e).lower() or 'unavailable' in str(e).lower()):
