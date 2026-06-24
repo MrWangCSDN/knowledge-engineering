@@ -2,6 +2,9 @@
 """按 job 的工程绑定装配真实 indexer（job→project→scm_connection→provider→make_real_indexer）。设计 §9。"""
 from __future__ import annotations
 
+# os.path.join 用于拼接本地仓库路径（与 real_indexer 内 clone 目标同一公式）
+import os
+
 # select 是 SQLAlchemy 的查询构造函数，用于构建 SELECT 语句
 from sqlalchemy import select
 
@@ -11,13 +14,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 # 导入 ORM 模型：Project（工程）和 ScmConnection（SCM 连接）
 from src.service.db_models_homepage import Project, ScmConnection
 
-# make_real_indexer：工厂函数，返回真实 IndexerFn（clone + pipeline）
+# make_real_indexer：工厂函数，返回真实 IndexerFn（clone + codegraph + pipeline）
 # _default_run_pipeline：默认 shell pipeline 执行器，可在测试中注入替代实现
-from src.service.indexing.real_indexer import make_real_indexer, _default_run_pipeline
+# _default_run_codegraph：默认 codegraph 建库执行器，可在测试中注入替代实现
+from src.service.indexing.real_indexer import (
+    make_real_indexer, _default_run_pipeline, _default_run_codegraph,
+)
 
 
 def build_indexer_for_job(maker: async_sessionmaker, *, provider, repos_root: str,
-                          run_pipeline=_default_run_pipeline):
+                          run_pipeline=_default_run_pipeline,
+                          run_codegraph=_default_run_codegraph):
     """返回 IndexerFn：运行时按 job.project_id 解析绑定，再委托 make_real_indexer。
 
     Args:
@@ -25,6 +32,7 @@ def build_indexer_for_job(maker: async_sessionmaker, *, provider, repos_root: st
         provider:     SCM 提供者对象（如 GitHubAppProvider），实现 clone() 方法
         repos_root:   本地仓库根目录（如 '/opt/ke-repos'），clone 目标在此下
         run_pipeline: pipeline 执行函数，默认调用真实 shell；测试可注入 fake
+        run_codegraph: codegraph 建库函数，默认跑真二进制；测试可注入 fake
 
     Returns:
         IndexerFn — 签名为 async (job, progress) -> str（commit sha）
@@ -69,6 +77,17 @@ def build_indexer_for_job(maker: async_sessionmaker, *, provider, repos_root: st
                     "（github_installation_id 为空），当前 worker 仅支持 GitHub App 安装"
                 )
 
+            # 持久化 repo_local_path：QA 的图导航靠 Project.repo_local_path 定位
+            # <repo>/.codegraph/codegraph.db；这里写成 repos_root/project_id（= real_indexer
+            # 内 clone 的 dest，同一公式），保证 QA 找得到下面索引流程要建的库。
+            # 该 session 本来只读不 commit（仅解析绑定），所以写后需显式 commit 才能落库。
+            expected_local = os.path.join(repos_root, job.project_id)
+            # 仅在值变化时写，避免无谓的 UPDATE（幂等，重复索引不会反复刷盘）
+            if p.repo_local_path != expected_local:
+                p.repo_local_path = expected_local
+                # 显式 commit：本函数内此 session 不再有别处 commit，不提交则 repo_local_path 丢失
+                await s.commit()
+
         # make_real_indexer 返回一个 IndexerFn（闭包），把 clone 参数预绑定进去
         # 这里用关键字参数（keyword-only）显式传入所有配置，提高可读性
         real = make_real_indexer(
@@ -79,6 +98,7 @@ def build_indexer_for_job(maker: async_sessionmaker, *, provider, repos_root: st
             subpath=subpath,
             repos_root=repos_root,
             run_pipeline=run_pipeline,
+            run_codegraph=run_codegraph,
         )
 
         # await 是 Python asyncio 协程调用语法；real() 是一个异步函数，需要 await 等待结果
