@@ -14,9 +14,15 @@ from src.service.indexing.states import (
 RunPipelineFn = Callable[..., Awaitable[str]]
 
 
-def build_pipeline_args(repo_dir: str, output_dir: str) -> list[str]:
-    """构造 pipeline CLI 命令（含解读）。"""
-    return ["python", "-m", "src.pipeline.cli", repo_dir,
+def build_pipeline_args(repo_dir: str, output_dir: str, project_id: str) -> list[str]:
+    """构造 pipeline CLI 命令（含解读）。
+
+    repo_dir 用 --repo-path 传（不再当 positional，cli.py 的 argparse 没有 positional 参数）；
+    project_id 用 --project-id 传，确保每个工程索引自己的代码、用自己的 project_id（scoped clear 才生效）。
+    """
+    return ["python", "-m", "src.pipeline.cli",
+            "--repo-path", repo_dir,
+            "--project-id", project_id,
             "--with-interpretation", "--output-dir", output_dir]
 
 
@@ -42,7 +48,8 @@ def make_real_indexer(*, provider, installation_id: int, full_name: str, ref: st
         out_dir = os.path.join(repos_root, f"{job.project_id}.out")
         await progress(CROSS_SERVICE, 45)
         await progress(EMBEDDING, 60)
-        await run_pipeline(build_pipeline_args(dest, out_dir), cwd=None)
+        # 透传 job.project_id：让 pipeline 用本工程的 project_id 索引克隆仓（多工程隔离）
+        await run_pipeline(build_pipeline_args(dest, out_dir, job.project_id), cwd=None)
         await progress(INTERPRETING, 90)
         return commit_sha
     return _indexer

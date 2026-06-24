@@ -151,7 +151,21 @@ class BaseWeaviateStore(ABC):
     def _get_collection(self):
         return self._client.collections.get(self._collection_name)
 
-    def clear(self) -> None:
+    def clear(self, tenant: Optional[str] = None) -> None:
+        # 多工程隔离（Phase1-T2）：tenant 为真值时只清该租户，否则保持旧的全集合删。
+        # tenant 真值分支：用 v4 Multi-Tenancy API 移除单个租户的数据，
+        # 绝不删整个集合（删整集合会清掉所有工程的代码向量 → 多工程互毁）。
+        if tenant:
+            try:
+                coll = self._get_collection()
+                # tenants.remove 接受 Sequence[str]；建表时 auto_tenant_creation=True，
+                # 下次 with_tenant(tenant) 写入会自动重建该租户，故无需重建 schema。
+                # remove 对不存在的租户可能抛异常，整段 best-effort 吞掉。
+                coll.tenants.remove([tenant])
+            except Exception:
+                pass
+            return
+        # tenant 为 None / 空：保持现状全集合删 + 重建 schema（向后兼容单租户 / legacy / 现有测试）。
         try:
             if self._client and self._client.collections.exists(self._collection_name):
                 self._client.collections.delete(self._collection_name)
