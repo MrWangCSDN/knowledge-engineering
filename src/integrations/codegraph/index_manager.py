@@ -1,9 +1,25 @@
 # src/integrations/codegraph/index_manager.py
-"""跑 `codegraph index` 给某工程建/更新 .codegraph.db（子进程）。"""
+"""跑 `codegraph init` + `codegraph index` 给某工程建/更新 .codegraph.db（子进程）。"""
 from __future__ import annotations  # 允许在类型注解里用 str 引用自身类（向前引用），Python 3.10+ 内置，这里为 3.9 兼容
 
 import subprocess              # subprocess 模块：在 Python 中启动并管理外部子进程
 from typing import Optional    # Optional[X] 等价于 Union[X, None]，表示该参数可以是 X 类型或 None
+
+
+def build_init_command(repo_local_path: str) -> list[str]:
+    """构造 codegraph init 命令（纯函数，便于单测）。
+
+    为什么需要 init：`codegraph index` 要求工程目录先被 `codegraph init` 初始化，
+    否则报 "CodeGraph not initialized in <path>，Run codegraph init first" 并退出码非 0。
+    worker 克隆下来的新仓从未 init 过，所以索引前必须先跑一次 init。
+    init 幂等：对已初始化的仓再 init 仍返回 0（提示用 index 重新索引），所以每次索引前都 init 是安全的。
+
+    Args:
+        repo_local_path: 工程根目录本地绝对路径，例如 "/repos/mall-swarm"
+    Returns:
+        命令列表，例如 ["codegraph", "init", "/repos/mall-swarm"]
+    """
+    return ["codegraph", "init", repo_local_path]
 
 
 def build_index_command(repo_local_path: str, force: bool = False) -> list[str]:
@@ -43,6 +59,18 @@ def run_index(repo_local_path: str, force: bool = False,
         subprocess.CalledProcessError: 进程退出码非 0 时（check=True 触发）
         subprocess.TimeoutExpired: 超时时
     """
+    # 第一步：codegraph init —— 克隆仓首次必须初始化，否则 `codegraph index` 报
+    # "CodeGraph not initialized" 退出码非 0。init 幂等，对已初始化仓再跑也返回 0。
+    # check=True：init 失败（如 codegraph 未安装→FileNotFoundError、或其它错）直接抛，
+    # 由调用方 fail-fast（real_indexer 不吞 → runner 标作业 failed）。
+    subprocess.run(
+        build_init_command(repo_local_path),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+    # 第二步：codegraph index —— 真正建/更新 .codegraph/codegraph.db。
     # subprocess.run 同步等待子进程结束后返回
     # capture_output=True：把子进程的 stdout/stderr 捕获到返回对象，而不是直接打印到终端
     # text=True：把 stdout/stderr 解码为 str（默认是 bytes）
