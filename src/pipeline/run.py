@@ -91,6 +91,9 @@ def run_pipeline(
     snapshot_repo: SnapshotRepository | None = None,
     app_context: AppContext | None = None,
     project_id: Optional[str] = None,
+    # repo_path：覆盖 config.repo.path，让 worker 指定"索引哪个克隆仓"；
+    # 不传则用 config YAML 里写死的路径（默认指向 mall-swarm）。
+    repo_path: Optional[str] = None,
     # force_full=True 时清 Weaviate tenant + 删 embedding checkpoint，跑全量；
     # 默认 False 是断点续跑（已 embedded 的 entity 跳过）。
     # 来源：CLI --force-full → cli.py → 本参数 → KnowledgeStage → graph.build_from
@@ -110,8 +113,17 @@ def run_pipeline(
         多租户 project_id，写入 Weaviate tenant 与 Neo4j 节点属性。
         优先级：本参数 > config.repo.project_id > "default"。
         新工程应在 config YAML 中配置 repo.project_id，或在调用时传入本参数。
+
+    repo_path:
+        覆盖 config.repo.path 的代码库根目录。worker 索引克隆仓时传入其本地路径，
+        让每个工程索引自己的代码；不传则沿用 config 里写死的路径。
     """
     config = load_config(config_path)
+    # repo_path 覆盖：worker 传克隆仓路径时，覆盖 config.repo.path，
+    # 否则只能用 config 里写死的路径（默认 mall-swarm），所有工程会塌缩成同一份代码。
+    # RepoConfig 是普通 pydantic BaseModel（未 frozen），属性默认可变，直接赋值即可。
+    if repo_path:
+        config.repo.path = repo_path
     app_ctx = app_context if app_context is not None else AppContext.get()
     app_ctx.set_config(config.model_dump())
     out_dir = Path(output_dir) if output_dir else None

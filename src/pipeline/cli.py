@@ -19,6 +19,12 @@ def main() -> None:
         help="执行到该层后停止（默认执行到 knowledge）",
     )
     parser.add_argument("--output-dir", "-o", default=None, help="中间结果输出目录（structure_facts.json 等）")
+    # --repo-path：覆盖 config.repo.path，worker 索引克隆仓时传入其本地路径
+    parser.add_argument("--repo-path", default=None,
+                        help="覆盖 config.repo.path：要索引的代码库根目录（worker 传克隆仓路径）")
+    # --project-id：覆盖 config.repo.project_id，多租户隔离的工程标识
+    parser.add_argument("--project-id", default=None,
+                        help="覆盖 config.repo.project_id：多租户工程标识（写入 Neo4j 节点属性 / Weaviate tenant）")
     # --force-full：强制全量重跑 embedding（删 checkpoint + 清 Weaviate tenant）
     # action="store_true"：用户写 --force-full 即 True，不写则默认 False
     parser.add_argument(
@@ -60,6 +66,9 @@ def main() -> None:
         until=args.until,
         output_dir=args.output_dir,
         include_method_interpretation=include_interp,
+        # argparse 把 --repo-path / --project-id 转成 args.repo_path / args.project_id
+        repo_path=args.repo_path,
+        project_id=args.project_id,
         # args.force_full 由 argparse 把 --force-full 自动转 snake_case
         force_full=args.force_full,
     )
