@@ -202,8 +202,12 @@ class KnowledgeStage:
         graph_cfg = k.graph
         vector_cfg = k.vectordb_code
         graph_backend = graph_cfg.backend
+        # Neo4j 仍每次按工程清（上个任务已 scope 到 project_id）；
+        # Weaviate 代码向量仅在 force_full 时清本工程 tenant，否则保留并按 checkpoint 续跑。
+        # 文案如实反映，避免"声称清了向量、实际续跑没清"的误导。
         ctx.step_callback(
-            "⑤ 清理 Neo4j（Entity）与 Weaviate 代码库"
+            "⑤ 清理 Neo4j（本工程 Entity）"
+            + ("、清本工程代码向量" if ctx.force_full else "（保留代码向量，按 checkpoint 续跑）")
             + (" + 拓扑解读库 …" if ctx.run_interpret_phase else "（保留拓扑解读库）…")
         )
 
@@ -248,8 +252,12 @@ class KnowledgeStage:
                     collection_name=vector_cfg.collection_name or DEFAULT_COLLECTION_CODE_ENTITY,
                     weaviate_api_key=vector_cfg.weaviate_api_key,
                 )
-                if vs is not None:
-                    vs.clear()
+                # 多工程隔离（Phase1-T2）：仅 force_full 才清向量，且只清当前工程的 tenant。
+                # 续跑（force_full=False，默认）完全不清向量 —— 否则会与 embedding
+                # checkpoint 不一致（checkpoint 说做过、库却空了 → QA 召回为空），
+                # 且按 tenant 清避免把其它已索引工程的代码向量一并删光。
+                if vs is not None and ctx.force_full:
+                    vs.clear(tenant=ctx.project_id)
             except (OSError, ConnectionError, TimeoutError, ValueError, RuntimeError) as e:
                 _LOG.warning(
                     "知识层：清理 Weaviate 代码向量库失败（已忽略）: %s: %s",
